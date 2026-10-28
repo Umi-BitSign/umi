@@ -446,6 +446,15 @@ client selects C7+ participation from the requested cohort's signed history.
 It does not install new code in the background; a new server deployment alone
 does not update an installed client.
 
+The optional non-commercial model route requires a release that understands
+`umi-model-bundle/2` and `fetch-cohort-model-licenses`. Rerun this installer
+before opting in; older clients understand only the original bundle format.
+Use the [conditional model commands](../reference/commands.md#optional-non-commercial-model-terms)
+to authenticate the cohort's published adoption and sign fresh consent for a
+new model. Installing a client does not choose a license or modify an existing
+submission. Existing bundle `/1` requests continue through their original terms
+and can resume unchanged.
+
 This mode does not discover, stop or change an endpoint service. It does not read
 wallets, migrate a startup file, change service accounts, move grant or protocol
 journals, sign consent or enroll a model. It works alongside an older, manual,

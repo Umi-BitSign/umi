@@ -24,6 +24,9 @@ _HEX_DIGITS = b"0123456789abcdef"
 _SHA = re.compile(r"[0-9a-f]{64}")
 _SCHEMA = "umi-weight-evidence-recipe/1"
 _PREPARED_ISSUER = object()
+# R2 request geometry, not proof semantics. Retain large shared objects and
+# combine only adjacent smaller segments; the original /1 decoder is unchanged.
+_MIN_REMOTE_OBJECT_BYTES = 4 * 1024
 
 
 def checked_digest(value: str) -> str:
@@ -70,7 +73,9 @@ class PreparedEvidenceEncoding:
     _issuer: object = field(default=None, repr=False, compare=False)
     _binding: tuple = field(default=(), repr=False, compare=False)
 
-    def for_bytes(self, raw: bytes, *, kind: str) -> EncodedEvidence:
+    def for_bytes(self, raw: bytes, *, kind: str, coalesce_small: bool = False) -> EncodedEvidence:
+        if type(coalesce_small) is not bool:
+            raise ValueError("evidence representation selection must be explicit")
         if (
             type(self) is not PreparedEvidenceEncoding
             or self._issuer is not _PREPARED_ISSUER
@@ -88,7 +93,52 @@ class PreparedEvidenceEncoding:
             or raw != self.raw
         ):
             raise ValueError("prepared encoding differs from its decoded original bytes")
+        if coalesce_small:
+            return _coalesce_prepared(self)
         return EncodedEvidence(self.sha256, len(raw), self.recipe, dict(self.objects))
+
+
+def _coalesce_prepared(prepared):
+    # Called only after the operation-local issuer and exact-byte binding have
+    # passed. Parse already checked recipe metadata; do not rehash or re-decode
+    # retained large objects or repeat the native proof verifier.
+    original = dict(prepared.objects)
+    segments, objects, pending = [], {}, []
+    offset = start = 0
+
+    def flush():
+        if not pending:
+            return
+        if len(pending) == 1:
+            mode, sha, size = pending[0]
+            segments.append([mode, sha, size])
+            objects[sha] = original[sha]
+        else:
+            literal = prepared.raw[start:offset]
+            sha = (
+                prepared.sha256
+                if start == 0 and offset == len(prepared.raw)
+                else hashlib.sha256(literal).hexdigest()
+            )
+            segments.append(["b", sha, len(literal)])
+            objects[sha] = literal
+        pending.clear()
+
+    for mode, sha, size in json.loads(prepared.recipe)["segments"]:
+        if size >= _MIN_REMOTE_OBJECT_BYTES:
+            flush()
+            segments.append([mode, sha, size])
+            objects[sha] = original[sha]
+        else:
+            if not pending:
+                start = offset
+            pending.append((mode, sha, size))
+        offset += size * 2 if mode == "x" else size
+    flush()
+    recipe = canonical_json_bytes(
+        {"schema": _SCHEMA, "length": len(prepared.raw), "segments": segments}
+    )
+    return EncodedEvidence(prepared.sha256, len(prepared.raw), recipe, objects)
 
 
 def _prepare_encoding(raw, kind, sha256, recipe, objects, *, canonical_encoder=False):

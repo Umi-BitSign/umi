@@ -285,15 +285,69 @@ class BundleFile(StrictProtocolModel):
         return value
 
 
+class ModelLicenseTermsAdoption(StrictProtocolModel):
+    """Quorum authorization for an additional, explicitly opted-in model route.
+
+    This never replaces the signed competition policy or the original terms.
+    Each participating model carries the exact authorization in its manifest.
+    """
+
+    schema_: Literal["umi-model-license-terms-adoption/1"] = Field(alias="schema")
+    policy_sha256: Hex32
+    authority_sha256: Hex32
+    cohort_sha256s: Annotated[tuple[Hex32, ...], Field(min_length=1, max_length=1024)]
+    first_cohort_sequence: Annotated[int, Field(ge=7, le=2**32 - 1)]
+    original_terms_sha256: Hex32
+    noncommercial_terms_sha256: Hex32
+    training_rights_policy_sha256: Hex32
+    operator_decision_sha256: Hex32
+    license_id: Literal["CC-BY-NC-SA-4.0"]
+    issued_at_block: Block
+    reason: Annotated[str, Field(min_length=8, max_length=1024)]
+
+    @model_validator(mode="after")
+    def additive_scope(self) -> Self:
+        if self.cohort_sha256s != tuple(sorted(set(self.cohort_sha256s))):
+            raise ValueError("model license adoption scope must be sorted and unique")
+        if self.original_terms_sha256 == self.noncommercial_terms_sha256:
+            raise ValueError("conditional model terms require distinct fresh consent")
+        if "0" * 64 in (
+            self.training_rights_policy_sha256,
+            self.operator_decision_sha256,
+            self.noncommercial_terms_sha256,
+        ):
+            raise ValueError(
+                "conditional model terms require retained rights and operator evidence"
+            )
+        return self
+
+
+class SignedModelLicenseTermsAdoption(StrictProtocolModel):
+    adoption: ModelLicenseTermsAdoption
+    signatures: Annotated[tuple[Signature, ...], Field(min_length=1, max_length=64)]
+
+
 class ModelBundle(StrictProtocolModel):
-    schema_: Literal["umi-model-bundle/1"] = Field(alias="schema")
+    schema_: Literal["umi-model-bundle/1", "umi-model-bundle/2"] = Field(alias="schema")
     profile: Literal["offline_bundle/1"]
     parent_baseline_sha256: Hex32 | None
     license_id: Annotated[str, Field(min_length=1, max_length=64)]
     files: Annotated[tuple[BundleFile, ...], Field(min_length=7, max_length=4096)]
+    license_adoption: SignedModelLicenseTermsAdoption | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_manifest(self, handler):
+        value = handler(self)
+        if self.license_adoption is None:
+            value.pop("license_adoption", None)
+        return value
 
     @model_validator(mode="after")
     def complete_bundle(self) -> Self:
+        if (self.schema_ == "umi-model-bundle/2") != (self.license_adoption is not None):
+            raise ValueError("conditional model licensing requires bundle version two")
+        if self.license_adoption is not None and self.license_id != "CC-BY-NC-SA-4.0":
+            raise ValueError("conditional noncommercial route requires CC-BY-NC-SA-4.0")
         names = [f.path for f in self.files]
         if names != sorted(names) or len({x.casefold() for x in names}) != len(names):
             raise ValueError("bundle paths must be sorted and unique including case")
@@ -323,7 +377,11 @@ def validate_bundle_policy(bundle: ModelBundle, policy: CompetitionPolicy) -> No
         or sum(f.size_bytes for f in bundle.files) > policy.maximum_bundle_bytes
     ):
         raise ValueError("bundle exceeds policy resource limits")
-    if bundle.license_id not in policy.accepted_model_licenses:
+    if bundle.license_adoption is not None:
+        from .competition_model_license import verify_model_license_adoption
+
+        verify_model_license_adoption(bundle, policy)
+    elif bundle.license_id not in policy.accepted_model_licenses:
         raise ValueError("model license is outside the accepted policy")
 
 

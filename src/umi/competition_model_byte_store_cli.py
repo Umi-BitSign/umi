@@ -5,8 +5,6 @@ result grants no signing/adoption authority. Install its exact export pins in th
 new account-private shared store selection before starting consumers.
 """
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import logging
@@ -32,8 +30,13 @@ from .competition_model_byte_snapshot_r2 import (
     download_portable_snapshot,
     replicate_portable_snapshot,
 )
-from .competition_model_byte_store import ModelByteStoreImport
-from .competition_transport_verification import TransferProgress
+from .competition_model_byte_store import ModelByteStoreConfig, ModelByteStoreImport
+from .competition_model_generation_store import (
+    CHUNKED_MODEL_BYTE_ABI,
+    grow_generation_owner,
+    initialize_generation_owner,
+)
+from .competition_transport_verification import TransferProgress, verifier_semantics
 from .open_competition import CompetitionPolicy
 from .private_files import Directory
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -41,6 +44,8 @@ from .r2_evidence import R2EvidenceClient
 from .r2_sigv4 import R2SigV4, load_r2_credentials
 
 
+# Retained runpy launchers do not replace sys.modules["__main__"]. Keep these
+# imported schema annotations eager so they never resolve in the launcher globals.
 class ModelByteStoreExportRequest(StrictProtocolModel):
     schema_: Literal["umi-model-byte-store-export-request/1"] = Field(alias="schema")
     candidate: ModelDeliveryAdoptionCandidateConfig
@@ -79,6 +84,16 @@ class PortableByteDownloadRequest(StrictProtocolModel):
     repair: bool = False
 
 
+class ModelGenerationInitializeRequest(StrictProtocolModel):
+    schema_: Literal["umi-model-generation-owner-initialize/1"] = Field(alias="schema")
+    store: ModelByteStoreConfig
+
+
+class ModelGenerationCapacityRequest(StrictProtocolModel):
+    schema_: Literal["umi-model-generation-owner-grow/1"] = Field(alias="schema")
+    store: ModelByteStoreConfig
+
+
 def _portable_r2_client(path, bucket, timeout):
     loaded = load_r2_credentials(Path(path))
     return R2EvidenceClient(
@@ -105,6 +120,9 @@ def main(argv=None):
             "portable-restore",
             "portable-upload",
             "portable-download",
+            "initialize-generations",
+            "repair-generations",
+            "grow-generations",
         ],
     )
     parser.add_argument("--request", type=Path, required=True)
@@ -122,11 +140,62 @@ def main(argv=None):
             "portable-restore": PortableByteRestoreRequest,
             "portable-upload": PortableByteUploadRequest,
             "portable-download": PortableByteDownloadRequest,
+            "initialize-generations": ModelGenerationInitializeRequest,
+            "grow-generations": ModelGenerationCapacityRequest,
         }.get(args.operation, ModelByteStoreExportRequest)
         request = request_type.model_validate_json(raw)
         if canonical_json_bytes(request) != raw:
             raise ValueError("model byte export request must retain canonical selected inputs")
         progress.advance(1)
+    if args.operation == "initialize-generations":
+        if request.store.generation_owner is None:
+            raise ValueError("generation initialization requires an explicit retention owner")
+        initialize_generation_owner(
+            request.store.directory,
+            request.store.generation_owner,
+            semantics=[CHUNKED_MODEL_BYTE_ABI, verifier_semantics()],
+        )
+        print(
+            canonical_json_bytes(
+                {
+                    "generation_owner_initialized": True,
+                    "remote_objects_checked": 0,
+                    "certification_authority": False,
+                }
+            ).decode()
+        )
+        return 0
+    if args.operation == "grow-generations":
+        if request.store.generation_owner is None:
+            raise ValueError("generation capacity recovery requires its explicit retention owner")
+        grow_generation_owner(
+            request.store.directory,
+            request.store.generation_owner,
+            semantics=[CHUNKED_MODEL_BYTE_ABI, verifier_semantics()],
+        )
+        print(
+            canonical_json_bytes(
+                {
+                    "generation_owner_capacity_updated": True,
+                    "pending_event_metadata_retained": True,
+                    "remote_objects_checked": 0,
+                    "certification_authority": False,
+                }
+            ).decode()
+        )
+        return 0
+    if args.operation == "repair-generations":
+        candidate = ModelDeliveryAdoptionCandidate(request.candidate, request.policy)
+        asyncio.run(candidate.repair_generations(request.history, request.transition))
+        print(
+            canonical_json_bytes(
+                {
+                    "original_generation_repair_completed": True,
+                    "certification_authority": False,
+                }
+            ).decode()
+        )
+        return 0
     if args.operation == "portable-export":
         snapshot = capture_portable_snapshot(request.source, Path(request.directory))
         print(

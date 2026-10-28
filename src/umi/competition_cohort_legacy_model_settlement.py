@@ -198,10 +198,12 @@ class LegacyModelSettlementStorage:
         return receipt
 
     async def check_receipt(self, receipts, receipt):
-        """Read metadata and HEAD generations only; never repair by rereading weights."""
+        """Consume authenticated completion and selected generation damage state."""
         try:
             reader, snapshot = await run_owned_thread(self._bound_snapshot, receipts, receipt)
-            await reader._heads(None, expected={v.sha256: v for v in snapshot.objects})
+            reused = await run_owned_thread(reader.migrate_completed_generations, snapshot)
+            if not reused:
+                await reader._heads(None, expected={v.sha256: v for v in snapshot.objects})
             if (
                 await run_owned_thread(check_legacy_settlement_metadata, receipts, receipt)
                 != snapshot
@@ -232,11 +234,13 @@ class LegacyModelSettlementStorage:
                 "legacy settlement completion seal is damaged; repair required"
             ) from error
         if completed is not None:
+            checked = None
             if repairing and not path.exists():
                 # Restore only an exact missing small receipt from its retained
                 # independent completion. Changed generations never authorize a
                 # different byte result under the original completion identity.
                 await self.check_receipt(receipts, completed)
+                checked = completed
                 with TransferProgress(
                     "legacy_settlement_receipt_repair",
                     1,
@@ -248,7 +252,8 @@ class LegacyModelSettlementStorage:
             receipt = await run_owned_thread(
                 self.verify_candidate, participant, certificate, receipts
             )
-            await self.check_receipt(receipts, receipt)
+            if receipt != checked:
+                await self.check_receipt(receipts, receipt)
             return receipt
         if path.exists():
             raise LegacyModelStorageRepairRequired(

@@ -26,6 +26,7 @@ from .competition_reward_decisions import (
     reward_decision_capacity,
     verify_reward_decision_proposal,
 )
+from .competition_reward_exchange_delivery import publish_exchange_cursor
 from .competition_reward_signing import RewardDecisionSigner
 from .concurrency import run_owned_thread
 from .open_competition import Signature, digest, identity, verify_signature
@@ -56,8 +57,13 @@ class RewardReviewExchange:
         for path in (self.inbox, self.outbox):
             ensure_private_directory(path)
         self.series = digest(signer.journal.series)
-        self.maximum_bytes = (
-            reward_decision_capacity(signer.journal.series, signer.journal.reward_adoptions)
+
+    @property
+    def maximum_bytes(self):
+        return (
+            reward_decision_capacity(
+                self.signer.journal.series, self.signer.journal.reward_adoptions
+            )
             * MAX_DECISION_BYTES
         )
 
@@ -110,6 +116,12 @@ class RewardReviewExchange:
                 self._request_path(self.outbox, body.sequence),
                 request,
                 maximum_bytes=self.maximum_bytes,
+            )
+            publish_exchange_cursor(
+                self.outbox,
+                series=self.series,
+                proposer=self.proposer,
+                position=body.sequence,
             )
 
     def request(self, sequence: int) -> RewardReviewRequest:
@@ -175,6 +187,13 @@ class RewardReviewExchange:
         completed: dict[int, bytes] = {}
         while not stop.is_set():
             reviewer.provider.ensure_observer_running()
+            try:
+                await run_owned_thread(reviewer.reader.refresh_reward_adoptions)
+            except Exception as error:
+                logger.warning("reward_adoption_feed_retry reason=%s", type(error).__name__)
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
+                continue
             # Fixed approved slots, not an unbounded directory scan. An early
             # missing or failed request cannot starve a delivered successor.
             for sequence in range(

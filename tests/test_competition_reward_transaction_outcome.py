@@ -126,9 +126,10 @@ async def test_unsigned_live_attempt_reports_native_wait_without_extra_chain_rea
     )
     at(t, 127)
     with caplog.at_level("INFO", logger="umi.competition_reward_transaction_outcome"):
-        assert await resolve_standing_transaction(
-            t.provider, t.journal, control_hotkey=t.hotkey
-        ) is None
+        assert (
+            await resolve_standing_transaction(t.provider, t.journal, control_hotkey=t.hotkey)
+            is None
+        )
     reports = [
         json.loads(record.message)
         for record in caplog.records

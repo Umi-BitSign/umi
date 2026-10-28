@@ -14,6 +14,7 @@ from functools import wraps
 from itertools import count
 
 from .competition_weight_timing import WeightRateLimitWait
+from .r2_evidence import R2EvidenceHTTPError
 from .validator_chain import ValidatorChainError
 
 _LOG = logging.getLogger("umi.competition.progress")
@@ -173,6 +174,10 @@ def _failure_details(error):
                 **_sqlite_details(error),
             }
         )
+        if isinstance(error, R2EvidenceHTTPError):
+            status = getattr(error, "status_code", None)
+            if type(status) is int and 100 <= status <= 599:
+                causes[-1]["r2_http_status"] = status
         if isinstance(error, ValidatorChainError):
             for name in (
                 "rpc_method",

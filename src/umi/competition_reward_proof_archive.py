@@ -30,6 +30,7 @@ from .competition_evidence_codec import (
     checked_digest,
     checked_size,
     decode_evidence,
+    decode_evidence_for_reuse,
     encode_evidence,
     inspect_recipe,
     prepare_evidence_with_recipe,
@@ -54,7 +55,37 @@ MAX_FIELD_BYTES = 256 * 1024**2
 _MAX_PUBLISHED_OBJECTS = 8192
 _MAX_READ_OBJECTS = 8192
 _MAX_READ_BYTES = 32 * 1024**2
+_MAX_REMOTE_BATCH_OBJECTS = 256
 Kind = Literal["history", "endpoint", "interval", "registration"]
+
+
+class _RemotePublicationBatch:
+    """Borrow bounded immutable objects across fields before the frame barrier."""
+
+    def __init__(self, remote):
+        self.remote, self.objects, self.nbytes = remote, {}, 0
+
+    def retain(self, raw, *, sha=None):
+        checked_size(len(raw), MAX_PROOF_OBJECT_BYTES)
+        sha = hashlib.sha256(raw).hexdigest() if sha is None else sha
+        if sha in self.objects:
+            if self.objects[sha] != raw:
+                raise ValueError("proof publication batch changes an object's original bytes")
+            return sha
+        if self.nbytes + len(raw) > MAX_PROOF_OBJECT_BYTES or (
+            len(self.objects) >= _MAX_REMOTE_BATCH_OBJECTS
+        ):
+            self.flush()
+        self.objects[sha] = raw
+        self.nbytes += len(raw)
+        return sha
+
+    def flush(self):
+        if self.objects:
+            # The existing store owns eight workers, its aggregate active-byte
+            # budget and each durable completion. No frame is published here.
+            self.remote.put_many(self.objects)
+            self.objects, self.nbytes = {}, 0
 
 
 def _publication_clock_ns():
@@ -467,6 +498,19 @@ class RewardProofArchive:
         fields: dict[str, bytes],
         prepared_encodings: dict[str, tuple[PreparedEvidenceEncoding, ...]] | None = None,
     ) -> None:
+        # Local import avoids the progress module's publication-clock import
+        # cycle. This measures owner wall time, not summed concurrent transfers.
+        from .competition_transport_verification import TransferProgress
+
+        with TransferProgress(
+            "proof_archive_export", 1, unit="frames", planning_unit_seconds=(0.01, 300)
+        ) as progress:
+            self._write(
+                kind, key, context=context, fields=fields, prepared_encodings=prepared_encodings
+            )
+            progress.advance(1)
+
+    def _write(self, kind, key, *, context, fields, prepared_encodings):
         path = self._path(kind, key)
         if len(fields) > 4:
             raise ValueError("reward archive field count exceeds its bound")
@@ -489,6 +533,7 @@ class RewardProofArchive:
                 raise ValueError("retained archive frame differs from selected publication")
         with self._directory_scope(enabled=bool(fields)) as directory:
             refs = {}
+            publication = None if self.remote is None else _RemotePublicationBatch(self.remote)
             for name, raw in fields.items():
                 if type(raw) is not bytes:
                     raise ValueError("reward archive requires original byte evidence")
@@ -514,7 +559,11 @@ class RewardProofArchive:
                             single_object=self.remote is not None and existing is None,
                         )
                         if prepared is None
-                        else prepared[number].for_bytes(chunk, kind="proof")
+                        else prepared[number].for_bytes(
+                            chunk,
+                            kind="proof",
+                            coalesce_small=self.remote is not None and existing is None,
+                        )
                     )
                     if (
                         self.remote is not None
@@ -552,13 +601,16 @@ class RewardProofArchive:
                     if self.remote is None:
                         for value in encoded.objects.values():
                             self._retain_bytes(value, directory=directory)
+                        recipe_sha = self._retain_bytes(encoded.recipe, directory=directory)
                     else:
-                        self.remote.put_many(encoded.objects)
+                        for sha, value in encoded.objects.items():
+                            publication.retain(value, sha=sha)
+                        recipe_sha = publication.retain(encoded.recipe)
                     parts.append(
                         _Part(
                             sha256=encoded.sha256,
                             expanded_bytes=encoded.expanded_bytes,
-                            recipe_sha256=self._retain_bytes(encoded.recipe, directory=directory),
+                            recipe_sha256=recipe_sha,
                         )
                     )
                 refs[name] = tuple(parts)
@@ -576,6 +628,7 @@ class RewardProofArchive:
             else:
                 raw = canonical_json_bytes(frame)
                 checked_size(len(raw), MAX_FRAME_BYTES)
+                publication.flush()
                 # The original /1 frame and codec recipes form the immutable object
                 # index. Publish the frame only after every referenced byte object.
                 self.remote.put_bytes(raw, path="frames/" + kind + "/" + key)
@@ -589,6 +642,11 @@ class RewardProofArchive:
         checks. Different existing frame encodings require the caller's legacy
         decode/encode path, including its immutable conflict checks.
         """
+        from .competition_transport_verification import TransferProgress
+
+        progress = TransferProgress(
+            "proof_archive_export", 1, unit="frames", planning_unit_seconds=(0.01, 300)
+        )
         path = self._path(kind, key)
         if not fields or len(fields) > 4:
             raise ValueError("reward archive field count exceeds its bound")
@@ -626,27 +684,18 @@ class RewardProofArchive:
                 return False
         # Publish no frame until every bounded referenced object is durable.
         # Repeated objects within this transfer need only one resolver read.
-        with self._directory_scope():
+        # Start reporting only once compatibility selects an actual export.
+        # A normal legacy fallback returns above without claiming either a
+        # completed frame or an interrupted transfer. The timer still includes
+        # this call's bounded compatibility preparation on successful exports.
+        with progress, self._directory_scope():
             retained = {}
-            pending, pending_bytes = {}, 0
-
-            def flush():
-                nonlocal pending, pending_bytes
-                if pending:
-                    self.remote.put_many(pending)
-                    pending, pending_bytes = {}, 0
+            publication = None if self.remote is None else _RemotePublicationBatch(self.remote)
 
             def retain(raw):
-                nonlocal pending_bytes
                 if self.remote is None:
                     return self._retain_bytes(raw)
-                sha = hashlib.sha256(raw).hexdigest()
-                if sha not in pending:
-                    if pending_bytes + len(raw) > MAX_PROOF_OBJECT_BYTES:
-                        flush()
-                    pending[sha] = raw
-                    pending_bytes += len(raw)
-                return sha
+                return publication.retain(raw)
 
             for recipe, segments in recipes:
                 for _, sha, size in segments:
@@ -664,7 +713,8 @@ class RewardProofArchive:
                         raise ValueError("encoded transport object digest differs")
                     retained[sha] = size
                 retain(recipe)
-            flush()
+            if publication is not None:
+                publication.flush()
             if self.remote is None:
                 if self.physical_budget is not None:
                     self.physical_budget.check(self.root, MAX_FRAME_BYTES)
@@ -673,6 +723,7 @@ class RewardProofArchive:
                 raw = canonical_json_bytes(frame)
                 checked_size(len(raw), MAX_FRAME_BYTES)
                 self.remote.put_bytes(raw, path="frames/" + kind + "/" + key)
+            progress.advance(1)
             return True
 
     def _frame(self, kind: Kind, key: str) -> _Frame:
@@ -722,7 +773,36 @@ class RewardProofArchive:
                 return None
             return self._read_frame(frame, kind, key, bounds)
 
-    def _read_frame(self, frame, kind, key, bounds):
+    def copy_original_if_present(
+        self, destination, kind: Kind, key: str, *, context: dict, bounds: dict[str, int]
+    ) -> bool:
+        """Publish a selected original, preserving its frame and codec recipes.
+
+        Only an absent frame permits another source. Present damaged evidence
+        requires repair. Ordinary decoding runs once and retains the original
+        encoding for transport; independent native proof acceptance is unchanged.
+        The source release lease covers the whole operation.
+        """
+        with self.read_release_lease():
+            try:
+                frame = self._frame(kind, key)
+            except FileNotFoundError:
+                return False
+            if frame.context != context:
+                raise ValueError("proof archive changes its original observation")
+            _, prepared = self._read_frame(frame, kind, key, bounds, retain_encoding=True)
+            fields, objects = {}, {}
+            for name, parts in prepared.items():
+                fields[name] = tuple((p.sha256, len(p.raw), p.recipe) for p in parts)
+                for part in parts:
+                    objects.update(part.objects)
+            if not destination.copy_encoded_transport(
+                kind, key, context=context, fields=fields, resolve=lambda sha, size: objects[sha]
+            ):
+                raise ValueError("destination changes original archive encoding")
+            return True
+
+    def _read_frame(self, frame, kind, key, bounds, *, retain_encoding=False):
         if frame.kind != kind or frame.key != key or set(frame.fields) != set(bounds):
             raise ValueError("reward archive frame changes its requested domain")
         with self._directory_scope(enabled=bool(frame.fields)) as directory:
@@ -736,8 +816,9 @@ class RewardProofArchive:
                     or sum(p.expanded_bytes for p in parts) > maximum
                 ):
                     raise ValueError("reward archive field expansion exceeds its bound")
-                result[name] = b"".join(
-                    decode_evidence(
+                decode = decode_evidence_for_reuse if retain_encoding else decode_evidence
+                decoded = tuple(
+                    decode(
                         resolver.resolve(p.recipe_sha256, MAX_RECIPE_BYTES),
                         sha256=p.sha256,
                         expanded_bytes=p.expanded_bytes,
@@ -746,6 +827,7 @@ class RewardProofArchive:
                     )
                     for p in parts
                 )
+                result[name] = decoded if retain_encoding else b"".join(decoded)
             resolver.finish()
             return frame.context, result
 

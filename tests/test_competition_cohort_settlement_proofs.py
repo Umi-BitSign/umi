@@ -1,5 +1,6 @@
 """Proof delivery preserves bytes; native finality review is a separate check."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -78,7 +79,7 @@ async def test_completed_publication_survives_restart_without_payload_reads(
     def forbidden(*args, **kwargs):
         raise AssertionError("completed proof publication read or rewrote payloads")
 
-    monkeypatch.setattr(reopened, "_read", forbidden)
+    monkeypatch.setattr(reopened, "_publish_selected_original", forbidden)
     monkeypatch.setattr(reopened.outbox, "write", forbidden)
     await reopened.ensure_published(observation)
     assert calls == [observation]
@@ -114,7 +115,7 @@ async def test_local_frame_lost_directory_ack_retries_without_payload_republicat
     def forbidden(*args, **kwargs):
         raise AssertionError("lost frame acknowledgement repeated proof payload publication")
 
-    monkeypatch.setattr(files, "_read", forbidden)
+    monkeypatch.setattr(files, "_publish_selected_original", forbidden)
     monkeypatch.setattr(files.outbox, "write", forbidden)
     await files.ensure_published(observation)
     assert calls == [observation] and failed == [True]
@@ -225,7 +226,7 @@ async def test_own_and_explicit_shared_proofs_need_no_archive_copy(proof_case, t
 async def test_present_damaged_import_is_not_hidden_by_valid_shared_source(proof_case, tmp_path):
     files, observation, _ = proof_case
     await files.publish(observation)
-    shutil.copytree(files.outbox.root, files.inbox.root)
+    shutil.copytree(files.outbox.root, files.inbox.root, dirs_exist_ok=True)
     frame = json.loads(
         (files.inbox.root / "registration" / (digest(observation) + ".json")).read_bytes()
     )
@@ -257,3 +258,151 @@ async def test_shared_proof_source_loss_and_permissions_are_explicit(proof_case,
     shutil.rmtree(files.outbox.root)
     with pytest.raises(FileNotFoundError):
         await reader.read(observation)
+
+
+def _legacy_proof_recipe(archive, observation):
+    """Retain a valid /1 representation different from today's encoder output."""
+    path = archive.root / "registration" / (digest(observation) + ".json")
+    frame = json.loads(path.read_bytes())
+    pieces = (b"original-", b"registration")
+    recipe = canonical_json_bytes(
+        {
+            "schema": "umi-weight-evidence-recipe/1",
+            "length": sum(map(len, pieces)),
+            "segments": [["b", archive._retain_bytes(raw), len(raw)] for raw in pieces],
+        }
+    )
+    frame["fields"]["proof"][0]["recipe_sha256"] = archive._retain_bytes(recipe)
+    path.write_bytes(canonical_json_bytes(frame))
+    return path.read_bytes()
+
+
+@pytest.mark.parametrize("source", ["inbox", "shared"])
+@pytest.mark.parametrize("remote", [False, True])
+async def test_publish_selected_original_preserves_legacy_encoding_and_restart_completion(
+    proof_case, tmp_path, monkeypatch, source, remote
+):
+    from .test_competition_remote_proof_store import EvidenceServer, store
+
+    files, observation, calls = proof_case
+    await files.publish(observation)
+    original_frame = _legacy_proof_recipe(files.outbox, observation)
+    reader = SettlementRegistrationFiles(
+        files.provider,
+        inbox=files.outbox.root if source == "inbox" else tmp_path / "other-inbox",
+        outbox=tmp_path / "other-outbox",
+        shared_archives=(files.outbox.root,) if source == "shared" else (),
+    )
+    server = EvidenceServer()
+    if remote:
+        reader.outbox.remote = store(tmp_path / "remote-owner", server)
+
+    async def forbidden_provider(_):
+        raise AssertionError("selected original must precede provider lookup")
+
+    files.provider.retained_archive = forbidden_provider
+    selected = reader.inbox if source == "inbox" else reader.shared[0]
+    original_read = selected._read_object
+    reads = []
+
+    def read_once(path, sha, maximum):
+        reads.append(sha)
+        return original_read(path, sha, maximum)
+
+    monkeypatch.setattr(selected, "_read_object", read_once)
+    await reader.ensure_published(observation)
+    assert calls == [observation]
+    assert len(reads) == len(set(reads))
+    key = digest(observation)
+    if remote:
+        assert server.objects["proofs/frames/registration/" + key] == original_frame
+    else:
+        assert (
+            reader.outbox.root / "registration" / (key + ".json")
+        ).read_bytes() == original_frame
+    assert reader._read_selected(observation) == (b"original-registration", b"original-metadata")
+    # An unchanged /1 archive reader accepts both local and remote output.
+    assert reader.outbox.read("registration", key, bounds={"proof": 1024, "metadata": 1024}) == (
+        observation.model_dump(mode="json", by_alias=True),
+        {"proof": b"original-registration", "metadata": b"original-metadata"},
+    )
+    reopened = SettlementRegistrationFiles(
+        files.provider,
+        inbox=reader.inbox.root,
+        outbox=reader.outbox.root,
+        shared_archives=tuple(archive.root for archive in reader.shared),
+    )
+    if remote:
+        reopened.outbox.remote = store(tmp_path / "remote-owner", server)
+        server.calls.clear()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("completed transport must not revisit original payloads")
+
+    monkeypatch.setattr(reopened, "_publish_selected_original", forbidden)
+    monkeypatch.setattr(reopened.outbox, "write", forbidden)
+    await reopened.ensure_published(observation)
+    assert not remote or not server.calls
+
+
+@pytest.mark.parametrize("source", ["inbox", "shared"])
+@pytest.mark.parametrize("damage", ["context", "missing_recipe", "expanded_digest", "object"])
+async def test_publish_damaged_original_never_falls_back_to_provider(
+    proof_case, tmp_path, source, damage
+):
+    files, observation, calls = proof_case
+    await files.publish(observation)
+    path = files.outbox.root / "registration" / (digest(observation) + ".json")
+    frame = json.loads(path.read_bytes())
+    recipe_path = (
+        files.outbox.root / "objects" / (frame["fields"]["proof"][0]["recipe_sha256"] + ".json")
+    )
+    if damage == "context":
+        frame["context"]["block"] += 1
+        path.write_bytes(canonical_json_bytes(frame))
+    elif damage == "missing_recipe":
+        recipe_path.unlink()
+    elif damage == "expanded_digest":
+        frame["fields"]["proof"][0]["sha256"] = hashlib.sha256(b"another-proof").hexdigest()
+        path.write_bytes(canonical_json_bytes(frame))
+    else:
+        recipe = json.loads(bytes.fromhex(json.loads(recipe_path.read_bytes())["hex"]))
+        object_path = files.outbox.root / "objects" / (recipe["segments"][0][1] + ".json")
+        object_path.write_bytes(canonical_json_bytes({"hex": b"changed".hex()}))
+    reader = SettlementRegistrationFiles(
+        files.provider,
+        inbox=files.outbox.root if source == "inbox" else tmp_path / "other-inbox",
+        outbox=tmp_path / "other-outbox",
+        shared_archives=(files.outbox.root,) if source == "shared" else (),
+    )
+    with pytest.raises((ValueError, FileNotFoundError)):
+        await reader.ensure_published(observation)
+    assert calls == [observation]
+    assert not (reader.outbox.root / "registration" / (digest(observation) + ".json")).exists()
+
+
+async def test_publish_uses_provider_only_when_all_original_frames_are_absent(proof_case, tmp_path):
+    files, observation, calls = proof_case
+    shared = tmp_path / "empty-shared"
+    shared.mkdir(mode=0o700)
+    selected = SettlementRegistrationFiles(
+        files.provider, inbox=files.inbox.root, outbox=files.outbox.root, shared_archives=(shared,)
+    )
+    await selected.ensure_published(observation)
+    assert calls == [observation]
+    assert await selected.read(observation) == (b"original-registration", b"original-metadata")
+
+
+async def test_publish_shared_permissions_checked_again_at_use(proof_case, tmp_path):
+    files, observation, calls = proof_case
+    await files.publish(observation)
+    selected = SettlementRegistrationFiles(
+        files.provider,
+        inbox=files.inbox.root,
+        outbox=tmp_path / "new-output",
+        shared_archives=(files.outbox.root,),
+    )
+    files.outbox.root.chmod(0o755)
+    with pytest.raises(ValueError, match="owned and private"):
+        await selected.ensure_published(observation)
+    assert calls == [observation]

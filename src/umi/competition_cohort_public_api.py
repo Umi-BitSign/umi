@@ -17,6 +17,7 @@ from starlette.responses import JSONResponse
 
 from .competition_cohort_model_scores import PublicModelScoreCache
 from .competition_cohort_public_downloads import PublicModelDownload
+from .competition_cohort_public_licenses import read_model_license_adoptions
 from .competition_cohort_public_results import PublicModelCatalog, PublicPaidResults
 from .competition_public_results_directory import (
     PublicResultsDirectory,
@@ -247,6 +248,14 @@ def cohort_public_routes(
             "next_offset": offset + limit if offset + limit < len(items) else None,
             "items": items[offset : offset + limit],
         }
+
+    @router.get("/v1/competition/cohorts/{cohort}/model-license-adoptions")
+    async def model_license_adoptions(cohort: Annotated[str, ApiPath(pattern=_ID)]):
+        return await bounded(
+            lambda: read_model_license_adoptions(root, cohort).model_dump(
+                mode="json", by_alias=True
+            )
+        )
 
     @router.get("/v1/competition/cohorts/{cohort}/model-results")
     async def model_results(

@@ -297,6 +297,38 @@ def test_settlement_retry_reports_bounded_causes_without_inputs(progress_events)
     assert secret not in json.dumps(progress_events)
 
 
+@pytest.mark.parametrize("status", [401, 403, 404, 412, 429, 500, 503])
+def test_r2_retry_retains_numeric_status_in_nested_redacted_causes(status, progress_events):
+    from umi.r2_evidence import R2EvidenceHTTPError
+
+    secret = "https://private.example/capability/secret?token=secret"
+    cause = R2EvidenceHTTPError(status)
+    cause.args = (secret,)
+    cause.response_body = secret
+    wrapped = RuntimeError(secret)
+    wrapped.__cause__ = cause
+    progress.report_settlement_retry(cohort="b" * 64, role="reviewer", stage="tick", error=wrapped)
+    observed = progress_events[-1]["causes"]
+    assert "r2_http_status" not in observed[0]
+    assert observed[1]["r2_http_status"] == status
+    assert observed[1]["reason_code"] == "r2_http_failure"
+    assert "secret" not in json.dumps(progress_events)
+
+
+@pytest.mark.parametrize("status", [None, True, "secret", -1, 600])
+def test_r2_retry_omits_invalid_status_and_unrelated_exception_attributes(status):
+    from umi.r2_evidence import R2EvidenceHTTPError
+
+    native = R2EvidenceHTTPError(503)
+    native.status_code = status
+    other = OSError("secret")
+    other.status_code = 429
+    for error in (native, other):
+        details = progress._failure_details(error)
+        assert "r2_http_status" not in details[0]
+        assert "secret" not in json.dumps(details)
+
+
 def test_settlement_reports_actual_sqlite_contention_without_database_path(
     tmp_path, progress_events
 ):

@@ -20,6 +20,7 @@ from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_recovery import (
     RecoverableCohortPlan,
     SignedCohortRecoveryAuthority,
+    cohort_evaluation_suite,
     verify_recovery_authority,
 )
 from .competition_execution import ExecutionBoundary, execution_boundary
@@ -48,6 +49,20 @@ class CohortCutoverObservation(StrictProtocolModel):
     source_sha256: Hex32 | None = None
 
 
+class OperatorRequestStart(StrictProtocolModel):
+    """Explicit local start decision; never backdates cutover or phase evidence."""
+
+    schema_: Literal["umi-cohort-operator-request-start/1"] = Field(alias="schema")
+    cohort_sha256: Hex32
+    authorized_history_tip_sha256: Hex32
+    suite_sha256: Hex32
+    baseline_model_sha256: Hex32
+    evaluation_runtime_sha256: Hex32
+    runtime_adoption_sha256: Hex32 | None
+    not_before_unix_ms: Timestamp
+    source_sha256: Hex32
+
+
 class RequestStartConfig(StrictProtocolModel):
     schema_: Literal["umi-cohort-request-start-config/1", "umi-cohort-request-start-config/2"] = (
         Field(alias="schema")
@@ -58,6 +73,9 @@ class RequestStartConfig(StrictProtocolModel):
     predecessor_recovery: SignedCohortRecoveryAuthority | None = None
     rest_clock: Literal["predecessor_certification", "cohort_cutover"] = "predecessor_certification"
     cutover_overrides: Annotated[tuple[CohortCutoverObservation, ...], Field(max_length=512)] = ()
+    operator_start_overrides: Annotated[
+        tuple[OperatorRequestStart, ...], Field(max_length=512)
+    ] = ()
 
     @model_serializer(mode="wrap")
     def preserve_initial_series_bytes(self, handler):
@@ -70,6 +88,8 @@ class RequestStartConfig(StrictProtocolModel):
             value.pop("rest_clock", None)
         if not self.cutover_overrides:
             value.pop("cutover_overrides", None)
+        if not self.operator_start_overrides:
+            value.pop("operator_start_overrides", None)
         return value
 
     @model_validator(mode="after")
@@ -86,6 +106,9 @@ class RequestStartConfig(StrictProtocolModel):
             )
         if any(v.source_sha256 is None for v in self.cutover_overrides):
             raise ValueError("an explicit historical cutover needs its retained source identity")
+        keys = [v.cohort_sha256 for v in self.operator_start_overrides]
+        if keys != sorted(set(keys)):
+            raise ValueError("operator start overrides require unique cohort ordering")
         return self
 
 
@@ -97,6 +120,13 @@ class RequestRestObservation(StrictProtocolModel):
     not_before_unix_ms: Timestamp
 
 
+class OperatorRequestStartObservation(StrictProtocolModel):
+    schema_: Literal["umi-cohort-operator-request-start-observation/1"] = Field(alias="schema")
+    selection: OperatorRequestStart
+    observed: ExecutionBoundary
+    chain_timestamp_ms: Timestamp
+
+
 class SeriesRequestStart:
     def __init__(
         self,
@@ -104,6 +134,8 @@ class SeriesRequestStart:
         series: StandingRewardSeries,
         provider: HistoricalRegistrationProvider,
         history: Callable[[str], Awaitable[CohortOrderHistory]],
+        *,
+        operator_selection=None,
     ):
         self.config = RequestStartConfig.model_validate_json(canonical_json_bytes(config))
         self.series = StandingRewardSeries.model_validate_json(canonical_json_bytes(series))
@@ -129,6 +161,7 @@ class SeriesRequestStart:
                     "request start predecessor differs from its signed series boundary"
                 )
         self.provider, self.history = provider, history
+        self.operator_selection = operator_selection
         self.cohorts = tuple(digest(p) for p in series.cohorts)
         self.head_age = provider.config.maximum_head_age_ms
         self.future_skew = provider.config.maximum_future_skew_ms
@@ -153,6 +186,8 @@ class SeriesRequestStart:
         )
         if any(v.cohort_sha256 not in self.cohorts for v in self.config.cutover_overrides):
             raise ValueError("configured cutover is outside the selected series")
+        if any(v.cohort_sha256 not in self.cohorts for v in self.config.operator_start_overrides):
+            raise ValueError("operator request start is outside the selected series")
         self.cutover_journal = (
             RoundJournal(
                 Path(config.directory) / "cutovers-v1",
@@ -225,6 +260,63 @@ class SeriesRequestStart:
         async with self.serial:
             return await self._check(cohort)
 
+    async def _operator_start(self, selected, observed, timestamp):
+        source = await self.history(selected.cohort_sha256)
+        history = source.history
+        plan = next(p for p in self.series.cohorts if digest(p) == selected.cohort_sha256)
+        if history.plan != plan or history.authority != self.series.recovery:
+            raise ValueError("operator request start differs from its selected series")
+        state, _, _ = replay_cohort_decisions(
+            history, self.provider.policy, source.inputs().__getitem__
+        )
+        tips = (digest(history.genesis), *(digest(s.transition) for s in history.transitions))
+        if (
+            selected.authorized_history_tip_sha256 not in tips
+            or state.phase in {"complete", "revoked"}
+            or cohort_evaluation_suite(plan, state.evaluation_suite_adoption)
+            != selected.suite_sha256
+        ):
+            raise ValueError("operator request start history or suite binding changed")
+        index = tips.index(selected.authorized_history_tip_sha256)
+        if any(s.transition.operation != "close_phase" for s in history.transitions[index:]):
+            raise ValueError("operator request start selection changed after authorization")
+        if self.operator_selection is None:
+            raise ValueError("operator request start requires its native selection reader")
+        actual = await self.operator_selection(selected.cohort_sha256, observed.block)
+        expected = {
+            key: getattr(selected, key)
+            for key in (
+                "baseline_model_sha256",
+                "evaluation_runtime_sha256",
+                "runtime_adoption_sha256",
+            )
+        }
+        if actual != expected:
+            raise ValueError("operator request start baseline or runtime selection changed")
+        old = await run_owned_thread(
+            self.journal.get, "operator_request_start", selected.cohort_sha256
+        )
+        if old is None:
+            saved = OperatorRequestStartObservation(
+                schema="umi-cohort-operator-request-start-observation/1",
+                selection=selected,
+                observed=observed,
+                chain_timestamp_ms=timestamp,
+            )
+            await run_owned_thread(
+                self.journal.put, "operator_request_start", selected.cohort_sha256, saved
+            )
+        else:
+            saved = OperatorRequestStartObservation.model_validate(old)
+        if (
+            saved.selection != selected
+            or observed.block < saved.observed.block
+            or timestamp < saved.chain_timestamp_ms
+            or (observed.block == saved.observed.block and observed != saved.observed)
+        ):
+            raise ValueError("operator request start changed or its observation regressed")
+        return saved
+
     async def _check(self, cohort: str) -> dict:
         if cohort not in self.cohorts:
             raise ValueError("request start is outside its selected series")
@@ -266,6 +358,13 @@ class SeriesRequestStart:
             raise ValueError("request start needs the verified chain timestamp")
         floor = self.config.first_cohort_not_before_unix_ms
         cutover = None
+        operator = next(
+            (v for v in self.config.operator_start_overrides if v.cohort_sha256 == cohort), None
+        )
+        operator_observation = None
+        if operator is not None:
+            operator_observation = await self._operator_start(operator, observed, timestamp)
+            floor = max(floor, operator.not_before_unix_ms)
         if closure is not None:
             if observed.block < closure.observed_at_block:
                 raise ValueError("request start observation precedes certified closure")
@@ -277,7 +376,11 @@ class SeriesRequestStart:
                 != closure
             ):
                 raise OSError("request start predecessor changed during observation")
-            if self.cutover_journal is not None:
+            if operator is not None:
+                # Preserve all existing rest/cutover receipts. This is an
+                # explicit future start floor, not a fictitious earlier cutover.
+                pass
+            elif self.cutover_journal is not None:
                 saved_cutover = await run_owned_thread(self.cutover_journal.get, "cutover", cohort)
                 if saved_cutover is None and not any(
                     v.cohort_sha256 == cohort for v in self.config.cutover_overrides
@@ -293,7 +396,13 @@ class SeriesRequestStart:
                 )
         ready = timestamp - self.future_skew >= floor
         remaining = max(0, (floor + self.future_skew - timestamp) / 1000)
-        total = (REST_MS + self.head_age + self.future_skew) / 1000 if closure else remaining
+        total = (
+            max(0, (floor + self.future_skew - operator_observation.chain_timestamp_ms) / 1000)
+            if operator_observation is not None
+            else (REST_MS + self.head_age + self.future_skew) / 1000
+            if closure
+            else remaining
+        )
         completed = max(0, total - remaining)
         return dict(
             report,
@@ -304,6 +413,14 @@ class SeriesRequestStart:
             chain_timestamp_ms=timestamp,
             rest_clock=self.config.rest_clock,
             cutover_unix_ms=None if cutover is None else cutover.cutover_unix_ms,
+            **(
+                {
+                    "operator_start_source_sha256": operator.source_sha256,
+                    "operator_start_not_before_unix_ms": operator.not_before_unix_ms,
+                }
+                if operator is not None
+                else {}
+            ),
             stage="request_start_ready" if ready else "waiting_request_rest",
             completed=completed,
             total=total,

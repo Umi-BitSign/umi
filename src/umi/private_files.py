@@ -133,8 +133,23 @@ def read_private_model(
 
 
 def lock_private_file(path: Path, *, shared: bool = False) -> int:
-    """Return an exclusively locked descriptor; its owner must close it."""
-    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    """Return a private locked descriptor; its owner must close it.
+
+    Shared readers can use the owner's existing lock through a read-only bind
+    mount. They still lock that exact inode, so an exclusive release owner sees
+    their lease. A missing lock on a read-only archive requires owner
+    provisioning; never substitute a lock in the reader's writable directory.
+    """
+    flags = os.O_NOFOLLOW | os.O_NONBLOCK
+    if shared:
+        try:
+            fd = os.open(path, os.O_RDONLY | flags)
+        except FileNotFoundError:
+            # Preserve first-use creation for an owned writable archive. This
+            # same-path atomic open cannot create a separate reader lock.
+            fd = os.open(path, os.O_CREAT | os.O_RDWR | flags, 0o600)
+    else:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | flags, 0o600)
     try:
         info = os.fstat(fd)
         if (

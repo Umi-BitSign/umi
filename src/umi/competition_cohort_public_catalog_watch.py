@@ -14,10 +14,11 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_model_scores import PublicModelScores, _stamp
 from .competition_cohort_public_downloads import PublicModelDownload, legacy_download
+from .competition_cohort_public_licenses import ModelLicenseMetadataPublisher
 from .competition_cohort_public_publisher import (
     CohortPublicPublisherConfig,
     LegacyPublicModelSource,
@@ -30,7 +31,7 @@ from .competition_public_results_publisher import publisher_lease
 from .competition_verification_reuse import metadata_completion, remember_metadata_completion
 from .competition_verification_snapshot import _Checksummed
 from .competition_work_progress import WorkProgress
-from .open_competition import ModelBundle, digest
+from .open_competition import ModelBundle, SignedModelLicenseTermsAdoption, digest
 from .private_files import Directory
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -46,6 +47,16 @@ class NativePublicCatalogWatchConfig(StrictProtocolModel):
     legacy_sources: dict[Hex32, tuple[LegacyPublicModelSource, ...]] = Field(default_factory=dict)
     template: CohortPublicPublisherConfig
     poll_seconds: float = Field(default=15, ge=1, le=3600)
+    model_license_adoptions: Annotated[
+        tuple[SignedModelLicenseTermsAdoption, ...], Field(max_length=16)
+    ] = ()
+
+    @model_serializer(mode="wrap")
+    def preserve_original_config(self, handler):
+        value = handler(self)
+        if not self.model_license_adoptions:
+            value.pop("model_license_adoptions", None)
+        return value
 
     @model_validator(mode="after")
     def selected(self):
@@ -58,6 +69,16 @@ class NativePublicCatalogWatchConfig(StrictProtocolModel):
             raise ValueError("catalog watch selects an unknown native cohort")
         if not self.legacy_sources.keys() <= set(self.cohorts):
             raise ValueError("legacy public transport selects an unknown cohort")
+        adoptions = [digest(item) for item in self.model_license_adoptions]
+        if adoptions != sorted(set(adoptions)):
+            raise ValueError("model license selections must be sorted and unique")
+        authorities = {item.authority_sha256 for item in source.config.cohorts}
+        if any(
+            item.adoption.authority_sha256 not in authorities
+            or not set(item.adoption.cohort_sha256s).intersection(self.cohorts)
+            for item in self.model_license_adoptions
+        ):
+            raise ValueError("model license selection has no configured cohort authority")
         paths = tuple(
             map(
                 Path,
@@ -98,6 +119,7 @@ class NativePublicCatalogWatcher:
         owned_directory(self.output, create=True)
         self.receipts, self.outputs, self.transports = OrderedDict(), {}, OrderedDict()
         self.verdicts = {}
+        self.licenses = ModelLicenseMetadataPublisher(config)
 
     def _selected(self, cohort):
         source = self.config.template.native_intake.model_copy(update={"cohort_sha256": cohort})
@@ -230,6 +252,7 @@ class NativePublicCatalogWatcher:
 
     def _poll_once(self):
         entered = time.monotonic()
+        license_report = self.licenses.poll_once() if self.config.model_license_adoptions else None
         candidates = [
             c
             for c in self.config.cohorts
@@ -426,6 +449,12 @@ class NativePublicCatalogWatcher:
             else "waiting_for_original_metadata_or_explicit_repair",
             stalled_or_retrying=bool(report["held"]),
         )
+        if self.config.model_license_adoptions:
+            report["model_license_adoptions"] = license_report
+            if license_report["held"]:
+                report["stalled_or_retrying"] = True
+                report["eta_seconds"] = None
+                report["eta_basis"] = "waiting_for_model_license_metadata_repair"
         return report
 
 

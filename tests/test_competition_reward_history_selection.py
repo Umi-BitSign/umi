@@ -299,12 +299,8 @@ async def test_effective_allocation_crosses_each_fence_and_recovers_offline(hand
     assert tuple(
         (item.activation.cohort_sha256, item.effective_at_block)
         for item in result.activation_transitions
-    ) == (
-        (c.active.decision.activation.cohort_sha256, h.old.height + 3),
-    ) + (
-        ((c.successor.decision.activation.cohort_sha256, h.old.height + 5),)
-        if offset >= 3
-        else ()
+    ) == ((c.active.decision.activation.cohort_sha256, h.old.height + 3),) + (
+        ((c.successor.decision.activation.cohort_sha256, h.old.height + 5),) if offset >= 3 else ()
     )
     effective = c.active if 3 <= offset < 5 else c.successor if offset >= 5 else None
     if effective is None:

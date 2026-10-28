@@ -12,10 +12,19 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_model_cache_space import disjoint
-from .competition_transport_verification import ByteCheckpoints, TransferProgress
+from .competition_model_generation_store import (
+    CHUNKED_MODEL_BYTE_ABI,
+    ModelGenerationStore,
+    ModelGenerationStoreConfig,
+)
+from .competition_transport_verification import (
+    ByteCheckpoints,
+    TransferProgress,
+    verifier_semantics,
+)
 from .file_identity import file_fingerprint
 from .open_competition import digest
 from .private_files import Directory, ensure_private_directory, lock_private_file, private_path
@@ -34,6 +43,14 @@ class ModelByteStoreConfig(StrictProtocolModel):
     schema_: Literal["umi-model-byte-verification-store/1"] = Field(alias="schema")
     directory: Directory
     imports: Annotated[tuple[ModelByteStoreImport, ...], Field(max_length=4096)] = ()
+    generation_owner: ModelGenerationStoreConfig | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original(self, handler):
+        value = handler(self)
+        if self.generation_owner is None:
+            value.pop("generation_owner", None)
+        return value
 
     @model_validator(mode="after")
     def separate_imports(self):
@@ -112,21 +129,28 @@ def qualify_shared_byte_stores(sources, *, report=None):
     checks. This acquires no signing key and touches only a bounded access lock.
     A completed target need not keep mounting already imported old source roots.
     """
-    roots = shared_byte_store_paths(sources)
-    if not roots:
+    stores = validate_shared_byte_stores(sources)
+    if not stores:
         return
     with TransferProgress(
         "model_byte_store_access",
-        len(roots),
+        len(stores),
         report,
         unit="stores",
         planning_unit_seconds=(0.001, 0.1),
     ) as progress:
-        for root in roots:
+        for store in stores:
+            root = Path(store.directory)
             try:
                 ensure_private_directory(root)
                 descriptor = lock_private_file(root / ".access.lock")
                 os.close(descriptor)
+                if store.generation_owner is not None:
+                    ModelGenerationStore(
+                        root,
+                        store.generation_owner,
+                        semantics=[CHUNKED_MODEL_BYTE_ABI, verifier_semantics()],
+                    )
             except (OSError, ValueError):
                 progress.emit("repair_required", reason="model_byte_store_namespace_unavailable")
                 raise
@@ -180,9 +204,9 @@ def _pinned(path, pin, maximum):
 def export_completed_byte_facts(reader, heads, *, report=None, checkpoint=None):
     """Build a native export from every exact completed private file result.
 
-    The authenticated reader's caller owns lineage; current generations were
-    obtained immediately before this operation and must be confirmed afterward.
-    This produces an unsigned local snapshot, never adoption or release authority.
+    The authenticated reader's caller owns lineage. Generations come from its
+    selected intact completion owner, or the ordinary surrounding remote checks.
+    This unsigned byte snapshot grants neither current availability nor authority.
     """
     root = reader.root
     identity = _directory_identity(root)
@@ -289,7 +313,8 @@ def import_completed_byte_facts(reader, saved, heads, imports, *, document_paths
 
     Each source is an immutable hash-pinned snapshot; stable metadata reads avoid
     nested source/target locks. The target holds its ordinary private store lock.
-    Its native verify operation confirms current generations again before return.
+    Native verification uses its selected completion owner or remote generation
+    checks; this import itself grants no current availability or shared damage state.
     Completed target facts survive removal of the old source; repair of a missing
     target fact requires its explicitly selected source until native re-export.
     """

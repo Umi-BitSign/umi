@@ -138,6 +138,52 @@ async def test_background_poll_retires_then_restarts_and_reuses_original_request
         assert not (f.uploads.archive / f.model / "model").exists()
 
 
+async def test_generation_reuse_never_substitutes_for_retirement_restore_availability(retirement):
+    from umi.competition_chunked_model_backup import BYTE_ABI
+    from umi.competition_model_byte_store import ModelByteStoreConfig
+    from umi.competition_model_generation_store import (
+        ModelGenerationStoreConfig,
+        initialize_generation_owner,
+    )
+    from umi.competition_transport_verification import verifier_semantics
+
+    f = retirement
+    resolution = f.sources.resolve(f.case.cohort, request_sha256=digest(f.request))
+    reader = f.sources.reader(resolution)
+    owner = ModelGenerationStoreConfig(
+        schema="umi-model-generation-owner/1",
+        owner_sha256="ab" * 32,
+        namespace_sha256=digest(reader._namespace()),
+        retention="retain_original_generations_until_authenticated_release",
+    )
+    initialize_generation_owner(reader.root, owner, semantics=[BYTE_ABI, verifier_semantics()])
+    f.sources.byte_stores[f.case.cohort] = ModelByteStoreConfig(
+        schema="umi-model-byte-verification-store/1",
+        directory=str(reader.root),
+        generation_owner=owner,
+    )
+    await f.sources.reader(resolution).verify(completed_only=True)
+    key = next(iter(f.remote.objects))
+    raw = f.remote.objects.pop(key)
+    f.remote.reads.clear()
+    f.remote.heads.clear()
+    async with AsyncExitStack() as stack:
+        await consumers(f, stack)
+        await f.delivery.poll_once()
+        assert f.uploads.allocations.state(f.model) == "local_reserved"
+        assert (f.uploads.archive / f.model / "model").exists()
+        assert key in f.remote.heads and f.remote.reads == []
+        f.remote.objects[key] = raw
+        await f.sources.reader(resolution).repair_generations()
+        f.remote.heads.clear()
+        f.remote.reads.clear()
+        await f.delivery.poll_once()
+        assert f.uploads.allocations.state(f.model) == "released"
+        assert not (f.uploads.archive / f.model / "model").exists()
+        assert f.remote.reads == []
+        assert len(f.remote.heads) == len(set(f.remote.heads))
+
+
 async def test_unselected_partial_model_waits_without_decoding_original_requests(
     retirement, monkeypatch
 ):

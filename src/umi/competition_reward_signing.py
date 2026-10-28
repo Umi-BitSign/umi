@@ -14,7 +14,9 @@ from pathlib import Path
 
 from .competition_cohort_recovery import verify_recovery_authority, verify_recovery_quorum
 from .competition_cohort_reward_package import CohortRewardPackage
-from .competition_reward_adoption import RewardAdoptionSelection, verify_adoption_selection
+from .competition_reward_adoption import RewardAdoptionSelection
+from .competition_reward_adoption_consumer import RewardAdoptionConsumer
+from .competition_reward_adoption_feed import RewardAdoptionFeed
 from .competition_reward_decision_review import (
     ReviewedRewardDecision,
     RewardDecisionIntent,
@@ -43,7 +45,7 @@ class RewardQuorumPending(ValueError):
     """More independent evaluator votes are needed; retained votes remain valid."""
 
 
-class RewardDecisionJournal:
+class RewardDecisionJournal(RewardAdoptionConsumer):
     """One series and signer; directory/capacity changes do not change authority."""
 
     def __init__(
@@ -56,6 +58,7 @@ class RewardDecisionJournal:
         expected_chain_config_sha256: str,
         maximum_bytes: int,
         reward_adoptions: RewardAdoptionSelection | None = None,
+        reward_adoption_feed: RewardAdoptionFeed | None = None,
     ):
         self.series = StandingRewardSeries.model_validate_json(canonical_json_bytes(series))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
@@ -64,8 +67,8 @@ class RewardDecisionJournal:
         if self.series.policy_sha256 != digest(self.policy) or self.signer not in self.reviewers:
             raise ValueError("reward signer differs from its approved series or evaluators")
         verify_recovery_authority(self.series.recovery, self.policy)
-        self.reward_adoptions = verify_adoption_selection(
-            reward_adoptions, self.series, self.policy
+        self._configure_reward_adoptions(
+            reward_adoptions, series=self.series, policy=self.policy, feed=reward_adoption_feed
         )
         self.chain_config_sha256 = expected_chain_config_sha256
         if len(self.chain_config_sha256) != 64 or any(

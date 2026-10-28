@@ -382,12 +382,8 @@ async def test_completed_legacy_cohort_survives_later_direct_reviewer_selection(
     assert await models.restore_completed_model_dependencies(
         case.preparation, historical, {}, cohort_sha256=cohort
     )
-    case.preparation.model_deliveries[cohort] = SimpleNamespace(
-        mechanism="direct_r2_multipart_v1"
-    )
-    with pytest.raises(
-        CoverageModelDependencyRepairRequired, match="verifier context changed"
-    ):
+    case.preparation.model_deliveries[cohort] = SimpleNamespace(mechanism="direct_r2_multipart_v1")
+    with pytest.raises(CoverageModelDependencyRepairRequired, match="verifier context changed"):
         await models.restore_completed_model_dependencies(
             case.preparation, historical, {}, cohort_sha256=cohort
         )

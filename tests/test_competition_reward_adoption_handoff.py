@@ -21,7 +21,8 @@ from umi.competition_reward_coordinator_boot import RewardCoordinatorConfig
 from umi.competition_reward_decisions import RewardActivation, RewardControlDecision
 from umi.competition_reward_opportunity import prepare_early_release_revision
 from umi.competition_reward_timing import RewardActivationAge, activation_effective_block
-from umi.open_competition import digest
+from umi.competition_reward_transition_timing import RewardPredecessorLiveAge
+from umi.open_competition import digest, identity
 from umi.protocol import canonical_json_bytes
 from umi.translation_reference_config import ReferencePublisherConfig
 
@@ -89,7 +90,8 @@ def test_candidate_handoff_changes_only_reward_selection_and_repeats_exactly(han
     assert repeated == staged
 
 
-def test_early_release_revision_uses_same_consumer_handoff(handoff):
+@pytest.mark.parametrize("automatic", [False, True])
+def test_early_release_revision_uses_same_consumer_handoff(handoff, automatic):
     coordinator, writer, initial = handoff
     staged = prepare_reward_adoption_boot_candidates(coordinator, writer, initial)
     config = RewardCoordinatorConfig.model_validate_json(staged.coordinator)
@@ -115,8 +117,25 @@ def test_early_release_revision_uses_same_consumer_handoff(handoff):
         manifest=config.manifest,
         predecessor=predecessor,
         successor_cohort_sha256=initial.adoption.cohort_sha256,
-        issued_at_block=initial.adoption.issued_at_block + 1,
+        issued_at_block=initial.adoption.issued_at_block + 2,
         reason="Operator authorizes release of the certified successor package",
+        live_age=None
+        if not automatic
+        else RewardPredecessorLiveAge(
+            schema="umi-reward-predecessor-live-age/1",
+            series_sha256=digest(config.series),
+            chain_config_sha256=digest(config.chain),
+            predecessor_activation_sha256=digest(predecessor.activation),
+            validator_account_id=identity(config.series.validators[0]),
+            live_at_block=initial.adoption.issued_at_block + 1,
+            live_block_hash="61" * 32,
+            live_timestamp_ms=1000,
+            live_endpoint_sha256="62" * 32,
+            observed_at_block=initial.adoption.issued_at_block + 2,
+            observed_block_hash="63" * 32,
+            observed_timestamp_ms=1000 + 24 * 60 * 60 * 1000,
+            observation_evidence_sha256="64" * 32,
+        ),
     )
     signed = SignedRewardModelAdoption(adoption=proposal, signatures=signatures(proposal))
     result = prepare_reward_adoption_boot_candidates(
@@ -168,11 +187,11 @@ def test_age_revision_preserves_early_release_and_changes_only_signed_timing(han
         issued_at_block=initial.adoption.issued_at_block + 1,
         reason="Operator authorizes release of the certified successor package",
     )
-    signed_release = SignedRewardModelAdoption(
-        adoption=release, signatures=signatures(release)
-    )
+    signed_release = SignedRewardModelAdoption(adoption=release, signatures=signatures(release))
     selected = prepare_reward_adoption_boot_candidates(
-        staged.coordinator, staged.writer, signed_release,
+        staged.coordinator,
+        staged.writer,
+        signed_release,
         early_release_predecessor=predecessor,
     )
     plan = config.series.cohorts[1]
@@ -200,18 +219,23 @@ def test_age_revision_preserves_early_release_and_changes_only_signed_timing(han
     assert proposal.revision == 3
     assert proposal.early_release == release.early_release
     assert proposal.activation_age == age
-    signed_age = SignedRewardModelAdoption(
-        adoption=proposal, signatures=signatures(proposal)
-    )
+    signed_age = SignedRewardModelAdoption(adoption=proposal, signatures=signatures(proposal))
     result = prepare_reward_adoption_boot_candidates(
-        selected.coordinator, selected.writer, signed_age,
+        selected.coordinator,
+        selected.writer,
+        signed_age,
         early_release_predecessor=predecessor,
     )
     assert result.selection.latest(initial.adoption.cohort_sha256) == signed_age
-    assert prepare_reward_adoption_boot_candidates(
-        result.coordinator, result.writer, signed_age,
-        early_release_predecessor=predecessor,
-    ) == result
+    assert (
+        prepare_reward_adoption_boot_candidates(
+            result.coordinator,
+            result.writer,
+            signed_age,
+            early_release_predecessor=predecessor,
+        )
+        == result
+    )
     old_activation = RewardActivation(
         cohort_sha256=initial.adoption.cohort_sha256,
         allocation_sha256=release.allocation_sha256,
@@ -237,26 +261,20 @@ def test_age_revision_preserves_early_release_and_changes_only_signed_timing(han
         predecessor_sha256=digest(old_decision),
         kind="revise_activation",
         observed_at_block=observed,
-        activation=old_activation.model_copy(
-            update={"reward_adoption_sha256": digest(proposal)}
-        ),
+        activation=old_activation.model_copy(update={"reward_adoption_sha256": digest(proposal)}),
         revision_clearance_sha256="33" * 32,
     )
     committed = observed + 1
-    assert activation_effective_block(
-        config.series, old_decision, committed, result.selection
-    ) == (
+    assert activation_effective_block(config.series, old_decision, committed, result.selection) == (
         committed
         + config.series.maximum_proof_lag_blocks
         + config.series.maximum_transaction_lifetime_blocks
     )
-    assert activation_effective_block(
-        config.series, revised, committed, result.selection
-    ) == committed
+    assert (
+        activation_effective_block(config.series, revised, committed, result.selection) == committed
+    )
     with pytest.raises(ValueError, match="signed predecessor"):
-        prepare_reward_adoption_boot_candidates(
-            selected.coordinator, selected.writer, signed_age
-        )
+        prepare_reward_adoption_boot_candidates(selected.coordinator, selected.writer, signed_age)
     with pytest.raises(ValueError, match="eligible signed predecessor"):
         prepare_activation_age_revision(
             selected.selection,

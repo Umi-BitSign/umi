@@ -12,6 +12,7 @@ from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain_resources import CompetitionChainResources
 from .competition_cohort_reward_allocation import CohortRewardAllocation
+from .competition_reward_adoption_consumer import open_reward_adoption_feed
 from .competition_reward_control import FinalizedRewardControlProvider
 from .competition_reward_coordinator_boot import load_reward_coordinator_config
 from .competition_reward_decisions import StandingRewardControlReader
@@ -183,6 +184,11 @@ def selected_inputs(config: ReferencePublisherConfig):
         config.credentials_file,
         *config.allocations.values(),
         *(
+            [selected.reward_adoption_feed.path]
+            if selected.reward_adoption_feed is not None
+            else []
+        ),
+        *(
             str(value)
             for name in CompetitionChainResources.model_fields
             if name != "state_directory" and (value := getattr(config.resources, name)) is not None
@@ -292,6 +298,14 @@ def build_reference_service(config: ReferencePublisherConfig, *, progress=None):
         ),
         maximum_bytes=config.maximum_journal_bytes,
         reward_adoptions=selected.reward_adoptions,
+        reward_adoption_feed=open_reward_adoption_feed(
+            root / "adoption-feed",
+            source=selected.reward_adoption_feed,
+            series=selected.series,
+            policy=selected.policy,
+            initial=selected.reward_adoptions,
+            deferred=True,
+        ),
     )
     channels, stores = [], []
     for selection in config.channels:

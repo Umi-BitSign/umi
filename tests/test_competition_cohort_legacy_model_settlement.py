@@ -158,6 +158,56 @@ async def test_independent_full_bytes_then_fresh_consumers_reuse_without_local_a
     assert c.certificate.acceptance.direct_artifact is None
 
 
+async def test_selected_generation_owner_reuses_legacy_settlement_and_coverage(remote_case):
+    from umi.competition_chunked_model_backup import BYTE_ABI
+    from umi.competition_model_byte_store import ModelByteStoreConfig
+    from umi.competition_model_generation_store import (
+        ModelGenerationStoreConfig,
+        initialize_generation_owner,
+    )
+    from umi.competition_transport_verification import verifier_semantics
+
+    c = remote_case
+    await c.verifier.ensure(c.participant, c.certificate)
+    receipt = c.legacy.verify_candidate(c.participant, c.certificate, c.verifier.receipts)
+    original_paths = (
+        legacy_snapshot_path(c.verifier.receipts, receipt),
+        legacy_seal_path(c.verifier.receipts, receipt),
+        c.verifier._path(c.certificate),
+    )
+    original = {path: path.read_bytes() for path in original_paths}
+    resolution = c.legacy.resolution(receipt.original_request_sha256)
+    reader = c.readers.reader(resolution)
+    owner = ModelGenerationStoreConfig(
+        schema="umi-model-generation-owner/1",
+        owner_sha256="ab" * 32,
+        namespace_sha256=digest(reader._namespace()),
+        retention="retain_original_generations_until_authenticated_release",
+    )
+    initialize_generation_owner(reader.root, owner, semantics=[BYTE_ABI, verifier_semantics()])
+    c.readers.byte_stores[c.case.cohort] = ModelByteStoreConfig(
+        schema="umi-model-byte-verification-store/1",
+        directory=str(reader.root),
+        generation_owner=owner,
+    )
+    c.remote.heads.clear()
+    c.remote.reads.clear()
+    await c.verifier.ensure(c.participant, c.certificate)
+    coverage = await capture_coverage_model_dependencies(c.preparation, c.package, c.prepared)
+    assert await restore_coverage_model_dependencies(c.preparation, coverage)
+    assert c.remote.heads == c.remote.reads == []
+    assert all(path.read_bytes() == raw for path, raw in original.items())
+    selected = c.readers.reader(resolution)
+    key = next(iter(c.remote.etags))
+    c.remote.etags[key] = "changed-generation"
+    with pytest.raises(ValueError, match="generation changed"):
+        await selected.available()
+    with pytest.raises(LegacyModelStorageRepairRequired):
+        await c.verifier.ensure(c.participant, c.certificate)
+    with pytest.raises(CoverageModelDependencyRepairRequired):
+        await restore_coverage_model_dependencies(c.preparation, coverage)
+
+
 @pytest.mark.parametrize("prefix", ["", "preservation/v1/"])
 async def test_prefixed_completions_survive_restart_and_reward_coverage_without_byte_reads(
     case, tmp_path, monkeypatch, prefix
@@ -377,8 +427,13 @@ async def test_lost_completion_acknowledgement_has_explicit_metadata_only_repair
     with pytest.raises(LegacyModelStorageRepairRequired):
         await c.legacy.ensure(c.participant, c.certificate, c.verifier.receipts)
     # The actual native worker selects the qualified metadata-only repair.
+    heads = len(c.remote.heads)
     await c.verifier.ensure(c.participant, c.certificate)
     assert path.read_bytes() == expected and tuple(c.remote.reads) == before
+    # Repair consumes one generation assessment; publishing the exact small
+    # receipt does not change its already checked remote-object dependencies.
+    checked = c.remote.heads[heads:]
+    assert len(checked) == len(set(checked)) == len(c.remote.objects)
 
 
 async def test_interrupted_first_byte_pass_resumes_only_unfinished_files(remote_case):

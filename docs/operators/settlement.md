@@ -24,13 +24,131 @@ manifest, successor cohort and certified package, plus a retained reason. This
 decision waives only the predecessor opportunity minimum; it does not claim
 coverage, change certified scores or grant transaction authority.
 
-For a successor that has no adoption yet, build the first adoption with
+The explicit automatic alternative is adoption `/6`, containing
+`umi-reward-early-release/2` with trigger `predecessor_live_for_24h`. Its signed
+evidence binds a matching predecessor weight row at the row's actual finalized
+write block and a later finalized timestamp at least 24 hours after it. This
+counts elapsed chain time, not accumulated validator coverage and not time since
+intake or certification. The native producer retains the earliest proved live
+anchor and reuses its checkpoint; later polls need only a current observation.
+An operator approval uses the immediate `/5` path. Explicit progression holds
+take precedence over either trigger, and the successor still needs its completed
+certification and authenticated adoption. A ready clock alone never starts scoring,
+closes intake or submits weights. Legacy manifests and interval certificates keep
+their original interpretation; the new release is a separately signed decision.
+
+Configure `reward_transition` on the coordinator and independent reviewers with
+`admission_config`, `settlement_config`, and `operator_approval_directory`.
+The first two paths name root-owned mirrors of the configurations selected by
+the running admission and settlement owners, maintained by the lifecycle hooks
+below. Promote mutable or account-owned service configs to immutable root-owned
+0444 files through their supported handoff before enabling these mirrors. Their
+existing progression holds remain authoritative. The
+approval directory must be root owned and protected from other writers. These
+owners also require `reward_adoption_feed` and its configured replication path.
+Keep private review envelopes within the installed transport and parser bounds:
+an adoption request can contain up to 32 MiB of original proof and 16 MiB of
+metadata, hex encoded, plus the bounded signed intent. It carries no wallet keys.
+
+The recurring producer discovers completed packages before the economics gate,
+reviews each package through the existing native verification owner, and retains
+its exact original issuance before requesting signatures. Both roles reuse their
+durable votes after restart. To request immediate release of an exact completed
+successor, without restarting the coordinator, run:
+
+```sh
+sudo umi-reward-coordinator approve-successor --config /path/to/coordinator.json --predecessor <current-decision-sha256> --cohort <successor-cohort-sha256> --package <certified-package-sha256> --reason 'Operator approved successor reward release'
+```
+
+This signs an approval document using the configured control hotkey. It sends no
+transaction and does not bypass independent review or quorum. An exact retry
+reuses the recorded approval without reopening the key or signing again. A held
+cohort refuses approval; remove a hold only through its separately authorized
+admission/settlement transition. Without approval, the producer waits for the
+24-hour native live-row boundary. A missing old anchor requests recovery of one
+explicit row-write endpoint, never a new full-history pass.
+
+For installations still using static adoption selection, build the first adoption with
 `prepare_initial_early_release_adoption` so the release needs one quorum vote.
 For an already selected adoption, use `prepare_early_release_revision`, sign
 its exact bytes with the configured recovery quorum and append them with
 `select_signed_early_release_revision`. Reuse a previously authenticated
 finalized issuance anchor where its binding still applies. Both builders leave
 the certified package untouched and require the exact signed predecessor.
+For the automatic alternative, pass `live_age` from
+`predecessor_live_age_from_owned_control`; do not construct it from RPC-reported
+timestamps or a local clock. The same native signature, selection and consumer
+handoff paths carry either release. Install the compatible `/6` readers before
+selecting an automatic adoption; older supported readers reject that schema
+without changing their retained `/1`–`/5` evidence.
+
+Coordinator and writer boots may select a `reward_adoption_feed` object with
+`path` (an absolute shared selection-file path) and `maximum_bytes` (default
+4 MiB). The configured producer atomically publishes complete, quorum-signed
+selections there. Each consuming service retains its own private append-only
+frontier; coordinator reader, signer and offers share one accepted snapshot.
+Writer, reference publisher and public score publisher refresh during their normal
+operations. Package delivery uses `RewardPackageSelection` on each enumeration.
+When the coordinator also enables `reward_transition`, the delivery adapter selects
+`allow_completed_successors=True`: it discovers completed package filenames from
+the exact signed series before their first reward adoption, so native review can
+prepare that adoption. Discovery reads no model or proof payload and grants no
+signing or publication permission. Feed-only installations still enumerate only
+adopted cohorts; both modes refuse damaged feeds and need no copier restart for
+later cohorts. Without the optional feed, existing boots retain their original
+behavior and canonical bytes.
+
+Bind the feed's **parent directory**, read-only, into each consuming service
+namespace: binding just the file inode hides atomic replacements. Preserve each
+service's private `adoption-feed` state through updates. Removed, malformed or
+rolled-back selections stop new adoption-dependent work and require explicit
+repair; they do not reset a consumer to an empty frontier. Unchanged file
+identities reuse their accepted selection without payload reads, and checkpoints
+retain each signed revision once. A feed transports existing approval; it neither
+signs an adoption nor overrides cohort holds.
+
+### Bounded request and vote transport
+
+Run the native exchange delivery adapter alongside package delivery. Select the
+actual coordinator and reviewer boots, their two reciprocal outbox/inbox routes,
+and a dedicated durable transport state directory. Keep the existing generic
+artifact copier frozen if it has been deliberately frozen; the exchange adapter
+does not need its proof, model, journal or historical tree routes. On a shared
+host, bind the signed adoption feed's parent directory directly into consumers;
+do not send its mutable file through an immutable artifact copier.
+
+Each proposer publishes a small `transport/<series>/decision.json` cursor and
+one `transport/<series>/adoption-<cohort>.json` cursor per active successor after
+retaining the exact immutable request. Separate cursors prevent normal decision
+and adoption publishers from overwriting each other's progress. Delivery derives
+only the current request and configured independent peer vote paths. Ordinary
+requests carry their complete signed predecessor prefix, allowing a reviewer to
+catch up without transporting every historical request. Completed adoptions are
+excluded using the authenticated feed. Cursors grant no signing authority: the
+recipient still performs native request validation and independent review.
+
+Upgrading an existing owner requires no directory inventory or proof replay:
+its next ordinary publication or adoption retry exports the exact retained
+request's cursor, including the adoption publisher's in-memory reuse path.
+Missing cursors before first export mean no selected request yet. Once accepted,
+a removed, malformed or rolled-back cursor is an explicit transport repair hold.
+Restore it through that same publisher's exact retry; do not erase the transport
+frontier or copy private signing journals. Preserve the adapter's selection and
+immutable-copy receipts across restarts and upgrades. Unchanged selection uses
+filesystem identities, and unchanged delivered payloads reuse the copier's
+durable comparison results. The adapter also retains inode, size, modification
+time and change time for both files; a changed identity invalidates only that
+file's comparison, even if its size and modification time were preserved. These
+receipts attest transport only.
+Native publications are immutable and use atomic installation. In-place mutation
+that preserves every stat field, including change time within one filesystem
+clock tick, cannot be detected by metadata-only reuse and is unsupported. Native
+recipients independently authenticate the original request and vote bytes.
+
+Discovery reports counted cursor progress and elapsed time; copy progress and
+ETA cover the two selected routes and their actual bytes. A missing peer vote
+is pending independent review, not completed quorum. Transport health alone
+does not confirm native acceptance, adoption or a finalized weight row.
 
 If an already selected early release omitted the cohort age attestation, obtain
 the cohort-start timestamp at the plan's signed `not_before_block` and a fresh
@@ -116,6 +234,77 @@ broader historical umask is not a reason to broaden access or reset its contents
 Use the existing authenticated remote proof transport for cross-account or remote
 delivery; do not broaden permissions or share private signer state. The optional
 selection changes no signed format, native proof semantics or historical clocks.
+
+### Authoritative progression-hold mirrors
+
+Services may select a new immutable config path on every supported upgrade.
+Keep `reward_transition.admission_config` and `settlement_config` pointed at
+stable mirror paths, with the mirror parent directory mounted read-only into
+reward consumers. Binding an individual file inode would hide atomic updates.
+Install one root-owned canonical 0444 owner file per logical role:
+
+```json
+{"role":"settlement","schema":"umi-reward-hold-mirror/1","service_user":"umi-validator-uid54","target":"/var/lib/umi/reward-holds/settlement.json","unit":"umi-c5-primary-settlement-uid54.service"}
+```
+
+Use `role: "admission"` and the actual admission unit for its corresponding
+owner file. Create the mirror directory root-owned and protected from other
+writers. Configured units and paths are explicit; the helper does not discover
+or enable unrelated services. Render the drop-in for the selected installed
+interpreter and immutable source release:
+
+```sh
+sudo /path/to/installed/python -I -B -c "import runpy,sys;sys.path.insert(0,'/opt/umi/selected-release/src');runpy.run_module('umi.competition_reward_hold_mirror_cli',run_name='__main__')" drop-in --config /etc/umi/reward-holds/settlement-owner.json --python /path/to/installed/python --source-directory /opt/umi/selected-release/src
+```
+
+The command and generated hooks explicitly select the immutable source before
+importing UMI. Use `-m umi.competition_reward_hold_mirror_cli` and omit
+`--source-directory` only when UMI is installed in the selected interpreter. Inspect and
+install the output as a persistent drop-in on the named unit through its
+supported handoff. Rendering performs no install, daemon reload or restart.
+Preserve this drop-in and its durable source dependency during later upgrades.
+
+The three privileged hooks invalidate the visible mirror before startup,
+publish it after startup, and invalidate it after stop. Missing or failed
+publication stops new reward transitions. The publisher reads structured
+system-manager `ExecStart`, matches the actual process, service account and
+cgroup, and reads only its bounded, single-link, root-owned 0444 config.
+The default mirror retains those exact bytes.
+It supports module entry points, installed console scripts and existing
+`runpy` wrappers with either literal `sys.argv` or trailing arguments. A config
+changed after the owner started requires the supported owner restart; a stale
+process cannot advertise newly edited bytes as its loaded configuration.
+
+For an already running, qualified owner, the same command with `publish`
+instead of `drop-in` seeds the mirror without restarting the service. Both
+roles must be published before enabling reward-transition consumers. Publication
+brackets the copy with process/config identity checks and removes the mirror
+on failure. Successful source checks remain in bounded root-owned receipts:
+unchanged refreshes do not reread config payloads, and startup reuses unchanged
+validation. Hooks report counted stages, elapsed time and a scoped planning ETA.
+
+When supported reward readers predate the intake scheduling fields, explicitly
+select `"admission_compatibility": "umi-reward-hold-admission-pre-scheduling/1"`
+in the admission mirror owner file. This versioned projection validates the
+complete actual config with the selected current native parser, then omits only
+`recoverable_service.lifecycle.held_intake_sampling_cohorts` and
+`recoverable_service.lifecycle.request_start.operator_start_overrides`. Neither
+field determines a reward hold. All reward holds, series, policies, authority
+bindings and other supplied values remain unchanged. The projected file is only
+a reward hold-reader view; never select it as an intake startup configuration.
+Settlement mirrors cannot select this projection.
+
+Projected publication retains the exact original in `TARGET.source.json` and
+records its SHA256, the projection policy, the output SHA256 and immutable file
+identities in a version 2 receipt. Lifecycle invalidation retains this bounded
+evidence; an unchanged restart reuses the completed full validation. Changed or
+damaged retained source/output identities fail closed with a repair error.
+Switching back to exact mode retains the bounded original source as evidence.
+Deploy the publisher source and owner-file selection through the supported hook
+handoff, then use `publish` to refresh an already running owner's mirror. Legacy
+reward consumers with the stable directory mount can read the compatible view
+without restarting. Qualify the actual selected legacy parsers and hold decisions
+before claiming adoption; a newer parser accepting the view is insufficient.
 
 ## Work progress and ETA logs
 
@@ -810,6 +999,23 @@ owns its checkpoint through persistence. Application remains in block order, and
 failure or cancellation drains started work before releasing the history owner.
 The overlap does not change proof formats, signed clocks or completed receipts.
 
+Proof export batches independent objects and their original recipes across fields,
+within the existing byte bound and a 256-object batch limit. The immutable frame
+is published only after every dependency has a durable receipt. Unchanged restored
+graphs check their receipt and damage records in bounded fresh snapshots without
+creating upload workers or contacting R2. Missing or damaged completed records
+still require explicit repair; transport completion never substitutes for native
+proof acceptance.
+
+Use `proof_archive_export` progress for complete per-frame export wall time and
+`history_native_verification` for serial native verification wall time. Parallel
+owners report `history_native_worker_wait`, which includes worker queue/wait time
+and excludes subsequent source/checkpoint persistence. Restoring a completed
+native checkpoint emits no native verification scope. `proof_graph_receipt_lookup`
+separately identifies retained-receipt work. Concurrent scopes overlap: do not sum
+their elapsed times or interpret replication scope time as pure network latency.
+The existing history pipeline rate remains the basis for measured catch-up ETA.
+
 The parent authenticates each child header against its owned finalized chain.
 Each bounded retained-proof window obtains one verified finalized head and reuses
 it only for the historical headers in that window. Every header still requires
@@ -970,8 +1176,8 @@ exporters. Cache and index limits are explicit host capacities; size them for th
 cohort's retained range and full supported object size. An exhausted capacity
 holds visibly without silently evicting durable verification state. The payload
 cache is bounded, disposable and separate from private acknowledged receipts
-under the original archive's `.remote-state` directory. Each store serializes
-bounded transfers; active payload leases prevent eviction.
+under the original archive's `.remote-state` directory. Each store bounds
+concurrent transfers; active payload leases prevent eviction.
 
 The private receipt index uses capability generation 4 and a separate immutable
 completion ledger. Startup upgrades older indexes transactionally using only
@@ -979,6 +1185,30 @@ their retained metadata, with counted progress and an ETA. Original receipt
 bytes, owner binding and journal inode stay intact. Old runtimes and reservation
 layout changes refuse this capability; keep its completed ledger with the index.
 A missing receipt is damaged completed state, not permission to import it again.
+
+Tiny evidence objects (at most 4 KiB) start with a conditional PUT; larger objects
+retain HEAD-first publication. An exact expected single-part ETag completes
+publication without another HEAD. Content-MD5 and signed SHA metadata bind the
+original payload. A 412 response or missing ETag still requires exact HEAD
+verification; an explicit mismatched ETag fails without a receipt. A tiny upload
+without a retained acknowledgement may resend at most 4 KiB in a conditional
+attempt before reading the existing generation; it never overwrites it. Larger
+objects retain HEAD-first recovery. Completed local receipts avoid remote I/O.
+Owned publisher lanes reuse their HTTP client across requests.
+
+For a new remote frame, already prepared proof encodings combine adjacent
+segments smaller than 4 KiB into literal objects while retaining larger shared
+objects. The original `/1` decoder, expanded proof identity and native verification
+remain unchanged. Existing destination frames retain their exact recipes, and
+local archives keep their existing representation. Retained local frames also
+keep their recipes when exported, so their request reduction comes from tiny
+conditional PUTs rather than coalescing. Coalescing reduces tiny-object
+requests but can increase stored bytes when small objects are shared across
+frames; compare newly uploaded bytes as well as throughput. Large prepared object
+identities are reused without rehashing, while newly joined partial slices need
+their first content digest. Existing transfer, cache, chunk and publication limits
+still apply. Completed transport receipts and native checkpoints remain reusable;
+the representation change does not authorize replaying completed proof work.
 
 Objects use content-addressed keys. Complete original `/1` frames publish after
 their dependencies using conditional single PUT, SHA metadata and exact single-PUT
@@ -2350,6 +2580,53 @@ documents produce a retained hold reason. An artifact that cannot pass review
 never enters the cohort roster and therefore cannot hold sealing or settlement
 open. Earlier host schemas retain their original behavior for recovery replay.
 
+### Research-model training permissions and terms selection
+
+Apply the [conditional C7+ training-data rulings](../contributors/models.md#training-data-and-research-model-licensing)
+per model. Permitted NC-trained models and inherited NC checkpoints use
+`CC-BY-NC-SA-4.0` with fresh consent to the
+[NC supplement](../MODEL_CONTRIBUTION_TERMS_NC_V1.md). Permissive-only models keep
+their original license and terms. The operator's conditional decision supersedes
+the PDF's universal-NC clause. Neither route changes the signed cohort clocks,
+baseline identity, resource limits or reward rule.
+
+Use the authenticated model-license adoption carried by a version-2 bundle to
+bind the exact base policy, original terms, cohort authority, minimum sequence,
+NC supplement, source-rights policy and retained operator decision. The adoption
+must carry the configured authority signatures. It extends the model route; do
+not replace the whole cohort policy or reward series to add NC models. The
+shared `validate_bundle_policy` reader verifies both original bundles and the
+conditional route. Endpoint, delivery and suite adoptions grant no model rights.
+
+The new submission binds the NC supplement in `accepted_terms_sha256`; fresh
+cohort consent binds that exact submission. The older permissive signature
+cannot authorize an NC model. Changed license or document bytes require a new
+manifest and signatures. Preserve old submissions, acceptances and signed
+evidence; unchanged permissive models keep their original path.
+
+Artifact review checks the authenticated, bounded declaration documents using
+the selected source-rights contract. The
+[provenance format](../reference/model-training-provenance.md) documents required
+records, source decisions and review limits. The caller authenticates each
+document once; the rights classifier reuses those bytes and manifest digests.
+An unselected contributor-supplied permission hash cannot approve a bespoke
+source contract. Newly recorded rights-holder permission requires an
+authenticated source-contract revision, not a local exception.
+
+Select the same route in the supported model client, intake, independent
+reviewers, evaluation/settlement, reward replay and reference publication.
+Verify published release selections and installed readers before claiming live
+adoption. The model client updates when its supported installer is rerun; a
+main-branch commit alone does not update an installed miner. Preserve the
+existing version-1 artifact review and retained completion records.
+
+The standing artifact review reads declared documents; it does not execute the
+rights review's memorisation probe. The PDF gives no numeric threshold for that
+probe. Record the missing threshold and any other unresolved full-policy
+conditions explicitly; do not invent them or equate ordinary quality scoring
+with completion. A documentation or license-selection change must not be
+reported as full adoption of every condition in the PDF.
+
 ## Lost coordinator outcomes
 
 A dispatched claim without a durable response remains uncertain. Never resend it,
@@ -3645,9 +3922,10 @@ bounds each local directory rather than collecting all facts in one flat folder.
 
 Chunked model readers use 32 concurrent metadata HEAD workers by default. The
 reader constructor accepts an explicit `metadata_workers` override from 1 to 32.
-This changes metadata transport only: payload transfer and materialization keep
-their own budgets, and every initial and final object-generation check remains
-required.
+Without an explicitly selected generation owner, initial and final generation
+checks retain their existing behavior. A selected owner reuses intact completed
+generations as described below; actual transfers still validate the original
+remote generation and bytes.
 
 Transfer progress keeps byte counts and completed GET/HEAD operation counts
 separate. Restored work contributes to neither native rate. When both rates are
@@ -3674,12 +3952,121 @@ Legacy settlement completion snapshots retain full remote object keys, including
 the authenticated `object_key_prefix`. Certification, reward preparation and
 coverage recovery compare those exact prefixed keys with the original chunk
 digests and sizes. They reuse the existing completion and snapshot unchanged
-across restart, with fresh remote generation checks. Updating a reader that
+across restart. An explicitly selected generation owner reuses this completion;
+older layouts keep fresh remote generation checks. Updating a reader that
 previously omitted the prefix requires no model download, rehash, rewritten
 acceptance or receipt migration. A changed prefix, namespace, chunk coverage or
 generation still requires explicit repair. Carry this reader through both the
 private settlement services and signed reward coordinator/writer hosts; a local
 settlement-source update alone does not update every consuming host.
+
+Repairing a missing small legacy completion receipt confirms its original remote
+generations once, or consumes its selected intact generation owner, then publishes
+the exact retained receipt and reuses that result
+when authenticating the restored receipt. If the authenticated receipt differs,
+its dependencies still require their own check. This removes a duplicate check
+within that repair; layouts without a selected generation owner keep their
+ordinary settlement and coverage generation checks.
+
+The optional `generation_owner` within the same `shared_byte_store` selects a
+common damage and retention owner. It uses schema `umi-model-generation-owner/1`,
+a nonzero `owner_sha256` naming the retained root-controlled retention decision,
+`namespace_sha256` for the canonical endpoint/bucket/prefix namespace, the literal
+`retention: "retain_original_generations_until_authenticated_release"`, and bounded
+`maximum_bytes` (default 256 MiB). This selection retains the original generations;
+it does not authorize remote deletion, replacement or model admission. The owner
+has no remote-delete operation. All same-account readers that share damage state
+must select this exact owner and durable root. Independent roots are independent
+owners; do not describe a byte export as sharing their damage state.
+
+Provision a new owner once with `python -I -B -m umi.competition_model_byte_store_cli
+initialize-generations --request PATH`. The canonical root-controlled mode0444
+request has schema `umi-model-generation-owner-initialize/1` and a `store` containing
+the full selected byte-store configuration. Initialization creates no completed
+model fact and performs no remote access. It is idempotent for intact owner state.
+If the rename of a new native journal finished but enrollment publication was
+interrupted, repeating initialization resumes only that exact empty journal with
+its original binding. A missing enrollment on an established owner, or a missing
+journal with retained enrollment, remains an explicit metadata repair. Never use
+initialization to reset an existing owner or restore a pre-damage snapshot to
+forget failures. Supported upgrades must preserve the complete
+`generation-owners-v1/` subtree with the native byte store. Portable byte exports
+remain byte facts only and do not replace that owner state.
+
+Installed source launchers may invoke this CLI through its canonical module or
+the retained `runpy.run_module(..., run_name="__main__")` convention. Both resolve
+the request schemas before any initialization effect. During upgrade staging,
+qualify the exact interpreter, source, account and root-controlled request before
+stopping consumers, then retain and reuse that result for unchanged bindings.
+
+On the first selected use, the reader migrates exact native file completions or
+an independently bound legacy settlement seal/snapshot. This is a counted,
+metadata-only migration: original receipt, snapshot, seal and signed acceptance
+bytes remain intact. Each imported object completion is checkpointed, so an
+interruption reuses finished work. A completed owner scope then supplies original
+object key/digest/size/ETag and compatible verifier semantics without HEAD or
+payload rehash. Its immutable enrollment and completion markers prevent lost or
+damaged ledger records from silently becoming fresh work. Native model, cohort,
+rights, admission, quorum and reward authority remain separately authenticated.
+
+Recorded completion is historical byte validity, not proof of current remote
+availability. Explicit `available()` probes and real restoration/read operations
+still contact R2. Missing, changed or corrupt results create an append-only damage
+hold visible to every consumer of the selected owner, including settlement and
+reward coverage. Network failures, rate limits and quota failures remain retry
+errors and do not invent object damage. Local retirement keeps its existing live
+consumer leases, restore coverage and current availability checks; this feature
+never substitutes an old completion for those requirements.
+
+Redacted retry causes preserve `r2_http_status` for native R2 HTTP failures,
+including nested causes. This bounded numeric status distinguishes authentication
+responses, throttling and server errors without exposing URLs, credentials or
+response bodies. A status alone does not establish account credit exhaustion;
+check the selected provider/account when diagnosing sustained retries.
+
+When ordinary generation metadata capacity is exhausted, the owner retains a
+compact immutable pending event for each affected original object. Unaffected
+completed objects remain reusable. The emergency allowance is bounded to one
+outstanding damage event and one outstanding repair event per completed object,
+with at most 512 bytes per event; account for this metadata headroom in the
+selected filesystem. These records are never deleted to make capacity available.
+
+Use `python -I -B -m umi.competition_model_byte_store_cli grow-generations --request
+PATH` to increase capacity. Its canonical root-controlled mode0444 request has
+schema `umi-model-generation-owner-grow/1` and the same `store` identity with a
+larger `generation_owner.maximum_bytes`. The native command appends the exact
+capacity decision and checkpoints each pending event into ordinary history.
+Original enrollment and ledger binding bytes remain unchanged. Repetition and
+interruption reuse completed event migration. Old installed configurations can
+consume the retained larger limit on reopen; selecting a larger limit before its
+native command is refused. Capacity may not shrink. If the requested limit is
+still insufficient, completed migration remains and the remaining original events
+stay held with counted repair progress.
+
+Capacity recovery performs no remote request or byte hash and does not clear
+object damage. A pending repair that already completed its original transfer is
+retained and promoted without repeating that transfer; any later damage remains
+independently held. A native owner restart also lets SQLite recover an abandoned
+hot rollback journal using its original committed state. SQLite locking preserves
+live writers; contention reports a retry. Never delete a journal sidecar or
+substitute an older database to force startup.
+
+After restoring the original remote object, run `python -I -B -m
+umi.competition_model_byte_store_cli repair-generations --request PATH` with the
+same authenticated `umi-model-byte-store-export-request/1` request used by export.
+The native candidate reauthenticates the original model inventories and selected
+owner, then reads and hashes only damaged chunks and requires the original ETag.
+A changed ETag requires authenticated adoption, not clearing or overwriting an
+old completion. The repair appends history rather than deleting evidence; a
+concurrent new damage observation prevents the repair from clearing it. It does
+not re-sign or republish a cohort or repair another independent owner's state.
+
+Owner initialization, metadata migration, completion and original-generation
+repair expose counts, elapsed time and planning/measured ETA through the existing
+progress channel. Missing owner metadata is an explicit repair condition. Install
+this reader and the identical owner selection in every affected candidate,
+reviewer, preparation, settlement, coverage and writer service before claiming
+shared reuse; publishing source alone does not select a common owner.
 
 Provision a separate mode0700 root owned by each actual service UID. Candidate,
 reviewer and owner may reuse one root only when they run as that same UID; another
@@ -4422,16 +4809,56 @@ The admission host accepts `recoverable_service.lifecycle.automatic_progression_
 as a list of configured cohort digests. An empty or omitted list preserves historical
 configuration bytes and behavior. With a cohort selected, its automatic lifecycle
 worker reports `automatic_progression_held` and constructs no phase controller:
-it cannot publish history, sample availability, seal intake, request votes or resume
+it cannot publish history, seal intake, request votes or resume
 a retained phase intent. Admission HTTP workers, upload processing and unselected
 cohorts remain configured normally. Explicit operator recovery/signing interfaces
 remain separate; do not use them to close a held cohort.
+
+By default a held worker does not sample availability. To keep a genuinely open
+intake window measured while waiting for an authorized release, explicitly select
+that cohort in `held_intake_sampling_cohorts`, a subset of the hold list. Its native
+intake owner then retains only actual finalized readiness observations, with no
+controller, votes, seal or phase changes. The hold report includes the sampled
+block, retained observation count, healthy service blocks and any sampling retry.
+The next-sample ETA is separate from the unknown hold-release ETA. Unknown time
+before sampling and gaps across a process restart remain unavailable; previously
+retained healthy intervals survive. Existing independent reviewers consume the
+unchanged native receipt format after release. This owner-only option requires no
+miner or reviewer protocol upgrade; select it only on a host supporting the field.
 
 Drain the owning service cooperatively before selecting this configuration, preserve
 its state directories and signed history, then restart and verify the hold report
 and admission health. The setting does not undo a seal or decision already retained;
 inspect the actual phase and pending intent before deployment. Remove the selected
 digest only after the intended release is qualified, through the same supported
-service transition. No signed clocks are reset; native availability recovery accounts
+service transition, removing it from both lists if sampling was selected. No signed
+clocks are reset; native availability recovery accounts
 for unsampled intervals when progression resumes. The reported ETA is unknown while
 waiting for explicit release, rather than a deadline that automatically lifts the hold.
+
+An explicitly authorized scheduled challenge start can select
+`request_start.operator_start_overrides`. Each entry uses schema
+`umi-cohort-operator-request-start/1` and binds the cohort, authorized signed-history
+tip, effective suite, baseline model, evaluation runtime and runtime-adoption
+digests, the absolute `not_before_unix_ms`, and the retained authenticated operator
+decision's `source_sha256`. The native reader checks the authorized history prefix
+and allows only ordinary phase closures after it. It checks the current reviewed
+promotion and signed runtime selection without restoring model payloads. A changed
+suite, baseline or runtime refuses startup under that decision. The first verified
+clock observation is retained, so restart preserves its countdown and refuses a
+conflicting override. Preserve the exact decision and selected configuration in the
+service handoff controls.
+
+This override replaces only the local five-hour request-rest floor for that cohort.
+It does not close intake, satisfy native availability, sign preparation, replace
+the predecessor's certified request closure, authorize weights or backdate cutover.
+Other cohorts keep their normal rest rule and every old rest/cutover receipt stays
+unchanged. The finalized chain clock and configured future-skew allowance must
+reach the authorized floor before native preparation can advance to requests.
+The preparation target is a completion budget rather than a minimum wait: a
+completed, independently certified preparation can close before that target.
+Remove the hold at the scheduled time using the existing cooperative service
+transition; confirm actual native phase progression and first execution separately.
+This local gate does not change signed phase evidence or miner/validator protocols.
+Select the new owner configuration only with a source supporting the optional
+field; keep the original configuration for an older-owner rollback.

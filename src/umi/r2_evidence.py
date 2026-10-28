@@ -17,6 +17,10 @@ import httpx
 
 from .r2_sigv4 import R2SigV4
 
+# Bound the retry body cost when a prior successful PUT lost its acknowledgement.
+# Larger objects keep the HEAD-first path so recovery never resends their bytes.
+_PUT_FIRST_MAX_BYTES = 4 * 1024
+
 
 @dataclass(frozen=True, slots=True)
 class EvidenceObjectHead:
@@ -138,14 +142,15 @@ class R2EvidenceClient:
     def _publish(self, key: str, raw: bytes, sha256: str) -> EvidenceObjectHead:
         md5 = hashlib.md5(raw, usedforsecurity=False).digest()
         expected = EvidenceObjectHead(len(raw), md5.hex(), sha256)
-        retained = self.head(key)
-        if retained is not None:
-            if retained != expected:
-                raise ValueError("immutable R2 evidence object conflicts with publication")
-            return retained
+        if len(raw) > _PUT_FIRST_MAX_BYTES:
+            retained = self.head(key)
+            if retained is not None:
+                if retained != expected:
+                    raise ValueError("immutable R2 evidence object conflicts with publication")
+                return retained
         # A simultaneous publisher cannot replace another original. The same
         # conditional request is safe after an unacknowledged successful PUT.
-        self._exchange(
+        status, headers, _ = self._exchange(
             "PUT",
             key,
             body=raw,
@@ -157,8 +162,19 @@ class R2EvidenceClient:
             maximum=64 * 1024,
             statuses=(200, 201, 412),
         )
+        if status in {200, 201} and "etag" in headers:
+            # This single-part conditional PUT carried Content-MD5 and the
+            # signed SHA metadata. Its exact ETag acknowledges these original
+            # bytes; a second HEAD adds no publication evidence. Keep the
+            # original HEAD path for a racing writer (412) or an incomplete
+            # acknowledgement. Never turn an explicit mismatch into success.
+            if headers["etag"] not in {expected.etag, '"' + expected.etag + '"'}:
+                raise ValueError("R2 evidence publication acknowledgement differs")
+            return expected
         retained = self.head(key)
         if retained != expected:
+            if status == 412:
+                raise ValueError("immutable R2 evidence object conflicts with publication")
             raise ValueError("R2 evidence publication acknowledgement differs")
         return retained
 

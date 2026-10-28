@@ -593,6 +593,7 @@ async def test_common_switch_preflight_accepts_only_the_bound_bridge_pair(
     class Adapter:
         def __init__(self, received_config) -> None:
             assert received_config is config
+            self.https = _BundleHTTPS(b"")
 
         async def check_host(self) -> None:
             return None

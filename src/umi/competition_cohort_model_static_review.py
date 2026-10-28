@@ -18,6 +18,7 @@ from pydantic import Field, model_validator
 
 from .competition_artifacts import _artifact, _directory, verify_preserved_bundle
 from .competition_cohort_model_acceptance import ModelArtifactReviewInputs
+from .competition_model_license import verify_model_license_adoption
 from .open_competition import CompetitionPolicy, ModelBundle, digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -159,12 +160,38 @@ def _review_from_documents(
     if not any(item["role"] == "provenance" and item["text"].strip() for item in documents):
         raise StaticModelReviewHeld("declared_provenance_document_missing")
 
+    from .competition_model_training_rights import (
+        NC_CONTRIBUTION_TERMS_SHA256,
+        declared_nc_training,
+        validate_model_training_provenance,
+    )
+
+    license_adoption, training_review = None, None
+    try:
+        if bundle.license_adoption is not None:
+            license_adoption = verify_model_license_adoption(bundle, policy)
+            if license_adoption.noncommercial_terms_sha256 != NC_CONTRIBUTION_TERMS_SHA256:
+                raise StaticModelReviewHeld("conditional_model_terms_not_supported")
+            training_review = validate_model_training_provenance(
+                bundle,
+                raw_documents,
+                rights_policy_sha256=license_adoption.training_rights_policy_sha256,
+            )
+        elif declared_nc_training(raw_documents):
+            raise StaticModelReviewHeld("declared_nc_training_requires_authenticated_nc_route")
+    except ValueError as error:
+        raise StaticModelReviewHeld(str(error)) from error
+
     model_sha256 = digest(bundle)
     decision = {
         "schema": "umi-standing-model-artifact-rights-decision/1",
         "review_policy_sha256": review_policy_sha256,
         "competition_policy_sha256": digest(policy),
-        "contribution_terms_sha256": policy.contribution_terms_sha256,
+        "contribution_terms_sha256": (
+            policy.contribution_terms_sha256
+            if license_adoption is None
+            else license_adoption.noncommercial_terms_sha256
+        ),
         "standing_approval_record_sha256": standing.standing_approval_record_sha256,
         "approved_by": standing.approved_by,
         "approved_at_utc": standing.approved_at_utc,
@@ -173,13 +200,28 @@ def _review_from_documents(
         "licenses_and_notices_reviewed": True,
         "public_redistribution_and_evaluation_approved": True,
     }
+    if license_adoption is not None:
+        decision.update(
+            schema="umi-standing-model-artifact-rights-decision/2",
+            approval_basis="quorum_authorized_conditional_model_terms_and_declared_source_review",
+            original_contribution_terms_sha256=policy.contribution_terms_sha256,
+            license_adoption_sha256=digest(license_adoption),
+            training_rights_policy_sha256=license_adoption.training_rights_policy_sha256,
+            operator_decision_sha256=license_adoption.operator_decision_sha256,
+            declared_training_rights_review=training_review,
+        )
     return ModelArtifactReviewInputs(
         model_sha256=model_sha256,
         rights_evidence={
-            "schema": "umi-standing-model-rights-review/1",
+            "schema": (
+                "umi-standing-model-rights-review/1"
+                if license_adoption is None
+                else "umi-standing-model-rights-review/2"
+            ),
             "model_sha256": model_sha256,
             "declared_license_id": bundle.license_id,
-            "accepted_model_licenses": list(policy.accepted_model_licenses),
+            "accepted_model_licenses": list(policy.accepted_model_licenses)
+            + ([] if license_adoption is None else [license_adoption.license_id]),
             "original_documents": documents,
             "decision": decision,
         },

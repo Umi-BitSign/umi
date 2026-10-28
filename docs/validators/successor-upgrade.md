@@ -792,6 +792,17 @@ interval forecast during shutdown and report drainage separately; a drained
 reader does not imply a completed history interval. Signing and submission keep
 their existing ownership shield.
 
+Parallel history readers publish the frames in an already admitted window
+concurrently, while the owner applies their effects strictly by block height.
+Each successful export records its own durable checkpoint, so a failed earlier
+export does not discard completed later delivery. Cancellation drains every
+started export before releasing frame or source ownership. This introduces no
+additional frame prefetch: configured window capacity and the shared transport's
+object and byte limits still apply. Existing proof formats, native verification
+semantics and checkpoint compatibility are unchanged. Adopt the qualified host
+through the same maintenance path; this internal scheduling change requires no
+miner configuration or follower-image change.
+
 For an existing isolated history preparation whose operational allowance is
 too small, use `python -m umi.competition_reward_history_preparation_capacity_cli`.
 This supported transition is retained while deployed preparation directories
@@ -2238,10 +2249,14 @@ another phase.
 
 The proposer exports its original registration archive, runtime metadata and
 native result objects before publishing a request. `SettlementRegistrationFiles`
-uses bounded, immutable proof
-frames; the receiver authenticates them against its own finality provider. The
-file envelope alone supplies no verification authority. Existing exported proof
-bytes remain available when the original provider is offline. The reviewer loop
+reuses completed output publications, then consults its configured proof inbox
+and shared registration archives before asking its own provider for the retained
+original. It preserves the original proof bytes, bounded immutable frame and
+codec recipes, including older supported encodings. A present damaged archive
+requires repair; it is never hidden by trying another source. Completed local
+frames and remote publication receipts avoid payload reads on restart. The
+receiver still authenticates the proof against its own finality provider; the
+file envelope alone supplies no verification authority. The reviewer loop
 visits only the eight selected slots, logs retry reasons without evidence payloads,
 and continues after an unavailable slot. All these stores are private.
 

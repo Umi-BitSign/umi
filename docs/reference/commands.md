@@ -211,11 +211,9 @@ contribution terms and submission route. Until that opening, prepare the bundle
 without signing against another intake policy. Read the active policy for the
 service and model reward shares and the cohort manifest for allowed tracks. A
 successor plan may replace any unopened cohort's profile; use the live signed
-manifest rather than assuming rules from the cohort number. Under the current
-model rules, a complete accepted model must match or beat the frozen baseline.
-Exact copies count once, and the remaining eligible models receive one credit per
-occupied fixed five-percentage-point quality band. Historical allocations keep
-their original split and burn rules without a later retroactive award.
+manifest rather than assuming rules from the cohort number. The signed authority
+selects the baseline threshold, duplicate handling and reward allocation. Keep
+historical allocations under their original signed rules.
 
 The manifest below is an advance-preparation aid only. Read the
 [model preparation and rights checklist](../contributors/models.md). Do not
@@ -248,11 +246,63 @@ current value of `.baseline.model_sha256` from `competition-status.json` as the
 parent. The policy's `.accepted_model_licenses` lists the identifiers eligible
 for review. An eligible identifier is not a rights approval.
 
-Validate the manifest and compute its domain-separated revision from a checkout
-of this repository with its environment installed:
+#### Optional non-commercial model terms
+
+For models trained on permitted non-commercial sources, use the additional
+signed route only when the target cohort publishes it. Models using the
+original permitted sources keep bundle `/1`, their original licenses and terms.
+Read the [conditional supplement](../MODEL_CONTRIBUTION_TERMS_NC_V1.md) and
+[training-source requirements](../contributors/models.md) before preparing the
+new artifact. Do not relabel an already signed submission or its baseline.
+
+With the current cohort history, its expected tip and finalized block already
+selected, fetch and authenticate the optional route using the installed client:
 
 ```sh
-model_revision="$(python - <<'PY'
+umi_model_client="$HOME/.local/share/umi/model-client/umi-model-client"
+"$umi_model_client" --policy competition-policy.json fetch-cohort-model-licenses \
+  --origin https://api.umi.vision --history cohort-history.json \
+  --expected-tip-sha256 "$cohort_tip_sha256" --current-block "$finalized_block" \
+  > model-license-adoptions.json
+jq -e '.status == "available" and (.items | length) == 1' model-license-adoptions.json
+```
+
+`not_selected` means that no optional route is published. The public endpoint is
+`GET /v1/competition/cohorts/{cohort_sha256}/model-license-adoptions`; the CLI
+also checks its signatures and scope against the selected policy and history.
+This read does not reserve admission or open intake.
+
+After preparing all required provenance, notices and their complete file
+inventory, attach the exact authorization to the **new** bundle:
+
+```sh
+jq --slurpfile selected model-license-adoptions.json \
+  '.schema = "umi-model-bundle/2" |
+   .license_id = "CC-BY-NC-SA-4.0" |
+   .license_adoption = $selected[0].items[0].signed_adoption' \
+  prepared-model-bundle.json > model-bundle.json
+accepted_terms_sha256="$(jq -r '.items[0].terms_sha256' model-license-adoptions.json)"
+```
+
+The new submission embeds that complete `model_bundle`, uses its recomputed
+`model_revision`, and puts the selected NC digest in `accepted_terms_sha256`.
+Its `policy_sha256` remains the current competition policy. Sign the new
+submission and fresh cohort consent with the normal `sign-submission` and
+`sign-cohort-consent` commands; old consent does not cover a changed bundle.
+Then use the same `submit-cohort-model` command and direct-R2 delivery path.
+Once signed, retain and retry those exact bytes across client upgrades.
+
+The model catalog reports each entry's `license_id` and `accepted_terms_sha256`.
+The download manifest preserves its complete signed adoption. Public download
+availability grants no broader commercial rights.
+
+Validate the manifest and compute its domain-separated revision with the same
+installed client environment used for submission:
+
+```sh
+umi_model_client="$HOME/.local/share/umi/model-client/umi-model-client"
+umi_model_python="$(python3 -I -B -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True).parent / "venv/bin/python")' "$umi_model_client")"
+model_revision="$("$umi_model_python" -I -B - <<'PY'
 from pathlib import Path
 
 from umi.open_competition import ModelBundle, digest

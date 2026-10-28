@@ -272,8 +272,9 @@ def test_score_publisher_handoff_updates_only_boot_pointer_and_rejects_split_lin
         )
 
 
+@pytest.mark.parametrize("live_feed", [False, True])
 def test_native_publisher_automatically_replaces_public_projection_and_preserves_native_receipt(
-    selection, tmp_path, monkeypatch
+    selection, tmp_path, monkeypatch, live_feed
 ):
     s = selection
     source, history, output = [tmp_path / name for name in ("source", "history", "output")]
@@ -308,6 +309,22 @@ def test_native_publisher_automatically_replaces_public_projection_and_preserves
         raise AssertionError("unchanged native metadata must not be replayed")
 
     monkeypatch.setattr(scores, "native_header", forbidden)
+    if live_feed:
+        from umi.competition_reward_adoption_feed import (
+            RewardAdoptionFeed,
+            RewardAdoptionFeedConfig,
+        )
+
+        feed_source = RewardAdoptionFeedConfig(path=str(tmp_path / "adoption-selection.json"))
+        boot = s.boot.model_copy(update={"reward_adoption_feed": feed_source})
+        s.case.save(s.case.path, canonical_json_bytes(boot))
+        producer = RewardAdoptionFeed(
+            tmp_path / "producer-feed",
+            source=feed_source,
+            series=s.boot.series,
+            policy=s.boot.policy,
+            initial=s.boot.reward_adoptions,
+        )
     config = config.model_copy(update={"reward_coordinator_config": str(s.case.path)})
     adopted_owner = scores.NativeModelScoresPublisher(config)
     result = adopted_owner.poll_once()
@@ -317,6 +334,24 @@ def test_native_publisher_automatically_replaces_public_projection_and_preserves
     assert public.reward_adoption_sha256 == digest(s.signed.adoption)
     assert receipt_path.read_bytes() == native_receipt
     assert all(item.baseline_eligible for item in public.items)
+    if live_feed:
+        body = s.signed.adoption.model_copy(
+            update={
+                "revision": 2,
+                "predecessor_adoption_sha256": digest(s.signed.adoption),
+                "issued_at_block": s.signed.adoption.issued_at_block + 1,
+            }
+        )
+        signed = SignedRewardModelAdoption(adoption=body, signatures=signatures(body))
+        producer.publish(signed)
+        assert not adopted_owner.poll_once()["held"]
+        changed = scores.PublicModelScores.model_validate_json(public_path.read_bytes())
+        assert changed.reward_adoption_sha256 == digest(body)
+        assert changed.items == public.items
+        assert receipt_path.read_bytes() == native_receipt
+        stamp = public_path.stat().st_mtime_ns
+        assert not adopted_owner.poll_once()["held"]
+        assert public_path.stat().st_mtime_ns == stamp
     s.allocation_path.unlink()
     assert not scores.NativeModelScoresPublisher(config).poll_once()["held"]
     c6 = next(p for p in s.boot.series.cohorts if p.sequence == 6)

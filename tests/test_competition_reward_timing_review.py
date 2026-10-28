@@ -35,16 +35,21 @@ async def test_owned_start_timestamp_is_reused_without_a_second_native_proof(
 
     monkeypatch.setattr(review, "verify_slot_archive", cannot_repeat)
     age = activation_age_from_owned_control(
-        h.item.provider, series=series, plan=plan,
-        observation=observation, start=start,
+        h.item.provider,
+        series=series,
+        plan=plan,
+        observation=observation,
+        start=start,
     )
     assert age.skips_activation_delay
     assert age.start_evidence_sha256 == start.evidence_sha256
     with pytest.raises(ValueError, match="selected native owner"):
         activation_age_from_owned_control(
-            h.item.provider, series=series,
+            h.item.provider,
+            series=series,
             plan=plan.model_copy(update={"not_before_block": h.old.height + 1}),
-            observation=observation, start=start,
+            observation=observation,
+            start=start,
         )
     await h.item.provider.aclose()
 

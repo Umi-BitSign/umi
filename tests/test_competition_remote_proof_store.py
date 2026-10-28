@@ -47,7 +47,10 @@ class EvidenceServer:
             if self.lose_put_ack:
                 self.lose_put_ack = False
                 raise httpx.ReadError("lost publication acknowledgement")
-            return httpx.Response(200)
+            return httpx.Response(
+                200,
+                headers={"ETag": '"' + hashlib.md5(raw, usedforsecurity=False).hexdigest() + '"'},
+            )
         raw = self.objects.get(key)
         if raw is None:
             return httpx.Response(404, content=b"missing")
@@ -100,25 +103,29 @@ def store(root, server, **kwargs):
     return RemoteProofStore(root, config(root.parent, **kwargs), client=server.client())
 
 
-def test_lost_upload_ack_retries_without_overwrite_and_receipt_survives_restart(tmp_path):
+@pytest.mark.parametrize("size", [8, 4096, 4097])
+def test_lost_upload_ack_retries_without_overwrite_and_receipt_survives_restart(tmp_path, size):
     server = EvidenceServer()
+    raw = b"x" * size
     first = store(tmp_path / "owner", server)
     server.lose_put_ack = True
     with pytest.raises(OSError, match="transport unavailable"):
-        first.put_bytes(b"original")
-    reference = first.put_bytes(b"original")
-    assert sum(method == "PUT" for method, _ in server.calls) == 1
+        first.put_bytes(raw)
+    retained = dict(server.objects)
+    reference = first.put_bytes(raw)
+    assert sum(method == "PUT" for method, _ in server.calls) == (1 if size > 4096 else 2)
+    assert server.objects == retained
     server.calls.clear()
     second = store(tmp_path / "owner", server)
-    assert second.put_bytes(b"original") == reference
-    assert second.validate_reference(reference).size_bytes == 8
+    assert second.put_bytes(raw) == reference
+    assert second.validate_reference(reference).size_bytes == size
     assert server.calls == []
-    assert second.read_bytes(reference, maximum=8) == b"original"
+    assert second.read_bytes(reference, maximum=size) == raw
     assert [method for method, _ in server.calls] == ["HEAD", "GET"]
     server.calls.clear()
-    assert second.read_bytes(reference, maximum=8) == b"original"
+    assert second.read_bytes(reference, maximum=size) == raw
     assert not server.calls
-    assert second.evict_cache() == 8
+    assert second.evict_cache() == size
     second.validate_reference(reference)
     assert not server.calls
 
@@ -729,7 +736,8 @@ def test_interrupted_receipt_commit_retries_as_first_import_without_partial_ledg
     restarted = store(tmp_path / "owner", server)
     reference = restarted.put_bytes(b"original", path="named")
     assert restarted.reference_for_path("named") == reference
-    assert sum(method == "PUT" for method, _ in server.calls) == 1
+    assert [method for method, _ in server.calls] == ["PUT", "PUT", "HEAD"]
+    assert server.objects == {"proofs/named": b"original"}
 
 
 def test_completion_index_refuses_reservations_without_changing_receipts(tmp_path):

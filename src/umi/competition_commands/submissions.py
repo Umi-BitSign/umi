@@ -120,6 +120,11 @@ def sign_submission(args: argparse.Namespace, policy: CompetitionPolicy) -> dict
     sub = load_json(args.submission, Submission)
     if sub.policy_sha256 != digest(policy):
         raise ValueError("submission belongs to another policy")
+    if sub.track == "model":
+        from ..competition_model_license import model_contribution_terms
+
+        if sub.accepted_terms_sha256 != model_contribution_terms(sub.model_bundle, policy):
+            raise ValueError("submission has not accepted its exact model contribution terms")
     # Resolving the hotkey signer does not access coldkey material.
     wallet = bt.Wallet(name=args.wallet_name, hotkey=args.hotkey_name, path=args.wallet_path)
     signed = SignedSubmission(submission=sub, signature=sign_object(sub, wallet))

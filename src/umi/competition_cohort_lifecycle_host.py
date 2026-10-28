@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 from pydantic import Field, field_validator, model_serializer, model_validator
 
 from .competition_client import validate_intake_origin
+from .competition_cohort_availability import CohortAvailabilityObservation
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
 from .competition_cohort_execution_progress import ExecutionExportProgress
 from .competition_cohort_intake import CohortIntakePublisher
@@ -53,6 +54,7 @@ from .competition_cohort_suite_adoption_candidate import (
     EvaluationSuiteAdoptionCandidates,
     validate_suite_adoption_candidates,
 )
+from .competition_evaluation_runtime import authorize_evaluation_runtime
 from .competition_execution import execution_boundary
 from .competition_forecast import ForecastAttempt, ForecastCapacityRequired, ForecastLedger
 from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
@@ -88,6 +90,7 @@ class LifecycleHostConfig(StrictProtocolModel):
     forecast_accounting_bytes: Annotated[int, Field(ge=64 * 1024, le=1024**3)] = 32 * 1024**2
     request_tail_operator_token_file: Directory | None = None
     automatic_progression_hold_cohorts: tuple[Hex32, ...] = ()
+    held_intake_sampling_cohorts: tuple[Hex32, ...] = ()
     model_delivery_operator_token_file: Directory | None = None
     model_delivery_adoption_candidates: ModelDeliveryAdoptionCandidates = ()
     evaluation_suite_operator_token_file: Directory | None = None
@@ -104,6 +107,8 @@ class LifecycleHostConfig(StrictProtocolModel):
             value.pop("request_tail_operator_token_file", None)
         if not self.automatic_progression_hold_cohorts:
             value.pop("automatic_progression_hold_cohorts", None)
+        if not self.held_intake_sampling_cohorts:
+            value.pop("held_intake_sampling_cohorts", None)
         if self.model_delivery_operator_token_file is None:
             value.pop("model_delivery_operator_token_file", None)
         if not self.model_delivery_adoption_candidates:
@@ -153,6 +158,9 @@ class LifecycleHostConfig(StrictProtocolModel):
         allowed = {entry.cohort_sha256 for entry in self.sources.intake.cohorts}
         if len(holds) != len(set(holds)) or not set(holds) <= allowed:
             raise ValueError("automatic progression holds must name distinct configured cohorts")
+        sampling = self.held_intake_sampling_cohorts
+        if len(sampling) != len(set(sampling)) or not set(sampling) <= set(holds):
+            raise ValueError("held intake sampling must name distinct held cohorts")
         return self
 
     _origin = field_validator("public_origin")(validate_intake_origin)
@@ -253,7 +261,11 @@ class LifecycleHost:
                 "eta_basis=restore_retained_forecast_accounting certification_authority=false"
             )
         self.gate = SeriesRequestStart(
-            c.request_start, service.config.series, self.provider, service.history
+            c.request_start,
+            service.config.series,
+            self.provider,
+            service.history,
+            operator_selection=self._operator_request_start_selection,
         )
         self.files = RequestCompletionFiles(
             Path(c.request_completion_directory), maximum_bytes=owner.request_replay_bytes
@@ -314,21 +326,96 @@ class LifecycleHost:
             raise ValueError("lifecycle publication owned block is invalid")
         return block
 
-    async def _intake(self):
+    async def _operator_request_start_selection(self, cohort, current_block):
+        owner = self.service.preparation
+        promotion = await run_owned_thread(
+            partial(
+                owner.promotion.reviewed_promotion_head,
+                cohort,
+                maximum_bytes=owner.maximum_promotion_bytes,
+            )
+        )
+        plan = next(p for p in self.service.config.series.cohorts if digest(p) == cohort)
+        selected = (
+            self.service.config.runtime_adoption
+            if self.service.config.runtime_adoption is not None
+            and plan.sequence >= self.service.config.runtime_adoption.adoption.first_cohort_sequence
+            else None
+        )
+        authorized = authorize_evaluation_runtime(
+            selected,
+            policy=self.policy,
+            authority=self.service.config.series.recovery.authority,
+            plan=plan,
+            current_block=current_block,
+        )
+        return {
+            "baseline_model_sha256": promotion.model_sha256,
+            "evaluation_runtime_sha256": (
+                self.policy.evaluation_runtime_sha256
+                if authorized is None
+                else digest(authorized.runtime)
+            ),
+            "runtime_adoption_sha256": None if authorized is None else authorized.adoption_sha256,
+        }
+
+    def _intake_observer(self):
         authorize_memory(None, None, "intake")
         phase = CohortIntakePhaseObserver(
             self.service.intake,
             maximum_sample_gap_blocks=self.service.config.admission_owner.maximum_sample_gap_blocks,
         )
-        live = LiveIntakePhaseObserver(
+        return LiveIntakePhaseObserver(
             phase,
             self.config.public_origin,
             timeout_seconds=self.readiness_timeout_seconds,
         )
+
+    async def _intake(self):
+        live = self._intake_observer()
         return CohortPhaseDriver(
             CertifiedPhaseObserver(live, self._peers("intake"), self.policy),
             sample_service=live.sample_service,
         )
+
+    def _held_intake_state(self, cohort):
+        # Read through the existing owner and process lock. No lifecycle control
+        # journal, publication, decision intent or phase driver is constructed.
+        self.service.intake._allowed(cohort)
+        with self.service.intake._connection() as (_, store):
+            state, _ = store.status(cohort)
+            return state
+
+    async def _sample_held_intake(self, cohort, observer):
+        state = await run_owned_thread(self._held_intake_state, cohort)
+        if state.phase != "intake":
+            return {"status": "held_intake_sampling_idle", "phase": state.phase}
+        capture = await self.provider.collect()
+        receipt = await observer.sample_service(state, capture)
+        if receipt is None:
+            return {"status": "held_intake_sampling_fenced", "phase": "intake"}
+        if not isinstance(receipt, CohortAvailabilityObservation) or (
+            receipt.phase != "intake"
+            or receipt.cohort_sha256 != cohort
+            or receipt.recovery_tip_sha256 != state.tip_sha256
+            or receipt.observation != execution_boundary(capture)
+        ):
+            raise ValueError("held intake sample differs from its owned finalized observation")
+        return {
+            "status": "held_intake_sample_retained",
+            "phase": "intake",
+            "recovery_tip_sha256": state.tip_sha256,
+            "observed_at_block": receipt.observation.block,
+            "service_observation_sequence": receipt.sequence,
+            "serving": receipt.serving,
+            "unavailable_blocks": receipt.unavailable_blocks,
+            "healthy_service_blocks": max(
+                0,
+                receipt.observation.block
+                - receipt.phase_started_block
+                - receipt.unavailable_blocks,
+            ),
+        }
 
     async def _preparation(self):
         source = NativePreparationProgressSource(self.service.preparation)
@@ -718,10 +805,13 @@ class LifecycleHost:
 
         async def cohort_loop(cohort):
             if cohort in self.config.automatic_progression_hold_cohorts:
-                # Do not construct a controller, publish history, sample, seal,
-                # sign or resume a retained intent while this local hold is set.
+                # Do not construct a controller, publish history, seal, sign or
+                # resume an intent. Explicit opt-in can retain actual readiness;
+                # it cannot credit time before sampling or release this hold.
                 # HTTP admission and other cohorts retain their own workers.
                 started = time.monotonic()
+                sampling = cohort in self.config.held_intake_sampling_cohorts
+                observer = self._intake_observer() if sampling else None
                 while not stop.is_set():
                     result = {
                         "status": "automatic_progression_held",
@@ -734,12 +824,35 @@ class LifecycleHost:
                         "eta_seconds": None,
                         "eta_basis": "awaiting_qualified_release_and_explicit_hold_removal",
                         "signed_state_changed": False,
+                        "stalled_or_retrying": False,
                     }
+                    if observer is not None:
+                        sample_started = time.monotonic()
+                        try:
+                            sample = await self._sample_held_intake(cohort, observer)
+                        except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+                            sample = {
+                                "status": "held_intake_sampling_retry",
+                                "error_type": type(error).__name__,
+                            }
+                        result["availability_sampling"] = {
+                            **sample,
+                            "elapsed_seconds": round(time.monotonic() - sample_started, 3),
+                            "eta_seconds": self.config.sample_seconds,
+                            "eta_scope": "next_readiness_sample_only",
+                            "eta_basis": "configured_sample_interval_after_this_attempt",
+                            "stalled_or_retrying": sample["status"] == "held_intake_sampling_retry",
+                        }
                     self.last_reports[cohort] = result
                     PUBLIC_COHORT_PROGRESS.record("lifecycle", result)
                     logger.info("cohort_lifecycle_hold %s", canonical_json_bytes(result).decode())
                     with suppress(asyncio.TimeoutError):
-                        await asyncio.wait_for(stop.wait(), timeout=self.config.poll_seconds)
+                        await asyncio.wait_for(
+                            stop.wait(),
+                            timeout=(
+                                self.config.sample_seconds if sampling else self.config.poll_seconds
+                            ),
+                        )
                 return
             while not stop.is_set():
                 try:

@@ -245,4 +245,5 @@ class LegacyModelStorageReaders:
             multipart=self.multipart,
             verification_root=self.verification_root if store is None else Path(store.directory),
             byte_store_imports=() if store is None else store.imports,
+            generation_owner=None if store is None else store.generation_owner,
         )

@@ -50,6 +50,7 @@ def executing(retained, monkeypatch):
     t.owner._authority = lambda: None
     t.owner._check_prepared = lambda _: None
     t.owner.reader.reward_adoptions = None
+    t.owner.reader.refresh_reward_adoptions = lambda: t.owner.reader.reward_adoptions
 
     def fence(*args, **kwargs):
         if not t.fenced:
@@ -110,6 +111,19 @@ def executing(retained, monkeypatch):
     e.transport = SimpleNamespace(submit=submit)
     t.executor = e
     return t
+
+
+async def test_invalid_feed_blocks_new_weight_work_before_signing(executing):
+    t, e = executing, executing.executor
+
+    def damaged():
+        raise ValueError("signed reward feed needs repair")
+
+    t.owner.reader.refresh_reward_adoptions = damaged
+    with e.hold_writer(), pytest.raises(ValueError, match="feed needs repair"):
+        await e.step()
+    assert not t.captures and not t.signed and not t.sent
+    assert t.journal.pending() is None
 
 
 async def test_terminal_observer_exits_loop_for_service_restart(executing):
@@ -379,9 +393,7 @@ async def test_network_cleanup_finishes_before_writer_is_released(executing, can
         ),
     ],
 )
-async def test_loop_retries_without_leaking_exception_details(
-    executing, caplog, failure, expected
-):
+async def test_loop_retries_without_leaking_exception_details(executing, caplog, failure, expected):
     e = executing.executor
     stop = asyncio.Event()
     calls = []

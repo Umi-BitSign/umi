@@ -14,6 +14,7 @@ from pydantic import Field, model_validator
 from .competition_geometric_rewards import GeometricRewardParameters
 from .competition_reward_adoption import (
     RewardAdoptionSelection,
+    RewardAutomaticRelease,
     RewardEarlyRelease,
     RewardModelAdoption,
     SignedRewardModelAdoption,
@@ -36,6 +37,7 @@ from .competition_reward_manifest import (
     StandingRewardOpportunityManifest,
     verify_reward_manifest,
 )
+from .competition_reward_transition_timing import RewardPredecessorLiveAge
 from .competition_verification_snapshot import VerifiedPackageSnapshot
 from .open_competition import CompetitionPolicy, digest, identity
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -192,6 +194,10 @@ def check_early_release_boundary(
         or (current_block is not None and current_block < adoption.issued_at_block)
     ):
         raise ValueError("early release differs from its signed predecessor or successor")
+    if isinstance(release, RewardAutomaticRelease):
+        release.live_age.check_boundary(
+            series=series, predecessor=predecessor, issued_at_block=adoption.issued_at_block
+        )
     return release
 
 
@@ -243,6 +249,7 @@ def prepare_early_release_revision(
     successor_cohort_sha256: str,
     issued_at_block: int,
     reason: str,
+    live_age: RewardPredecessorLiveAge | None = None,
 ) -> RewardModelAdoption:
     """Build an unsigned, exact-package operator proposal for quorum review.
 
@@ -269,20 +276,35 @@ def prepare_early_release_revision(
         or issued_at_block < max(latest.adoption.issued_at_block, predecessor.observed_at_block)
     ):
         raise ValueError("early release lacks an eligible signed predecessor or issuance")
-    release = RewardEarlyRelease(
-        schema="umi-reward-early-release/1",
+    release_type = RewardEarlyRelease if live_age is None else RewardAutomaticRelease
+    release = release_type(
+        schema="umi-reward-early-release/1" if live_age is None else "umi-reward-early-release/2",
         predecessor_decision_sha256=digest(predecessor),
         predecessor_activation_sha256=digest(predecessor.activation),
         successor_cohort_sha256=successor_cohort_sha256,
         successor_package_sha256=latest.adoption.package_sha256,
         manifest_sha256=digest(manifest),
         reason=reason,
+        **(
+            {}
+            if live_age is None
+            else {
+                "trigger": "predecessor_live_for_24h",
+                "live_age": live_age,
+            }
+        ),
     )
+    if live_age is not None:
+        live_age.check_boundary(
+            series=series, predecessor=predecessor, issued_at_block=issued_at_block
+        )
     return RewardModelAdoption.model_validate_json(
         canonical_json_bytes(
             latest.adoption.model_copy(
                 update={
-                    "schema_": "umi-standing-model-reward-adoption/5",
+                    "schema_": "umi-standing-model-reward-adoption/5"
+                    if live_age is None
+                    else "umi-standing-model-reward-adoption/6",
                     "revision": latest.adoption.revision + 1,
                     "predecessor_adoption_sha256": digest(latest.adoption),
                     "issued_at_block": issued_at_block,
@@ -304,6 +326,7 @@ def prepare_initial_early_release_adoption(
     parameters: GeometricRewardParameters | None = None,
     issued_at_block: int,
     reason: str,
+    live_age: RewardPredecessorLiveAge | None = None,
 ) -> RewardModelAdoption:
     """Include the ordinary operator release in a future cohort's first vote."""
     verify_reward_manifest(canonical_json_bytes(manifest), series, policy)
@@ -324,20 +347,35 @@ def prepare_initial_early_release_adoption(
         or issued_at_block < predecessor.observed_at_block
     ):
         raise ValueError("initial early release lacks its selected predecessor")
-    release = RewardEarlyRelease(
-        schema="umi-reward-early-release/1",
+    release_type = RewardEarlyRelease if live_age is None else RewardAutomaticRelease
+    release = release_type(
+        schema="umi-reward-early-release/1" if live_age is None else "umi-reward-early-release/2",
         predecessor_decision_sha256=digest(predecessor),
         predecessor_activation_sha256=digest(predecessor.activation),
         successor_cohort_sha256=initial.cohort_sha256,
         successor_package_sha256=initial.package_sha256,
         manifest_sha256=digest(manifest),
         reason=reason,
+        **(
+            {}
+            if live_age is None
+            else {
+                "trigger": "predecessor_live_for_24h",
+                "live_age": live_age,
+            }
+        ),
     )
+    if live_age is not None:
+        live_age.check_boundary(
+            series=series, predecessor=predecessor, issued_at_block=issued_at_block
+        )
     return RewardModelAdoption.model_validate_json(
         canonical_json_bytes(
             initial.model_copy(
                 update={
-                    "schema_": "umi-standing-model-reward-adoption/5",
+                    "schema_": "umi-standing-model-reward-adoption/5"
+                    if live_age is None
+                    else "umi-standing-model-reward-adoption/6",
                     "early_release": release,
                 }
             )
@@ -374,6 +412,7 @@ def select_signed_early_release_revision(
         successor_cohort_sha256=signed.adoption.cohort_sha256,
         issued_at_block=signed.adoption.issued_at_block,
         reason=release.reason,
+        live_age=release.live_age if isinstance(release, RewardAutomaticRelease) else None,
     )
     if signed.adoption != expected:
         raise ValueError("signed early release differs from its qualified proposal")

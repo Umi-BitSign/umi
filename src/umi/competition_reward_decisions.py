@@ -31,6 +31,8 @@ from .competition_reward_adoption import (
     verify_adoption_selection,
     verify_reward_adoption,
 )
+from .competition_reward_adoption_consumer import RewardAdoptionConsumer
+from .competition_reward_adoption_feed import RewardAdoptionFeed
 from .competition_reward_control import (
     OwnedRewardControlObservation,
     validate_owned_reward_control,
@@ -524,7 +526,7 @@ def activation_requires_revision(reader, selection):
     return current is None or current.kind != "resume_activation"
 
 
-class StandingRewardControlReader:
+class StandingRewardControlReader(RewardAdoptionConsumer):
     """Retain decisions with distinct current-selection and historical-review paths."""
 
     def __init__(
@@ -538,6 +540,7 @@ class StandingRewardControlReader:
         maximum_bytes: int,
         expected_admission_chain_config_sha256: str | None = None,
         reward_adoptions: RewardAdoptionSelection | None = None,
+        reward_adoption_feed: RewardAdoptionFeed | None = None,
     ):
         self.series = StandingRewardSeries.model_validate_json(canonical_json_bytes(series))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
@@ -561,8 +564,8 @@ class StandingRewardControlReader:
         if self.series.policy_sha256 != digest(self.policy):
             raise ValueError("standing reader policy differs from its series")
         verify_recovery_authority(self.series.recovery, self.policy)
-        self.reward_adoptions = verify_adoption_selection(
-            reward_adoptions, self.series, self.policy
+        self._configure_reward_adoptions(
+            reward_adoptions, series=self.series, policy=self.policy, feed=reward_adoption_feed
         )
         self.journal = RoundJournal(
             root,
@@ -773,6 +776,7 @@ class StandingRewardControlReader:
     ]:
         if historical and (history is None or admission is not None):
             raise ValueError("historical selection requires complete control history")
+        self.refresh_reward_adoptions()
         proof = self._historical_proof if historical else self._proof
         proof(observation)
         if observation.control_sha256 is None:
@@ -910,22 +914,18 @@ class StandingRewardControlReader:
                     for item, block in zip(decisions, committed_blocks, strict=True)
                 )
                 for index, prior in enumerate(selections):
-                    invalidated_before_effect = (
-                        prior.effective_at_block is not None
-                        and any(
-                            committed_blocks[later] <= prior.effective_at_block
-                            and (
-                                decisions[later].decision.kind == "revoke"
-                                or (
-                                    selections[later].activation is not None
-                                    and selections[later].activation != prior.activation
-                                    and selections[later].effective_at_block is not None
-                                    and selections[later].effective_at_block
-                                    <= prior.effective_at_block
-                                )
+                    invalidated_before_effect = prior.effective_at_block is not None and any(
+                        committed_blocks[later] <= prior.effective_at_block
+                        and (
+                            decisions[later].decision.kind == "revoke"
+                            or (
+                                selections[later].activation is not None
+                                and selections[later].activation != prior.activation
+                                and selections[later].effective_at_block is not None
+                                and selections[later].effective_at_block <= prior.effective_at_block
                             )
-                            for later in range(index + 1, len(selections))
                         )
+                        for later in range(index + 1, len(selections))
                     )
                     if (
                         prior.activation is not None

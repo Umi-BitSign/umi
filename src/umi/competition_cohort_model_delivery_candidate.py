@@ -229,7 +229,19 @@ class ModelDeliveryAdoptionCandidate:
         """Migrate authenticated completed file facts without payload GETs."""
         return await self._run(history, transition, completed_only=True)
 
-    async def _run(self, history, transition, *, export_only=False, completed_only=False):
+    async def repair_generations(self, history, transition):
+        """Operator-requested original-generation repair through native authority."""
+        return await self._run(history, transition, repair_generations=True)
+
+    async def _run(
+        self,
+        history,
+        transition,
+        *,
+        export_only=False,
+        completed_only=False,
+        repair_generations=False,
+    ):
         await run_owned_thread(qualify_shared_byte_stores, (self.config.source,))
         value = await run_owned_thread(self.authenticate, history, transition)
         if self.multipart is None:
@@ -242,10 +254,22 @@ class ModelDeliveryAdoptionCandidate:
             )
         async with r2_connection_scope(self.multipart):
             return await self._verify_selected(
-                transition, value, export_only=export_only, completed_only=completed_only
+                transition,
+                value,
+                export_only=export_only,
+                completed_only=completed_only,
+                repair_generations=repair_generations,
             )
 
-    async def _verify_selected(self, transition, value, *, export_only, completed_only):
+    async def _verify_selected(
+        self,
+        transition,
+        value,
+        *,
+        export_only,
+        completed_only,
+        repair_generations=False,
+    ):
         readers = LegacyModelStorageReaders(
             {transition.cohort_sha256: value},
             policy=self.policy,
@@ -317,6 +341,10 @@ class ModelDeliveryAdoptionCandidate:
                 )
                 reader = readers.reader(resolution)
                 report = progress.child_report(index)
+                if repair_generations:
+                    await reader.repair_generations(report=report)
+                    progress.advance(index, monotonic() - started)
+                    continue
                 if export_only:
                     exports.append(await reader.export_completed(report=report))
                     progress.advance(index, monotonic() - started)

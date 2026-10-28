@@ -22,6 +22,7 @@ and return `total`, `next_offset` and `items`.
 | `/v1/competition/cohorts/{cohort}/progress` | Cached stage, counted work, scoped ETA and retry/repair status; advisory, never reward or phase authority |
 | `/v1/competition/cohorts/{cohort}/service-results` | All sealed roster hotkeys, including zero-work rows, retained UIDs, successful/failed paid terminals, exact quality credit and certified service weight |
 | `/v1/competition/cohorts/{cohort}/model-results` | Certified model scores, exact ranks, baseline eligibility and certified allocation metadata; does not establish live chain rewards |
+| `/v1/competition/cohorts/{cohort}/model-license-adoptions` | Optional signed model-license selections available during intake; does not open intake or authorize admission |
 | `/v1/competition/cohorts/{cohort}/models` | Every exported admitted public submission, original terms and license, revision identity, artifact-release state and download availability |
 | `/v1/competition/cohorts/{cohort}/models/{model}/download` | Native bundle manifest, renewable GET capabilities, optional complete tar archive, and the file-download endpoint |
 | `/v1/competition/cohorts/{cohort}/models/{model}/download-files` | One manifest file's bounded pieces or preserved-payload byte range |
@@ -91,11 +92,20 @@ metadata endpoint again to renew them. The API accepts model identities already
 authorized by the private publication catalog; it has no arbitrary object-key
 signing endpoint. Do not save capability URLs as durable model identities.
 
-An unknown cohort or unpublished result returns 404. A missing, damaged or
+An unknown cohort or unpublished result returns 404 on the result/download routes. A missing, damaged or
 unavailable published metadata record returns 503 and requires repair. It is
 not silently reported as an empty result. Admission, artifact acceptance,
 download availability, benchmark eligibility and reward activation remain
 separate statuses.
+
+The optional-license route returns `umi-public-model-license-adoptions/1`,
+with `status: available` or `not_selected`. Each available item contains the
+complete `signed_adoption`, its canonical JSON `sha256`, exact `terms_sha256`
+and `terms_url`. An absent selection returns `not_selected`, including for an
+unknown cohort; a damaged retained publication returns 503. The supported
+`fetch-cohort-model-licenses` command verifies this bounded response against
+the selected cohort history, policy and authority. API polling reads retained
+metadata only. See the [conditional submission commands](commands.md#optional-non-commercial-model-terms).
 
 ## Download with restart support
 
@@ -195,8 +205,9 @@ the owner of the selected private sources and publication directory:
 `inventory.scope` is `all_admitted_model_submissions` for native intake exports.
 A retained settlement roster can instead be labeled `sealed_roster`; that
 scope must not be represented as all admitted revisions. Public release
-requires a signed model submission under supported original terms and quorum
-artifact acceptance. Original contribution-terms versions 3 and 4 are supported;
+requires a signed model submission under its supported exact terms and quorum
+artifact acceptance. Original contribution-terms versions 3 and 4 are supported,
+as is the reviewed NC supplement selected by a signed per-model adoption;
 an unknown terms digest is listed as `terms_review_required` with no download.
 
 Publication installs content-addressed artifacts and a retained descriptor,
@@ -217,6 +228,16 @@ artifact schedules publication; release still requires the original signed
 admission, supported contribution terms, artifact acceptance and completed
 preservation receipts. The output scope is `sealed_roster`, including unselected
 reward candidates, rather than all historical intake revisions.
+
+The same watcher can select a sorted `model_license_adoptions` array of signed
+adoptions. It publishes optional-license metadata for every matching configured
+cohort during intake, independently of scored results. Native authorization is
+checked once per immutable configuration binding and retained under
+`state_directory/model-license-adoptions/`. Completed checks survive restart;
+missing or damaged completion records require explicit repair. Missing derived
+public output is restored from the retained completion without native rescans.
+The watch report includes counted licensing progress and repair reasons.
+An empty selection is omitted when serializing the original watch config.
 
 The template must preserve the native intake's original complete cohort/authority
 bindings and `eligible_tracks`, even when current public submissions support only

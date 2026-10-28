@@ -72,7 +72,10 @@ def exchange_case(signing_case, tmp_path):
 
     reviewer = SimpleNamespace(
         reader=SimpleNamespace(
-            series=c.series, policy=c.control.policy, chain_config_sha256=digest(c.control.config)
+            series=c.series,
+            policy=c.control.policy,
+            chain_config_sha256=digest(c.control.config),
+            refresh_reward_adoptions=lambda: None,
         ),
         review=review,
         provider=SimpleNamespace(ensure_observer_running=lambda: None),
@@ -90,6 +93,23 @@ def exchange_case(signing_case, tmp_path):
     )
 
 
+async def test_invalid_feed_defers_review_without_reading_requests(exchange_case, monkeypatch):
+    h = exchange_case
+    stop = asyncio.Event()
+
+    def damaged():
+        stop.set()
+        raise ValueError("signed reward feed needs repair")
+
+    def unexpected(*args):
+        pytest.fail("invalid feed must block new review work")
+
+    h.reviewer.reader.refresh_reward_adoptions = damaged
+    monkeypatch.setattr(h.peer, "request", unexpected)
+    await h.peer.run_reviewer(h.reviewer, stop, poll_seconds=0.001)
+    assert not h.signed
+
+
 async def test_exchange_recovers_request_vote_and_lost_delivery_after_restart(exchange_case):
     h = exchange_case
     body = h.c.genesis.decision
@@ -99,6 +119,7 @@ async def test_exchange_recovers_request_vote_and_lost_delivery_after_restart(ex
     await h.first()
     with pytest.raises(FileNotFoundError):
         await port(body, ())
+    assert (h.leader.outbox / "transport" / h.leader.series / "decision.json").exists()
     request = h.leader._request_path(h.leader.outbox, 0)
     copy(request, h.peer._request_path(h.peer.inbox, 0))
     h.peer = h.reopen()
@@ -180,3 +201,20 @@ async def test_reviewer_loop_retains_completed_vote_without_resigning(exchange_c
         canonical_json_bytes(h.peer.signer.journal.vote(0, h.peerkey))
         == h.peer._vote_path(h.peer.outbox, 0, h.peerkey).read_bytes()
     )
+
+
+async def test_latest_request_catches_up_without_transporting_old_requests(exchange_case):
+    h = exchange_case
+    first = h.c.genesis
+    successor = h.c.decision(first, 5, observed=200)
+    request = RewardReviewRequest(
+        schema="umi-reward-review-request/1",
+        decision=successor.decision,
+        preceding=(first,),
+        proposer_vote=sign_object(successor.decision, wallet("Charlie")),
+    )
+    # A new reviewer needs only this current envelope's authenticated prefix.
+    await h.peer.review(request, h.reviewer)
+    assert h.peer.signer.journal.prefix(1) == (first,)
+    assert h.peer.signer.journal.vote(1, h.peerkey) is not None
+    assert h.signed == [successor.decision]

@@ -62,6 +62,10 @@ def build_parser() -> argparse.ArgumentParser:
     admission = commands.add_parser("query-cohort-admission")
     admission.add_argument("--request", required=True)
     admission.add_argument("--origin", required=True)
+    licenses = commands.add_parser("fetch-cohort-model-licenses")
+    for name in ("origin", "history", "expected-tip-sha256"):
+        licenses.add_argument("--" + name, required=True)
+    licenses.add_argument("--current-block", type=int, required=True)
     reviewer = commands.add_parser("run-cohort-admission-worker")
     reviewer.add_argument("--config", required=True)
     reviewer.add_argument("--once", action="store_true")

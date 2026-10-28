@@ -16,6 +16,7 @@ from .competition_reward_history_workers import (
     HistoryWorkerSelection,
 )
 from .competition_reward_proof_archive import history_archive_key
+from .competition_transport_verification import TransferProgress
 from .concurrency import await_owned_task, run_owned_thread
 from .host_memory_runtime import compact_memory_error, history_memory_window
 
@@ -58,8 +59,14 @@ async def _persist(reader, pool, future, fields, retained):
     # This owned task is never cancelled by a caller. It spans the independent
     # native check and durable result, including successful later heights when
     # a predecessor fails, export fails or shutdown is requested.
-    await asyncio.wait((future,))
-    result = pool.result(future)
+    # This is the owner's native worker wait, including worker queue time,
+    # not a CPU-time measurement. Source/checkpoint persistence follows it.
+    with TransferProgress(
+        "history_native_worker_wait", 1, unit="blocks", planning_unit_seconds=(0.01, 300)
+    ) as progress:
+        await asyncio.wait((future,))
+        result = pool.result(future)
+        progress.advance(1)
     height = result.snapshot.block_number
     save_error = None
     if not retained:
@@ -191,6 +198,56 @@ async def _window(reader, provider, pool, entries, stop, *, last_height):
     return [result for result in results if isinstance(result, dict)]
 
 
+async def _export_prepared(reader, height, fields, value, stop):
+    # This task owns the original native success through its separate durable
+    # delivery fact. It never applies history and never admits another frame.
+    if stop.is_set():
+        return None
+    if await run_owned_thread(reader.checkpoints.load, height) != value:
+        raise HistoryCheckpointRepairRequired("checkpoint changed during parallel verification")
+    if stop.is_set():
+        return None
+    if reader.export_archive is not None:
+        await run_owned_thread(reader._export_fields, height, fields, reader.export_archive)
+        value = {**value, "exports": [reader._export_identity()]}
+        await run_owned_thread(
+            partial(reader.checkpoints.remember, value, repair_reason="new_export_destination")
+        )
+        reader.progress.record("exported", height)
+    return value
+
+
+async def _apply_prepared_window(reader, entries, values, stop):
+    tasks = []
+    try:
+        for value, (height, fields, _) in zip(values, entries, strict=False):
+            if stop.is_set():
+                break
+            if reader.export_archive is None:
+                value = await _export_prepared(reader, height, fields, value, stop)
+                if value is None or stop.is_set():
+                    break
+                reader._apply_checkpoint(value)
+            else:
+                tasks.append(
+                    asyncio.create_task(_export_prepared(reader, height, fields, value, stop))
+                )
+        # Export only this already admitted window. The shared remote store
+        # retains its eight-object and aggregate-byte admission across tasks.
+        # The owner alone applies effects, in original height order.
+        for task in tasks:
+            value = await await_owned_task(task)
+            if value is None or stop.is_set():
+                break
+            reader._apply_checkpoint(value)
+    finally:
+        # A failed predecessor or cancellation must not abandon a later
+        # successful export or release its fields/leases before it is durable.
+        for task in tasks:
+            with suppress(Exception, asyncio.CancelledError):
+                await await_owned_task(task)
+
+
 async def _run(reader, provider, last, stop):
     profile = reader.verification_profile
     # Conservative raw-frame slots include a maximum permitted block; large
@@ -226,31 +283,7 @@ async def _run(reader, provider, last, stop):
                 values = await _window(
                     reader, provider, pool, entries, stop, last_height=window_last
                 )
-                # Recheck cheap source revisions before publication/application;
-                # no repeated hashing or native verification of unchanged bytes.
-                for value, (height, fields, _) in zip(values, entries, strict=False):
-                    if stop.is_set():
-                        break
-                    if await run_owned_thread(reader.checkpoints.load, height) != value:
-                        raise HistoryCheckpointRepairRequired(
-                            "checkpoint changed during parallel verification"
-                        )
-                    if stop.is_set():
-                        break
-                    if reader.export_archive is not None:
-                        await run_owned_thread(
-                            reader._export_fields, height, fields, reader.export_archive
-                        )
-                        value = {**value, "exports": [reader._export_identity()]}
-                        await run_owned_thread(
-                            partial(
-                                reader.checkpoints.remember,
-                                value,
-                                repair_reason="new_export_destination",
-                            )
-                        )
-                        reader.progress.record("exported", height)
-                    reader._apply_checkpoint(value)
+                await _apply_prepared_window(reader, entries, values, stop)
         except BaseException as error:
             failure = compact_memory_error(error)
         finally:

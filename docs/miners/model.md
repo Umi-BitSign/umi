@@ -62,7 +62,13 @@ First [install or update the model submission client](connection.md#install-or-u
 Endpoint enrollment and model-track intent alone do not update a separately
 installed CLI. For an open cohort that advertises model uploads, use the model participation
 request produced by `sign-cohort-consent` and the exact directory declared by
-its bundle manifest:
+its bundle manifest.
+
+If the new model uses permitted non-commercial training sources, first follow
+the [optional model-terms commands](../reference/commands.md#optional-non-commercial-model-terms).
+That route uses a signed bundle `/2` and fresh consent; ordinary bundle `/1`
+entries retain their original licenses and terms. Both use the same upload
+command below:
 
 ```sh
 "$HOME/.local/share/umi/model-client/umi-model-client" \

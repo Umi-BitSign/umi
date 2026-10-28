@@ -333,15 +333,21 @@ async def test_invalid_preservation_fails_before_service_lease_keys_or_provider(
         )
 
     def forbidden(*_args, **_kwargs):
-        pytest.fail("invalid preservation reached signing keys or provider")
+        pytest.fail("invalid preservation reached service lease, signing keys or provider")
 
+    monkeypatch.setattr(boot, "lock_private_file", forbidden)
     monkeypatch.setattr(boot, "load_named_hotkey", forbidden)
     monkeypatch.setattr(boot, "HistoricalRegistrationProvider", forbidden)
     assert not Path(c.signing.directory).exists()
     with pytest.raises(ValueError):
         async with boot.phase_review_app(c):
             pytest.fail("invalid preservation started reviewer")
-    assert not Path(c.signing.directory).exists()
+    # Preflight may retain original-verification checkpoints before finding a
+    # missing original. It must not acquire the service lease or create votes.
+    signing = Path(c.signing.directory)
+    assert not signing.exists() or {path.name for path in signing.iterdir()} <= {
+        "legacy-original-verification"
+    }
     assert not i.remote.reads
 
 

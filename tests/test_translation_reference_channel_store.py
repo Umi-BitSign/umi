@@ -92,10 +92,11 @@ def test_immutable_approval_exact_retry_does_not_overwrite_original(store):
     raw = b'{"signed":"policy"}'
     client.publish_approval(key, raw)
     client.publish_approval(key, raw)
-    assert sum(r.method == "PUT" for r in requests) == 1
+    assert [r.method for r in requests] == ["PUT", "PUT", "HEAD"]
     with pytest.raises(ValueError, match="immutable"):
         client.publish_approval(key, b"changed policy signature")
     assert objects[key][0] == raw
+    assert all(r.headers["if-none-match"] == "*" for r in requests if r.method == "PUT")
 
 
 @pytest.mark.parametrize(
