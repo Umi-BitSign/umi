@@ -28,6 +28,7 @@ from .competition_cohort_progress_signer import CertifiedPhaseObserver
 from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
 from .competition_cohort_recovery import CohortRecoveryState, Phase, StandingCohortRecoveryAuthority
 from .competition_cohort_recovery_store import CohortRecoveryStore
+from .competition_cohort_request_preflight import RequestOwnerRepairRequired
 from .competition_cohort_request_start import SeriesRequestStart
 from .competition_execution import execution_boundary
 from .competition_forecast import ForecastLedger, forecast_scope
@@ -131,7 +132,13 @@ class CohortLifecycleService:
             (item.target_block for item in state.targets if item.phase == state.phase), None
         )
 
-    def _log_lifecycle(self, status: str, *, error_type: str | None = None) -> None:
+    def _log_lifecycle(
+        self,
+        status: str,
+        *,
+        error_type: str | None = None,
+        request_owner_failure: RequestOwnerRepairRequired | None = None,
+    ) -> None:
         progress = self.last_progress
         report = {
             "schema": "umi-cohort-lifecycle-observation/1",
@@ -150,6 +157,8 @@ class CohortLifecycleService:
             "expected_round_sha256": self.expected_round_sha256,
             "error_type": error_type,
         }
+        if request_owner_failure is not None:
+            report.update(request_owner_failure.report())
         PUBLIC_COHORT_PROGRESS.record("lifecycle", report)
         logger.info("%s", canonical_json_bytes(report).decode())
 
@@ -393,6 +402,7 @@ class CohortLifecycleService:
 
         async def loop():
             while not stop.is_set():
+                request_owner_failure = None
                 try:
                     result = await self.tick()
                 except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
@@ -404,6 +414,9 @@ class CohortLifecycleService:
                         "stage": self.stage,
                         "chain_submission_authorized": False,
                     }
+                    if isinstance(error, RequestOwnerRepairRequired):
+                        request_owner_failure = error
+                        result.update(error.report())
                 self.last_report = result
                 logger.info(
                     "cohort_lifecycle cohort=%s phase=%s stage=%s status=%s",
@@ -412,7 +425,11 @@ class CohortLifecycleService:
                     self.stage,
                     result["status"],
                 )
-                self._log_lifecycle(result["status"], error_type=result.get("error_type"))
+                self._log_lifecycle(
+                    result["status"],
+                    error_type=result.get("error_type"),
+                    request_owner_failure=request_owner_failure,
+                )
                 if report is not None:
                     report(result)
                 if result["status"] in {"settlement_handoff_published", "revoked"}:

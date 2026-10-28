@@ -5026,6 +5026,24 @@ state, replica restart and recovery under the actual account/mount/cgroup limits
 before cutover; do not infer these bounds from aggregate file sizes alone.
 
 
+### Retained request owner repair diagnostics
+
+Before loading a prepared round, the admission lifecycle checks an existing
+request journal through its native read-only reader. An absent journal follows
+normal first initialization. A retained conflict hold, changed binding or damaged
+schema reports `cohort_lifecycle_repair_required` with a fixed `reason_code`,
+counted progress and `eta_basis=native_request_owner_repair_required`. The owner
+keeps checking on its normal reconciliation interval; live SQLite contention
+remains retryable and is not reported as permanent corruption.
+
+This preflight preserves the hold and all original validation. It neither reads
+through a held record nor repairs it. Diagnose and restore the original owner
+through a separately qualified, scoped recovery; do not delete holds, reset its
+journal or rewrite signed evidence. A successful preflight is not certification
+or proof that request initialization completed. Select the qualified admission
+owner source through its existing supervisor update path, preserving its state
+directories and cohort bindings.
+
 ### Holding automatic cohort progression during a release
 
 The admission host accepts `recoverable_service.lifecycle.automatic_progression_hold_cohorts`

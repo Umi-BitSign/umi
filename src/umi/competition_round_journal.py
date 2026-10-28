@@ -240,7 +240,7 @@ class RoundJournal:
             or not (root / "rounds.lock").is_file()
         ):
             raise ValueError("existing journal requires original directory, database and lock")
-        _private(root)
+        _private(root, create=not read_only)
         self.path = root / "rounds.sqlite3"
         self.lock_path = root / "rounds.lock"
         self._check_files()
@@ -476,7 +476,7 @@ class RoundJournal:
             self._record_capacity(db)
 
     def _check_files(self):
-        _private(self.root)
+        _private(self.root, create=not self.read_only)
         sidecars = tuple(Path(str(self.path) + suffix) for suffix in ("-journal", "-wal", "-shm"))
         paths = (self.path, *sidecars, self.lock_path)
         for p in paths:
