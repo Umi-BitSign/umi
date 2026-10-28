@@ -631,6 +631,11 @@ independent quorum signs that choice together with the exact original round,
 preparation closure, baseline, suite, runtime, ordered clips and evaluators before
 any dispatch or source reservation. No additional manual approval stage is needed.
 A local execution flag or a source update alone cannot authorize shared sampling.
+The enabled fields are durable host-wide settings for all configured future
+cohorts, not per-C7 overrides. Keep them when generating successor controls; fresh
+fully upgraded installations should select them as described in
+[automatic order configuration](rounds.md). Default omission supports the
+reader-first rollout and preserves old configuration bytes.
 
 Every already-selected `/1` order, including an interrupted partial roster,
 keeps its exact signed bytes and ordinary execution semantics. Omitted new config
