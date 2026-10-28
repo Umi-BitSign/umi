@@ -559,7 +559,11 @@ class RewardProofArchive:
                             single_object=self.remote is not None and existing is None,
                         )
                         if prepared is None
-                        else prepared[number].for_bytes(chunk, kind="proof")
+                        else prepared[number].for_bytes(
+                            chunk,
+                            kind="proof",
+                            coalesce_small=self.remote is not None and existing is None,
+                        )
                     )
                     if (
                         self.remote is not None
