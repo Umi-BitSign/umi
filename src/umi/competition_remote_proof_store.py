@@ -733,7 +733,7 @@ class RemoteProofStore:
                         remaining.extend(failed)
         return remaining
 
-    def put_many(self, objects: Mapping[str, bytes]) -> None:
+    def put_many(self, objects: Mapping[str, bytes], *, report=None) -> None:
         """Publish one encoder-owned graph before its recipe/frame can be exposed.
 
         Workers borrow the already materialized codec bytes. Each owns and closes
@@ -796,6 +796,7 @@ class RemoteProofStore:
         with TransferProgress(
             "proof_graph_replication",
             sum(len(raw) for raw in objects.values()),
+            report,
             total_operations=len(objects),
         ) as progress:
             # A warm graph must not create a thread and two fresh journal

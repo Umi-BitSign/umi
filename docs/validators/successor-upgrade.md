@@ -803,6 +803,18 @@ semantics and checkpoint compatibility are unchanged. Adopt the qualified host
 through the same maintenance path; this internal scheduling change requires no
 miner configuration or follower-image change.
 
+Encoded archive exports report `proof_archive_objects` over all distinct byte
+objects and recipes in the frame. Totals come from the existing recipe metadata
+pass; polling and progress reporting do not read or verify payloads. Completion
+advances only after durable publication or reuse of an authenticated transport
+receipt. Reused objects are reported separately from new publication throughput,
+including after restart. Queued objects are not complete. The final frame barrier
+remains in `proof_archive_export`; a completed object graph alone is not a
+completed frame or native proof acceptance. Both scopes retain elapsed time,
+scoped ETA basis and stalled/retrying status. Install this shared archive code
+through the supported coordinator/reviewer/writer host maintenance path; ordinary
+miner uploads, approved-row followers and original archive formats are unchanged.
+
 For an existing isolated history preparation whose operational allowance is
 too small, use `python -m umi.competition_reward_history_preparation_capacity_cli`.
 This supported transition is retained while deployed preparation directories

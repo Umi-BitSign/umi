@@ -201,11 +201,11 @@ def test_encoded_copy_batches_small_graphs_and_reuses_first_batch_after_failure(
     original = selected.put_many
     batches = []
 
-    def interrupted(items):
+    def interrupted(items, **kwargs):
         batches.append(tuple(items))
         if len(batches) == 2:
             raise OSError("interrupted second batch")
-        original(items)
+        original(items, **kwargs)
 
     monkeypatch.setattr(selected, "put_many", interrupted)
     kwargs = dict(context={}, fields={f"field{i}": (part,) for i, part in enumerate(parts)})
@@ -239,10 +239,10 @@ def test_write_batches_fields_and_recipes_before_exact_frame_barrier(tmp_path, m
     local.write("history", key, context={"height": 1}, fields=fields)
     batches, original = [], selected.put_many
 
-    def publish(items):
+    def publish(items, **kwargs):
         assert "proofs/frames/history/" + key not in server.objects
         batches.append(dict(items))
-        original(items)
+        original(items, **kwargs)
 
     monkeypatch.setattr(selected, "put_many", publish)
     remote.write("history", key, context={"height": 1}, fields=fields)
@@ -356,11 +356,11 @@ def test_export_wall_time_spans_dependency_publication_and_frame(
     archive = RewardProofArchive(tmp_path / "archive", remote=selected)
     put_many, put_bytes = selected.put_many, selected.put_bytes
 
-    def dependencies(items):
+    def dependencies(items, **kwargs):
         now[0] += 3
         if failure:
             raise OSError("dependency publication interrupted")
-        return put_many(items)
+        return put_many(items, **kwargs)
 
     def frame(raw, **kwargs):
         assert kwargs["path"].startswith("frames/")
@@ -420,3 +420,191 @@ def test_normal_encoding_fallback_does_not_report_interrupted_or_completed_expor
     assert copied is False
     assert not any('"stage":"proof_archive_export"' in record.message for record in caplog.records)
     assert archive.read("history", key, bounds={"proof": len(raw)}) == ({}, {"proof": raw})
+
+
+def _archive_object_events(caplog):
+    return [
+        event
+        for record in caplog.records
+        if '"stage":"proof_archive_objects"' in record.message
+        for event in [json.loads(record.message)]
+        if event["stage"] == "proof_archive_objects"
+    ]
+
+
+def _encoded_graph():
+    values = [encode_evidence(f"original-{number}".encode(), kind="proof") for number in range(5)]
+    parts = tuple((value.sha256, value.expanded_bytes, value.recipe) for value in values)
+    payloads = {sha: raw for value in values for sha, raw in value.objects.items()}
+    unique = set(payloads) | {hashlib.sha256(value.recipe).hexdigest() for value in values}
+    return parts, payloads, unique
+
+
+def test_archive_counts_whole_unique_graph_after_durable_publication(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(archive_module, "_MAX_REMOTE_BATCH_OBJECTS", 2)
+    monkeypatch.setattr(transfer_module.TransferProgress, "emit_seconds", 0)
+    selected = store(tmp_path / "owner", EvidenceServer())
+    archive = RewardProofArchive(tmp_path / "archive", remote=selected)
+    parts, payloads, unique = _encoded_graph()
+    original, completed, resolved = selected.put_many, [0], []
+
+    def publish(items, **kwargs):
+        # The bounded batch is queued but no new receipt exists yet.
+        assert _archive_object_events(caplog)[-1]["completed_units"] == completed[0]
+        original(items, **kwargs)
+        completed[0] += len(items)
+        assert _archive_object_events(caplog)[-1]["completed_units"] == completed[0]
+
+    def resolve(sha, size):
+        resolved.append(sha)
+        return payloads[sha]
+
+    monkeypatch.setattr(selected, "put_many", publish)
+    with caplog.at_level(logging.INFO, logger="umi.competition.progress"):
+        assert archive.copy_encoded_transport(
+            "history",
+            "ac" * 32,
+            context={},
+            fields={"proof": parts, "same_proof": parts},
+            resolve=resolve,
+        )
+    events = _archive_object_events(caplog)
+    assert {event["total_units"] for event in events} == {len(unique)}
+    assert [event["completed_units"] for event in events] == sorted(
+        event["completed_units"] for event in events
+    )
+    assert events[-1]["status"] == "completed" and events[-1]["percent"] == 100
+    assert events[-1]["native_units"] == len(unique)
+    assert events[-1]["restored_units"] == 0
+    assert sorted(resolved) == sorted(payloads)
+    assert any(0 < event["percent"] < 100 for event in events)
+
+
+def test_partial_archive_progress_and_restart_reuse(tmp_path, monkeypatch, caplog):
+    server = EvidenceServer()
+    selected = store(tmp_path / "actual-owner", server)
+    parts, payloads, unique = _encoded_graph()
+    archive = RewardProofArchive(tmp_path / "archive", remote=selected)
+    original, durable = selected.put_many, []
+
+    def interrupted(items, **kwargs):
+        sha = next(iter(items))
+        original({sha: items[sha]}, **kwargs)
+        durable.append(sha)
+        raise OSError("publication interrupted after retained acknowledgement")
+
+    monkeypatch.setattr(selected, "put_many", interrupted)
+    with (
+        caplog.at_level(logging.INFO, logger="umi.competition.progress"),
+        pytest.raises(OSError, match="retained acknowledgement"),
+    ):
+        archive.copy_encoded_transport(
+            "history",
+            "ac" * 32,
+            context={},
+            fields={"proof": parts},
+            resolve=lambda sha, size: payloads[sha],
+        )
+    event = _archive_object_events(caplog)[-1]
+    assert event["status"] == "retrying"
+    assert event["completed_units"] == event["native_units"] == 1
+    assert event["total_units"] == len(unique)
+    assert event["eta_seconds"] is None
+    assert not any("frames/" in key for key in server.objects)
+    caplog.clear()
+    restarted = RewardProofArchive(
+        tmp_path / "archive", remote=store(tmp_path / "actual-owner", server)
+    )
+    resolved = []
+
+    def resolve(sha, size):
+        assert sha not in durable
+        resolved.append(sha)
+        return payloads[sha]
+
+    with caplog.at_level(logging.INFO, logger="umi.competition.progress"):
+        assert restarted.copy_encoded_transport(
+            "history",
+            "ac" * 32,
+            context={},
+            fields={"proof": parts},
+            resolve=resolve,
+        )
+    event = _archive_object_events(caplog)[-1]
+    assert event["status"] == "completed"
+    assert event["restored_units"] == 1
+    assert event["native_units"] == len(unique) - 1
+    caplog.clear()
+    server.calls.clear()
+
+    def forbidden(*args):
+        pytest.fail("completed graph must not reread source payloads")
+
+    with caplog.at_level(logging.INFO, logger="umi.competition.progress"):
+        assert restarted.copy_encoded_transport(
+            "history",
+            "ac" * 32,
+            context={},
+            fields={"proof": parts},
+            resolve=forbidden,
+        )
+    event = _archive_object_events(caplog)[-1]
+    assert event["status"] == "completed"
+    assert event["restored_units"] == len(unique) and event["native_units"] == 0
+    assert not any("/objects/" in path for _, path in server.calls)
+
+
+def test_archive_object_progress_exposes_stall_without_claiming_frame(
+    tmp_path, monkeypatch, caplog
+):
+    now = [100.0]
+    monkeypatch.setattr(transfer_module.time, "monotonic", lambda: now[0])
+    parts, payloads, unique = _encoded_graph()
+    archive = RewardProofArchive(tmp_path / "archive")
+    observed = []
+
+    def resolve(sha, size):
+        progress = transfer_module.current_progress()
+        assert progress.stage == "proof_archive_objects"
+        if not observed:
+            now[0] += 61
+            progress.emit("running")
+            observed.append(_archive_object_events(caplog)[-1])
+        now[0] += 2
+        return payloads[sha]
+
+    with caplog.at_level(logging.INFO, logger="umi.competition.progress"):
+        assert archive.copy_encoded_transport(
+            "history",
+            "ac" * 32,
+            context={},
+            fields={"proof": parts},
+            resolve=resolve,
+        )
+    assert observed[0]["total_units"] == len(unique)
+    assert observed[0]["completed_units"] == 0
+    assert observed[0]["status"] == "stalled"
+    assert observed[0]["eta_seconds"] is None and observed[0]["planning_eta_seconds"] is None
+    assert _archive_object_events(caplog)[-1]["status"] == "completed"
+
+
+def test_archive_batch_reports_already_retained_graph_without_new_io(tmp_path, caplog):
+    server = EvidenceServer()
+    selected = store(tmp_path / "owner", server)
+    original = objects(b"one", b"two")
+    selected.put_many(original)
+    restarted = store(tmp_path / "owner", server)
+    server.calls.clear()
+    with (
+        caplog.at_level(logging.INFO, logger="umi.competition.progress"),
+        transfer_module.TransferProgress("proof_archive_objects", 2, unit="objects") as progress,
+    ):
+        batch = archive_module._RemotePublicationBatch(restarted, progress=progress)
+        for raw in original.values():
+            batch.retain(raw)
+        assert progress.completed == 0
+        batch.flush()
+        assert progress.completed == 2 and progress.native == 0
+    event = _archive_object_events(caplog)[-1]
+    assert event["status"] == "completed" and event["restored_units"] == 2
+    assert server.calls == []
