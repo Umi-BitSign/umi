@@ -691,6 +691,9 @@ class ForecastAttempt:
             "invocation": self.invocation,
             "observed_unix_ms": now,
         }
+        epoch = body.get("forecast_rate_epoch_sha256")
+        if epoch is not None:
+            common["rate_epoch_sha256"] = _identifier(epoch, digest=True)
         self.ledger.append(self.scope + ":start", self.scope, "scope_started", common)
         self.ledger.append(self.attempt + ":start", self.scope, "attempt_started", common)
         state, eta = body["state"], body["eta_seconds"]

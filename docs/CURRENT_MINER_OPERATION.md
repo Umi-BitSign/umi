@@ -2,134 +2,74 @@
 
 # What SN78 miners should run now
 
-For endpoint competition, use the [current connection guide](miners/connection.md).
-An accepted receipt can carry forward while the running miner still needs a
-configuration update. That guide owns the release, policy and download details.
-The temporary bridge described below remains the current reward mechanism.
+C6's corrected results are certified and its rewards are live. C7 public-model
+intake is open; C7 challenges have not started. Existing model entries can be
+replaced while intake remains open. Follow the selected cohort's progress API
+for counted completion and its scoped ETA; intake, evaluation and reward
+activation are separate.
 
-## Temporary live-miner rewards
+## Submit a model for an open cohort
 
-The [registration bridge](operators/bridge.md) replaces the frozen two-miner
-pilot rule. It checks registered SN78 miners' HTTPS availability and gives each
-qualifying coldkey/IP/funding group an equal total weight, divided among its passing UIDs.
-It does not score translations or require a running model.
+1. Keep the submitting hotkey registered on subnet **78**. Registration alone is
+   not cohort participation and does not guarantee a score or reward.
+2. [Install or update the published model client](miners/connection.md#install-or-update-the-model-submission-client) as the account that owns your wallet.
+3. Prepare the runnable bundle, signed submission and cohort consent using the
+   [model contribution requirements](contributors/models.md). Keep the exact
+   signed participation request and original source directory.
+4. Follow the [public-model upload steps](miners/model.md#model-files-for-recoverable-cohorts).
+   Direct-R2 cohorts send model bytes to R2; the coordinator handles signed metadata,
+   admission and review. A running endpoint is not required to submit this track.
+5. After upload, [query current admission](miners/model.md#check-admission-after-upload)
+   with the original request. The initial receipt stays `pending_attestation`;
+   it is not a live status display.
 
-The temporary registration-snapshot freeze has been lifted. New and re-registered
-hotkeys can qualify after finalization and health checks. Check the current
-registration quote before paying; registration does not guarantee rewards.
+Use the [cohort catalog](https://api.umi.vision/v1/competition/cohorts) to identify
+the exact cohort, its signed history, effective tracks and admission URL. Check
+`/v1/competition/cohorts/<cohort_sha256>/readiness?nonce=<32 lowercase hex characters>`
+before signing a new submission. `effective_eligible_tracks` and
+`effective_service_pool_bps` reflect the latest signed cohort profile amendment;
+the original plan in `/history` remains unchanged. C6 and later accept public
+models only when their effective profile selects `model`. A prior mixed plan is
+not an instruction to enroll an endpoint after a model-only amendment.
+Install the published client update before submitting to an amended cohort;
+keep existing signed requests and resume them unchanged after updating.
 
-Use the [current-row diagnostic](operators/bridge.md#check-current-rows) for
-freshness. Historical deployment reports do not establish current incentives,
-and inclusion in a row is not proof of a received payout.
+## Understand the result
 
-## Miner requirements
+C7 and later distribute model rewards in 2.5-point score bands, with a **0.85
+multiplier (15% decay)** between occupied bands and between ranked models within
+each band. Eligibility allows **1% relative grace** below the same-cohort
+baseline: `score >= baseline_score * 0.99`. A 60.00% baseline therefore gives a
+59.40% cutoff. Meeting this cutoff is separate from the existing content and
+near-equal-score duplicate rules. Scores are not rounded before these checks.
+C6's finalized allocation retains its original 0.75 multipliers and strict
+baseline cutoff. See [model award rules](operators/settlement.md#recoverable-cohort-model-awards).
 
-- Keep your SN78 hotkey registered and its public IP and port announced on chain.
-- Serve `https://ANNOUNCED_IP:ANNOUNCED_PORT/healthz` with HTTP 200 within five
-  seconds. The response must be at most 16 KiB, with no redirect.
-- Use a system-trusted TLS certificate valid for the announced IP address.
-  A certificate for a separate hostname or a self-signed certificate is insufficient.
-- Your UID must have no validator permit. UID 0 and subnet-owner-associated
-  hotkeys are excluded from miner weights.
+| What you see | What it establishes |
+| --- | --- |
+| Upload/participation receipt with `pending_attestation` | The owner retained that request. This original acknowledgement does not update. |
+| `query-cohort-admission` returns `pending_attestation` | The current admission certificate is still pending for that exact request. |
+| `query-cohort-admission` returns `admission_certified` | Participation has a verified admission certificate. It is separate from scoring and final cohort certification. |
+| Published quality results | Evaluation results are available, with the published provisional/final scope. |
+| Finalized reward allocation and chain incentives | Reward activation has reached the chain. A dashboard balance or admission receipt alone does not prove a payment. |
 
-A lightweight HTTPS keepalive can pass this check. There is no new pilot issue,
-READY FOR CASE signature, opt-in, model upload, or manual enrollment. The timed
-pilot is closed. Previous pilot participation is not required.
+If the live admission query remains pending, preserve the request and report the
+cohort ID, consent digest, hotkey/UID, client revision and relevant retry reason.
+Do not create new nonces or replace the signed request merely to clear a temporary
+server hold. Do not share wallet secrets or presigned R2 capabilities.
 
-Validators refresh the roster and health checks before writing. A new or repaired
-endpoint can qualify in a later row. A failed endpoint gets zero weight for that
-row; it does not block other healthy miners. A whole-batch failure holds the
-submission. Chain consensus and other validators' rows determine actual incentives,
-so passing a health check does not guarantee an immediate or fixed payout.
+## Existing endpoint installations
 
-## How weights are shared
+The [connection guide](miners/connection.md) remains authoritative for supported
+endpoint runtime upgrades, policy files and retained endpoint-state compatibility.
+Its C5 `current.json` profile is for retained C5 endpoint work; successor model
+participation follows each signed cohort history through the separate model client. Preserve
+existing assignment, grant, nonce and retirement journals. Endpoint participation
+and public-model participation are distinct; running an endpoint does not submit
+a model for C6.
 
-Passing UIDs sharing a coldkey, HTTPS endpoint IP, or a common recorded
-pre-registration sender in the signed funding snapshot form one group.
-Connections are transitive and ports are ignored. Each group gets the same
-total raw weight, split among its passing UIDs. See the
-[funding-cap rule](operators/bridge.md).
-
-This does not prove human or machine identity. Shared hosting or NAT can group
-independent miners together. Shared exchange withdrawal wallets can also group
-independent recipients. Unknown or multiple-sender funding histories add no
-funding link. Different coldkeys, IPs and funding sources can still make multiple
-groups, and copying another miner's endpoint can dilute its group.
-HTTPS reachability does not prove endpoint ownership or translation quality.
-
-The cached funding checker detects new registrations automatically. Adding new
-funding links to rewards still requires a signed snapshot refresh. Until then,
-new registrations use the existing coldkey/IP rules and cannot inherit a reused
-UID's old funding assertion. Miners do not need a Taostats API key.
-
-The ongoing bridge policy renews weights until an explicit replacement is
-activated. This requires the signed version3 lifetime policy; historical
-version1/2 policies retain their original cutoffs. A code update alone does not
-extend an old signed policy.
-See the [signed-policy specification and rollout evidence](operators/bridge.md).
-
-## Translation competition
-
-The [version 0.2 successor design](../whitepaper/README.md) supports self-service
-endpoint participation and a reproducible-model contribution track. Opening a
-competition cohort does not replace the bridge or activate competition weights
-by itself.
-Check [public status](https://api.umi.vision/v1/competition/status) and
-[readiness](https://api.umi.vision/v1/competition/readiness) for the active
-cohort, accepted tracks and current admission state. Published phase blocks are
-nominal progression targets, not non-extendable deadlines. Liveness delays
-retain and extend unfinished work and do not advance it to another cohort.
-Acceptance does not guarantee selection, a score or a reward.
-Admitted submissions must remain valid through evaluation close, and the hotkey
-must be registered on SN78 in the finalized roster-close snapshot. The
-[connection guide](miners/connection.md) identifies accepted predecessor
-policies and the configuration needed to serve current requests.
-
-The active policy binds its contribution terms by digest. Earlier receipts do
-not accept a new policy or terms. Preserve the submission and cohort consent
-used for the live intake. Send a new submission only when public status reports
-`admission_accepting_new: true`.
-
-Translation requests need the
-[protocol miner connected to a working model](miners/model.md#miner-model-integration).
-A health-only keepalive cannot answer them. Use the exact live policy and
-[submission procedure](reference/commands.md#live-first-round-intake). Keep the
-saved `accepted_no_weight` receipt; it establishes admission only, not quality or
-earnings.
-
-The [current connection guide](miners/connection.md) provides the signed feed settings,
-exact release and tested configuration changes. Assignments follow the finalized
-roster and published work authorization. Readiness does not establish a completed
-live cohort. Before a miner has a published assignment, even a correctly signed
-feed query can return 401. That response alone does not invalidate its receipt. A
-coordinator, feed or evaluator infrastructure delay cannot count as miner
-failure.
-
-The open-competition endpoint path supports
-[hotkey-signed HTTPS hostnames as well as literal IPs](miners/model.md#miner-endpoint-hostnames).
-That support does not change the current bridge's IP-certificate requirement or
-make a hostname-only keepalive eligible for bridge rewards.
-
-The active signed policy and cohort manifest publish the service and model
-reward shares, allowed tracks and applicable terms. A manifest may permit both
-tracks or require a complete public-model entry. UMI may publish successor terms
-and a different manifest before an unopened cohort begins; once intake opens,
-that cohort keeps the rules participants accepted. Do not infer a profile from
-the cohort number. Under the current model rules, complete entries must match or
-beat the frozen baseline, exact copies count once, and eligible models compete
-for one credit in each occupied fixed five-percentage-point quality band. Read
-the [model preparation checklist](contributors/models.md#model-contribution-review)
-and use the exact terms named by the signed policy. Historical allocations keep
-the terms and burn rules they originally bound. Terms alone do not approve an
-individual model's rights or award it a share. Endpoint service does not require
-contributing private weights.
-
-## Reading payout dashboards
-
-A submitted weight row, positive finalized miner incentive, validator dividends,
-and subnet TAO inflow are different measurements. Check the UID, finalized block,
-and field before attributing a displayed payment to this bridge. Registration and
-hosting costs are not guaranteed to be recovered.
-
-The old `/api/v1/bootstrap-service` endpoint describes the retired frozen-pilot
-policy. It cannot attest to registration-bridge activation or current eligibility.
+The [bridge specification](operators/bridge.md) remains relevant to historical
+policies and retained verification/recovery consumers. Its HTTPS keepalive rules
+are not the current C5 competition reward mechanism and do not replace C6 model
+submission. Check the [public results API](reference/competition-results-api.md)
+for the selected cohort and published result scope.

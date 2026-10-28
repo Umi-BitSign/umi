@@ -16,7 +16,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_serializer, model_validator
 
-from .competition_cohort_admission_review import review_cohort_participation
+from .competition_cohort_admission_review import review_original_participation
 from .competition_cohort_availability import (
     CohortAvailabilityObservation,
     pending_availability_progress,
@@ -45,7 +45,7 @@ from .competition_cohort_model_acceptance_store import (
 from .competition_cohort_recovery import CohortRecoveryTransition, ModelRewardCohortAuthority
 from .competition_cohort_review_export import review_export_limits as _bounds
 from .competition_cohort_review_export import review_selection
-from .competition_execution import ExecutionBoundary, execution_boundary
+from .competition_execution import ExecutionBoundary
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_work_progress import await_progress, progress_items
 from .concurrency import run_owned_thread, wait_for_owned
@@ -336,6 +336,8 @@ class RemoteIntakeProgressReviewer:
         maximum_sample_gap_blocks: int = 10,
         maximum_bytes: int = MAX_EXPORT_BYTES,
         timeout_seconds: int = 2400,
+        reviewed_participation: Callable[[bytes], Awaitable[bool]] | None = None,
+        remember_participation_review: Callable[[bytes], Awaitable[None]] | None = None,
     ):
         _bounds(maximum_bytes, timeout_seconds)
         if type(maximum_sample_gap_blocks) is not int or not 1 <= maximum_sample_gap_blocks <= 300:
@@ -347,6 +349,8 @@ class RemoteIntakeProgressReviewer:
             maximum_bytes,
             timeout_seconds,
         )
+        self.reviewed_participation = reviewed_participation
+        self.remember_participation_review = remember_participation_review
 
     async def _read(
         self, progress: CohortPhaseProgress
@@ -411,17 +415,17 @@ class RemoteIntakeProgressReviewer:
                 unit="participations",
                 cohort=progress.cohort_sha256,
             ):
-                proof = await self.archive(record.observation)
-                await review_cohort_participation(
-                    canonical_json_bytes(record),
+                await review_original_participation(
+                    record,
                     original.history,
                     self.policy,
                     self.provider,
+                    self.archive,
                     expected_tip_sha256=progress.recovery_tip_sha256,
-                    registration_archive=proof,
+                    reviewed_participation=self.reviewed_participation,
+                    remember_participation_review=self.remember_participation_review,
                 )
-        current = execution_boundary(await self.provider.collect())
-        if current.block < progress.observed_at_block:
+        if await self.provider.current_finalized_block() < progress.observed_at_block:
             raise ValueError("intake progress is ahead of owned finality")
         # Fresh challenge after proof I/O. A disconnected owner delays the vote;
         # it never turns an old export into evidence that the history is current.

@@ -21,6 +21,7 @@ from .competition_cohort_order_signer import (
     OrderFinality,
 )
 from .competition_cohort_orders import RecoverableEvaluationOrder, SignedRecoverableEvaluationOrder
+from .competition_work_progress import await_progress
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import identity
 
@@ -110,9 +111,15 @@ class CohortOrderWorker:
                         )
                         if vote is None:
                             await wait_for_owned(self._current(slot, cohort), timeout=self.timeout)
-                            vote = await wait_for_owned(
-                                self.reviewers.attest(reviewer, intent.order, intent.participant),
-                                timeout=self.timeout,
+                            vote = await await_progress(
+                                wait_for_owned(
+                                    self.reviewers.attest(
+                                        reviewer, intent.order, intent.participant
+                                    ),
+                                    timeout=self.timeout,
+                                ),
+                                stage="order_attestation",
+                                cohort=cohort,
                             )
                         if identity(vote.signature.hotkey) != identity(reviewer):
                             raise ValueError("reviewer response belongs to another identity")
@@ -137,9 +144,15 @@ class CohortOrderWorker:
                         )
                         if receipt is None:
                             await wait_for_owned(self._current(slot, cohort), timeout=self.timeout)
-                            receipt = await wait_for_owned(
-                                self.delivery.accept(evaluator, certificate, intent.participant),
-                                timeout=self.timeout,
+                            receipt = await await_progress(
+                                wait_for_owned(
+                                    self.delivery.accept(
+                                        evaluator, certificate, intent.participant
+                                    ),
+                                    timeout=self.timeout,
+                                ),
+                                stage="order_assignment_delivery",
+                                cohort=cohort,
                             )
                         if identity(receipt.receipt.evaluator_hotkey) != identity(evaluator):
                             raise ValueError("delivery response belongs to another identity")

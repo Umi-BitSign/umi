@@ -66,11 +66,13 @@ class ServiceQueueBackpressure(ValueError):
 class ServiceQueueClosed(ServiceQueueBackpressure):
     """New claims are permanently closed; exact accepted claims still recover."""
 
-    def __init__(self, reason: Literal["sealed", "tail_fenced"]):
+    def __init__(self, reason: Literal["sealed", "tail_fenced", "model_only"]):
         self.reason = reason
         super().__init__(
             "service queue is sealed to new claims"
             if reason == "sealed"
+            else "cohort has no paid endpoint service track"
+            if reason == "model_only"
             else "service queue has its durable cohort tail fence"
         )
 
@@ -534,7 +536,9 @@ class ServiceWorkQueue:
                 raise ValueError("tail admission binding differs from original cohort or policy")
             self.journal.put("service_tail_fence_binding", self.config.catalog_sha256, binding)
 
-    def _admission_closed(self, db) -> Literal["sealed", "tail_fenced"] | None:
+    def _admission_closed(
+        self, db, *, round_=None
+    ) -> Literal["sealed", "tail_fenced", "model_only"] | None:
         """Read the native immutable closure disposition, without reserving a claim.
 
         The caller owns its transaction. Corruption or changed bindings refuse the
@@ -548,6 +552,12 @@ class ServiceWorkQueue:
             return "sealed"
         if self._tail_admission_fence(db) is not None:
             return "tail_fenced"
+        if round_ is None:
+            if self.journal.get_raw("service_catalog", self.config.catalog_sha256, db=db) is None:
+                return None
+            _, round_ = self._catalog(db)
+        if "endpoint" not in round_.eligible_tracks:
+            return "model_only"
         return None
 
     def _tail_admission_fence(self, db=None) -> ServiceTailAdmissionFence | None:

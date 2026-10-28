@@ -16,13 +16,18 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from datetime import datetime, timezone
-from itertools import pairwise
 from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
+from .competition_cohort_direct_model_attempts import (
+    DirectModelAttemptJournal,
+)
+from .competition_cohort_direct_model_attempts import (
+    DirectModelUploadIntent as _DirectModelUploadIntent,
+)
 from .competition_cohort_direct_model_upload import (
     DirectModelPayload,
     DirectModelUploadObject,
@@ -51,12 +56,16 @@ from .competition_cohort_model_static_review import (
     StandingModelReviewPolicy,
     StaticModelReviewHeld,
     build_standing_model_review_from_documents,
+    obsolete_empty_document_hold,
+    review_hold_key,
     verify_standing_review_policy,
 )
 from .competition_cohort_participation import CohortParticipationRequest
 from .competition_cohort_recovery import ModelDeliveryProfile
+from .competition_model_review_file import reviewed_file_ready
 from .competition_remote_model_verification import require_remote_model_bytes, verify_remote_model
-from .competition_round_journal import RoundJournal
+from .competition_work_progress import WorkProgress
+from .concurrency import run_owned_thread
 from .open_competition import CompetitionPolicy, Hotkey, Signature, digest, identity
 from .private_files import (
     Directory,
@@ -72,6 +81,10 @@ class DirectModelUploadPending(OSError):
     """A retained attempt is still inside its crash-recovery lease."""
 
 
+class DirectModelProviderUnavailable(DirectModelUploadPending):
+    """Provider generation and completed object are both absent; signed restart needed."""
+
+
 class DirectModelUploadOwnerConfig(StrictProtocolModel):
     schema_: Literal["umi-direct-model-upload-owner-config/1"] = Field(alias="schema")
     directory: Directory
@@ -79,6 +92,8 @@ class DirectModelUploadOwnerConfig(StrictProtocolModel):
     owner_hotkey: Hotkey
     delivery: ModelDeliveryProfile
     maximum_uploads: Annotated[int, Field(ge=1, le=4096)] = 1024
+    # Retained for exact compatibility with published host/config declarations.
+    # Metadata capacity bounds retry history; this is not a lifetime retry cutoff.
     maximum_attempts_per_upload: Annotated[int, Field(ge=2, le=64)] = 16
     maximum_metadata_bytes: Annotated[int, Field(ge=1024**2, le=16 * 1024**3)] = 1024**3
     attempt_lease_seconds: Annotated[int, Field(ge=30, le=900)] = 120
@@ -108,24 +123,6 @@ class DirectModelUploadOwnerConfig(StrictProtocolModel):
         return self
 
 
-class _DirectModelUploadIntent(StrictProtocolModel):
-    schema_: Literal["umi-direct-model-upload-intent/1"] = Field(alias="schema")
-    cohort_sha256: Hex32
-    upload_sha256: Hex32
-    payload_declaration_sha256: Hex32
-    attempt_id: Hex32
-    generation: Annotated[int, Field(ge=1, le=2**32 - 1)]
-    object_key: Annotated[str, Field(min_length=1, max_length=1024)]
-    created_at_unix_ms: Annotated[int, Field(ge=0, le=2**63 - 1)]
-    retry_after_unix_ms: Annotated[int, Field(ge=0, le=2**63 - 1)]
-
-    @model_validator(mode="after")
-    def ordered(self) -> Self:
-        if self.retry_after_unix_ms <= self.created_at_unix_ms:
-            raise ValueError("direct upload attempt lease differs")
-        return self
-
-
 class _DirectModelProviderUpload(StrictProtocolModel):
     schema_: Literal["umi-direct-model-provider-upload/1"] = Field(alias="schema")
     intent_sha256: Hex32
@@ -135,13 +132,6 @@ class _DirectModelProviderUpload(StrictProtocolModel):
 class _DirectModelReservationIndex(StrictProtocolModel):
     schema_: Literal["umi-direct-model-reservation-index/1"] = Field(alias="schema")
     reservation_sha256: Hex32
-    attempt_id: Hex32
-
-
-class _DirectModelAttemptIndex(StrictProtocolModel):
-    schema_: Literal["umi-direct-model-attempt-index/1"] = Field(alias="schema")
-    upload_sha256: Hex32
-    generation: Annotated[int, Field(ge=1, le=2**32 - 1)]
     attempt_id: Hex32
 
 
@@ -198,8 +188,59 @@ def _at(unix_ms: int) -> datetime:
     return datetime.fromtimestamp(unix_ms / 1000, tz=timezone.utc)
 
 
-def _attempt_index_key(upload_sha256: str, generation: int) -> str:
-    return sha256_hex(f"umi-direct-model-attempt-index/1:{upload_sha256}:{generation}".encode())
+async def _copy_promotion_parts(
+    multipart,
+    destination_key,
+    source_key,
+    upload_id,
+    payload,
+    copy_width,
+    progress,
+) -> tuple[DirectModelUploadPart, ...]:
+    """Copy independent R2 parts in bounded waves, then return provider order."""
+
+    if type(copy_width) is not int or not 1 <= copy_width <= 4:
+        raise ValueError("direct model promotion copy width differs")
+    parts = []
+    offset = 0
+
+    async def copy_one(part_number, part_offset, part_size):
+        part = await multipart.copy_part(
+            destination_key,
+            source_key=source_key,
+            upload_id=upload_id,
+            part_number=part_number,
+            offset=part_offset,
+            size_bytes=part_size,
+            source_size_bytes=payload.total_bytes,
+        )
+        if (
+            not isinstance(part, DirectModelUploadPart)
+            or part.part_number != part_number
+            or part.size_bytes != part_size
+        ):
+            raise ValueError("direct model promotion part differs")
+        progress.advance()
+        return part
+
+    for first in range(1, payload.total_parts + 1, copy_width):
+        requests = []
+        for part_number in range(first, min(first + copy_width, payload.total_parts + 1)):
+            size = min(payload.part_size_bytes, payload.total_bytes - offset)
+            requests.append((part_number, offset, size))
+            offset += size
+        # Preserve ownership until all in-flight requests settle. A failed
+        # request then leaves no local task racing the caller's multipart abort.
+        copied = await asyncio.gather(
+            *(copy_one(*request) for request in requests), return_exceptions=True
+        )
+        for result in copied:
+            if isinstance(result, BaseException):
+                raise result
+            parts.append(result)
+    if offset != payload.total_bytes:
+        raise ValueError("direct model promotion part geometry differs")
+    return tuple(parts)
 
 
 class DirectModelUploadOwner:
@@ -214,6 +255,7 @@ class DirectModelUploadOwner:
         sign: Sign,
         policy: CompetitionPolicy | None = None,
         new_attempt_id: AttemptId | None = None,
+        repair_attempt_index: bool = False,
     ) -> None:
         self.config = DirectModelUploadOwnerConfig.model_validate_json(canonical_json_bytes(config))
         if not callable(authorize) or not callable(sign):
@@ -240,7 +282,7 @@ class DirectModelUploadOwner:
             if policy is None:
                 raise ValueError("direct upload standing review requires its competition policy")
             verify_standing_review_policy(c.standing_review_policy, policy)
-        self.journal = RoundJournal(
+        self.journal = DirectModelAttemptJournal(
             Path(c.directory) / "journal",
             {
                 "schema": "umi-direct-model-upload-owner-binding/1",
@@ -253,7 +295,8 @@ class DirectModelUploadOwner:
                     None if c.standing_review_policy is None else digest(c.standing_review_policy)
                 ),
             },
-            maximum_rounds=min(65536, c.maximum_uploads * c.maximum_attempts_per_upload),
+            maximum_uploads=c.maximum_uploads,
+            repair_attempt_index=repair_attempt_index,
             maximum_bytes=c.maximum_metadata_bytes,
         )
 
@@ -291,30 +334,8 @@ class DirectModelUploadOwner:
             raise ValueError("direct model payload differs from its signed request")
         return key, payload
 
-    def _attempts(self, upload_sha256: str) -> list[_DirectModelUploadIntent]:
-        values = []
-        for generation in range(1, self.config.maximum_attempts_per_upload + 1):
-            index_key = _attempt_index_key(upload_sha256, generation)
-            raw_index = self.journal.get("direct-attempt-index", index_key)
-            if raw_index is None:
-                continue
-            index = _DirectModelAttemptIndex.model_validate_json(canonical_json_bytes(raw_index))
-            if index.upload_sha256 != upload_sha256 or index.generation != generation:
-                raise ValueError("direct upload attempt index changed")
-            raw = self.journal.get("direct-intent", index.attempt_id)
-            if raw is None:
-                raise ValueError("direct upload attempt index is incomplete")
-            intent = _DirectModelUploadIntent.model_validate_json(canonical_json_bytes(raw))
-            if (
-                intent.attempt_id != index.attempt_id
-                or intent.upload_sha256 != upload_sha256
-                or intent.generation != generation
-            ):
-                raise ValueError("direct upload attempt identity changed")
-            values.append(intent)
-        if any(a.generation == b.generation for a, b in pairwise(values)):
-            raise ValueError("direct upload attempt generation repeated")
-        return values
+    def _latest_attempt(self, upload_sha256: str) -> _DirectModelUploadIntent | None:
+        return self.journal.latest_attempt(upload_sha256)
 
     def _signed_reservation(
         self, attempt: _DirectModelUploadIntent
@@ -418,12 +439,7 @@ class DirectModelUploadOwner:
                 with self.journal.locked():
                     prior = self.journal.get("direct-request", upload_sha256)
                     if prior is None:
-                        self.journal.put_many(
-                            (
-                                ("direct-request", upload_sha256, request),
-                                ("direct-payload", upload_sha256, signed_payload),
-                            )
-                        )
+                        self.journal.retain_request(upload_sha256, request, signed_payload)
                     elif prior != request.model_dump(mode="json", by_alias=True):
                         raise ValueError("direct upload request retry differs")
             elif retained_request != request.model_dump(mode="json", by_alias=True):
@@ -439,9 +455,8 @@ class DirectModelUploadOwner:
             ) != identity(signed_payload.signature.hotkey):
                 raise ValueError("direct upload payload retry differs")
 
-            attempts = self._attempts(upload_sha256)
-            if attempts:
-                current = attempts[-1]
+            current = self._latest_attempt(upload_sha256)
+            if current is not None:
                 signed = self._signed_reservation(current)
                 superseded = (
                     signed is not None
@@ -483,10 +498,7 @@ class DirectModelUploadOwner:
                     return await self._finish_reservation(current, signed_payload, provider)
                 if signed is None and now_unix_ms < current.retry_after_unix_ms:
                     raise DirectModelUploadPending("direct upload creation is pending")
-            if len(attempts) >= self.config.maximum_attempts_per_upload:
-                raise OSError("direct upload attempt capacity exhausted")
-
-            generation = 1 if not attempts else attempts[-1].generation + 1
+            generation = 1 if current is None else current.generation + 1
             attempt_id = self.new_attempt_id()
             if (
                 type(attempt_id) is not str
@@ -510,22 +522,7 @@ class DirectModelUploadOwner:
                 created_at_unix_ms=now_unix_ms,
                 retry_after_unix_ms=(now_unix_ms + self.config.attempt_lease_seconds * 1000),
             )
-            attempt_index_key = _attempt_index_key(upload_sha256, generation)
-            self.journal.put_many(
-                (
-                    ("direct-intent", attempt_id, attempt),
-                    (
-                        "direct-attempt-index",
-                        attempt_index_key,
-                        _DirectModelAttemptIndex(
-                            schema="umi-direct-model-attempt-index/1",
-                            upload_sha256=upload_sha256,
-                            generation=generation,
-                            attempt_id=attempt_id,
-                        ),
-                    ),
-                )
-            )
+            self.journal.retain_attempt(attempt)
             provider_upload_id = await self.multipart.create(object_key, at=_at(now_unix_ms))
             provider = _DirectModelProviderUpload(
                 schema="umi-direct-model-provider-upload/1",
@@ -552,7 +549,7 @@ class DirectModelUploadOwner:
             reservation = self._reservation_by_digest(request.reservation_sha256)
             require_restart_request_signer(signed_restart, reservation.reservation)
             body = reservation.reservation
-            attempts = self._attempts(body.payload.upload_sha256)
+            current = self._latest_attempt(body.payload.upload_sha256)
             attempt_raw = self.journal.get("direct-intent", body.attempt_id)
             if attempt_raw is None:
                 raise ValueError("direct upload restart attempt is unavailable")
@@ -568,11 +565,12 @@ class DirectModelUploadOwner:
                 raise ValueError("direct upload restart retry differs")
             superseded = self.journal.get("direct-superseded", request.reservation_sha256)
             if superseded is None:
-                if not attempts or attempts[-1] != attempt:
+                if current != attempt:
                     raise ValueError("direct upload restart reservation was superseded")
                 if (
                     self.journal.get("direct-object", request.reservation_sha256) is not None
-                    or self.journal.get("direct-completion", request.reservation_sha256) is not None
+                    or self.journal.get("direct-verification", request.reservation_sha256)
+                    is not None
                 ):
                     raise ValueError("completed direct upload cannot be restarted")
                 if now_unix_ms < attempt.retry_after_unix_ms:
@@ -586,6 +584,12 @@ class DirectModelUploadOwner:
                     raise DirectModelUploadPending(
                         "direct upload provider generation remains available"
                     )
+                # A signed completion is an intent, not proof of an object. A
+                # provider may have committed despite a lost response, so fence
+                # replacement on HEAD as well as multipart absence. Never erase
+                # that original completion or replace a remotely completed object.
+                if await self.multipart.head(attempt.object_key, at=at) is not None:
+                    raise ValueError("completed direct upload cannot be restarted")
                 self.journal.put(
                     "direct-restart-request", request.reservation_sha256, signed_restart
                 )
@@ -640,8 +644,8 @@ class DirectModelUploadOwner:
             raise ValueError("direct upload reservation retry differs")
         if self.journal.get("direct-superseded", digest(reservation)) is not None:
             raise ValueError("direct upload reservation was superseded")
-        attempts = self._attempts(payload.upload_sha256)
-        if not attempts or attempts[-1] != attempt:
+        current = self._latest_attempt(payload.upload_sha256)
+        if current != attempt:
             raise ValueError("direct upload reservation was superseded")
         provider = self._provider(attempt)
         maximum = self.config.delivery.maximum_concurrent_parts
@@ -700,6 +704,35 @@ class DirectModelUploadOwner:
             capabilities=values,
         )
 
+    def _current_review_hold(self, reservation):
+        payload = reservation.reservation.payload
+        if self.config.standing_review_policy is not None:
+            current = self.journal.get(
+                "direct-review-hold",
+                review_hold_key(payload.model_sha256, self.config.standing_review_policy),
+            )
+            if current is not None:
+                return current
+        hold = self.journal.get("direct-review-hold", payload.model_sha256)
+        if hold is None or self.config.standing_review_policy is None:
+            return hold
+        if not isinstance(hold, dict) or not isinstance(hold.get("reason_code"), str):
+            raise ValueError("retained direct model review hold differs")
+        raw = self.journal.get("direct-request", payload.upload_sha256)
+        if raw is None:
+            raise ValueError("held direct model review request is unavailable")
+        request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(raw))
+        bundle = request.signed_submission.submission.model_bundle
+        if bundle is None or digest(bundle) != payload.model_sha256:
+            raise ValueError("held direct model review bundle changed")
+        return (
+            None
+            if obsolete_empty_document_hold(
+                bundle, self.config.standing_review_policy, hold["reason_code"]
+            )
+            else hold
+        )
+
     def status(self, reservation_sha256: str) -> DirectModelUploadStatus:
         reservation = self._reservation_by_digest(reservation_sha256)
         verification_raw = self.journal.get("direct-verification", reservation_sha256)
@@ -712,7 +745,7 @@ class DirectModelUploadOwner:
         )
         body = reservation.reservation
         verification_hold = self.journal.get("direct-verification-hold", reservation_sha256)
-        review_hold = self.journal.get("direct-review-hold", body.payload.model_sha256)
+        review_hold = self._current_review_hold(reservation)
         hold = verification_hold if verification_hold is not None else review_hold
         hold_reason_code = None if hold is None else hold.get("reason_code")
         return DirectModelUploadStatus(
@@ -734,10 +767,10 @@ class DirectModelUploadOwner:
         retained = self.journal.get("direct-request", upload_sha256)
         if retained != request.model_dump(mode="json", by_alias=True):
             raise DirectModelUploadPending("deliver and verify the complete model first")
-        attempts = self._attempts(upload_sha256)
-        if not attempts:
+        current = self._latest_attempt(upload_sha256)
+        if current is None:
             raise DirectModelUploadPending("deliver and verify the complete model first")
-        reservation = self._signed_reservation(attempts[-1])
+        reservation = self._signed_reservation(current)
         if reservation is None:
             raise DirectModelUploadPending("direct model reservation is incomplete")
         reservation_sha256 = digest(reservation.reservation)
@@ -760,7 +793,7 @@ class DirectModelUploadOwner:
                     maximum_bytes=MAX_PUBLICATION_BYTES,
                 )
             except FileNotFoundError as error:
-                hold = self.journal.get("direct-review-hold", submission.model_revision)
+                hold = self._current_review_hold(reservation)
                 reason = (
                     ": " + hold["reason_code"]
                     if isinstance(hold, dict) and isinstance(hold.get("reason_code"), str)
@@ -779,10 +812,10 @@ class DirectModelUploadOwner:
 
         self.require_payload(request)
         upload_sha256, _ = self._request(request)
-        attempts = self._attempts(upload_sha256)
-        if not attempts:
+        current = self._latest_attempt(upload_sha256)
+        if current is None:
             raise DirectModelUploadPending("direct model upload has no retained attempt")
-        reservation = self._signed_reservation(attempts[-1])
+        reservation = self._signed_reservation(current)
         if reservation is None:
             raise DirectModelUploadPending("direct model upload reservation is pending")
         if self.journal.get("direct-verification", digest(reservation.reservation)) is None:
@@ -841,10 +874,14 @@ class DirectModelUploadOwner:
         try:
             for record in bundle.files:
                 if record.role in {"license", "provenance"}:
-                    if not 1 <= record.size_bytes <= standing.maximum_document_bytes:
+                    if not 0 <= record.size_bytes <= standing.maximum_document_bytes:
                         raise StaticModelReviewHeld("review_document_size_outside_policy")
-                    documents[record.path] = await self.multipart.read_range(
-                        attempt.object_key, offset=offset, size_bytes=record.size_bytes
+                    documents[record.path] = (
+                        await self.multipart.read_range(
+                            attempt.object_key, offset=offset, size_bytes=record.size_bytes
+                        )
+                        if record.size_bytes
+                        else b""
                     )
                 offset += record.size_bytes
             if self.policy is None:
@@ -858,7 +895,7 @@ class DirectModelUploadOwner:
         except StaticModelReviewHeld as error:
             self.journal.put(
                 "direct-review-hold",
-                payload.model_sha256,
+                review_hold_key(payload.model_sha256, standing),
                 {"reason_code": error.reason_code, "review_policy_sha256": digest(standing)},
             )
             raise
@@ -898,22 +935,27 @@ class DirectModelUploadOwner:
         if attempt_raw is None:
             raise ValueError("direct upload completion attempt is unavailable")
         attempt = _DirectModelUploadIntent.model_validate_json(canonical_json_bytes(attempt_raw))
-        attempts = self._attempts(payload.upload_sha256)
-        if not attempts or attempts[-1] != attempt:
+        current = self._latest_attempt(payload.upload_sha256)
+        if current != attempt:
             raise ValueError("direct upload completion reservation was superseded")
         provider = self._provider(attempt)
         if provider is None:
             raise ValueError("direct upload provider is unavailable")
         return signed, reservation, attempt, provider
 
-    def _reservation_by_digest(self, reservation_sha256: str) -> SignedDirectModelUploadReservation:
-        raw_index = self.journal.get("direct-reservation-index", reservation_sha256)
+    def _reservation_by_digest(
+        self, reservation_sha256: str, *, db=None
+    ) -> SignedDirectModelUploadReservation:
+        if db is None:
+            with self.journal.read_transaction() as db:
+                return self._reservation_by_digest(reservation_sha256, db=db)
+        raw_index = self.journal.get("direct-reservation-index", reservation_sha256, db=db)
         if raw_index is None:
             raise FileNotFoundError("direct upload reservation is unavailable")
         index = _DirectModelReservationIndex.model_validate_json(canonical_json_bytes(raw_index))
         if index.reservation_sha256 != reservation_sha256:
             raise ValueError("direct upload reservation index changed")
-        raw = self.journal.get("direct-reservation", index.attempt_id)
+        raw = self.journal.get("direct-reservation", index.attempt_id, db=db)
         if raw is None:
             raise ValueError("direct upload reservation index is incomplete")
         retained = SignedDirectModelUploadReservation.model_validate_json(canonical_json_bytes(raw))
@@ -965,11 +1007,16 @@ class DirectModelUploadOwner:
                     )
                 except OSError:
                     head = await self.multipart.head(attempt.object_key, at=at)
-                    if (
-                        head is None
-                        or head.size_bytes != reservation.reservation.payload.total_bytes
-                    ):
+                    if head is None:
+                        if not await self.multipart.multipart_exists(
+                            attempt.object_key, upload_id=provider.provider_upload_id, at=at
+                        ):
+                            raise DirectModelProviderUnavailable(
+                                "direct upload provider generation and object are unavailable"
+                            ) from None
                         raise
+                    if head.size_bytes != reservation.reservation.payload.total_bytes:
+                        raise ValueError("completed direct upload object size differs") from None
                     provider_etag = head.etag
             else:
                 provider_etag = head.etag
@@ -1246,26 +1293,28 @@ class DirectModelUploadOwner:
             if preserved_head is None:
                 upload_id = await self.multipart.create(preserved_key)
                 try:
-                    parts: list[DirectModelUploadPart] = []
-                    offset = 0
-                    for part_number in range(1, payload.total_parts + 1):
-                        size = min(payload.part_size_bytes, payload.total_bytes - offset)
-                        parts.append(
-                            await self.multipart.copy_part(
-                                preserved_key,
-                                source_key=source_key,
-                                upload_id=upload_id,
-                                part_number=part_number,
-                                offset=offset,
-                                size_bytes=size,
-                                source_size_bytes=payload.total_bytes,
-                            )
+                    # S3 multipart parts are independent. Bound server-side copy
+                    # concurrency by the signed delivery profile, then submit
+                    # the returned parts in their original order. Each batch
+                    # drains before failure handling aborts the upload.
+                    copy_width = min(4, self.config.delivery.maximum_concurrent_parts)
+                    with WorkProgress(
+                        "model_promotion_copy",
+                        payload.total_parts,
+                        unit="parts",
+                        cohort=acceptance.cohort_sha256,
+                    ) as progress:
+                        parts = await _copy_promotion_parts(
+                            self.multipart,
+                            preserved_key,
+                            source_key,
+                            upload_id,
+                            payload,
+                            copy_width,
+                            progress,
                         )
-                        offset += size
-                    if offset != payload.total_bytes:
-                        raise ValueError("direct model promotion part geometry differs")
                     provider_etag = await self.multipart.complete(
-                        preserved_key, upload_id=upload_id, parts=tuple(parts)
+                        preserved_key, upload_id=upload_id, parts=parts
                     )
                 except BaseException:
                     with suppress(OSError, ValueError):
@@ -1389,6 +1438,16 @@ class DirectModelUploadOwner:
             raise ValueError("rejected object cleanup intent changed")
         return now_unix_ms >= intent.retain_until_unix_ms
 
+    def _poll_input(self, reservation_sha256):
+        """One fresh, fenced snapshot; no connection escapes its owned thread."""
+        with self.journal.read_transaction() as db:
+            verified = (
+                self.journal.get("direct-verification", reservation_sha256, db=db) is not None
+            )
+            reservation = self._reservation_by_digest(reservation_sha256, db=db)
+            hold = self.journal.get("direct-verification-hold", reservation_sha256, db=db)
+        return verified, reservation, hold
+
     async def poll_once(self, *, now_unix_ms: int) -> dict[str, int | str]:
         """Advance bounded object verification without holding up public requests."""
 
@@ -1397,30 +1456,32 @@ class DirectModelUploadOwner:
         cleaned = retained_for_cleanup = cleanup_examined = 0
         last_error = ""
         examined = 0
-        for reservation_sha256 in self.journal.keys("direct-object"):
-            verified = self.journal.get("direct-verification", reservation_sha256) is not None
-            reservation = self._reservation_by_digest(reservation_sha256)
+        keys = await run_owned_thread(self.journal.keys, "direct-object")
+        for reservation_sha256 in keys:
+            verified, reservation, verification_hold = await run_owned_thread(
+                self._poll_input, reservation_sha256
+            )
             model_sha256 = reservation.reservation.payload.model_sha256
-            verification_hold = self.journal.get("direct-verification-hold", reservation_sha256)
-            review_hold = self.journal.get("direct-review-hold", model_sha256)
             reviewed = self.config.standing_review_policy is None
             if self.config.admission_reviews_directory is not None:
                 try:
-                    retained = read_private_model(
+                    reviewed = await run_owned_thread(
+                        reviewed_file_ready,
+                        self.journal,
                         Path(self.config.admission_reviews_directory) / (model_sha256 + ".json"),
-                        ModelArtifactReviewInputs,
-                        maximum_bytes=MAX_PUBLICATION_BYTES,
+                        model_sha256,
                     )
-                    if retained.model_sha256 != model_sha256:
-                        raise ValueError("direct model review changed")
-                    reviewed = True
-                    reviews_ready += 1
-                except FileNotFoundError:
-                    pass
+                    if reviewed:
+                        reviews_ready += 1
+                except (OSError, ValueError) as error:
+                    failed += 1
+                    last_error = type(error).__name__
+                    continue
             if verified:
                 ready += 1
             if verified and reviewed:
                 continue
+            review_hold = await run_owned_thread(self._current_review_hold, reservation)
             if verification_hold is not None:
                 failed += 1
                 last_error = verification_hold["reason_code"]
@@ -1535,7 +1596,9 @@ class DirectModelUploadOwner:
                 reason_code = "direct_model_review_failed"
                 self.journal.put(
                     "direct-review-hold",
-                    model_sha256,
+                    review_hold_key(model_sha256, self.config.standing_review_policy)
+                    if self.config.standing_review_policy is not None
+                    else model_sha256,
                     {"reason_code": reason_code},
                 )
                 reviews_held += 1
@@ -1567,6 +1630,7 @@ class DirectModelUploadOwner:
             "objects_cleaned": cleaned,
             "objects_retained_for_cleanup": retained_for_cleanup,
             "last_error_type": last_error,
+            **await run_owned_thread(self.journal.metadata_snapshot),
         }
 
 

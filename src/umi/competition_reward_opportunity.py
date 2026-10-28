@@ -11,8 +11,18 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
+from .competition_geometric_rewards import GeometricRewardParameters
+from .competition_reward_adoption import (
+    RewardAdoptionSelection,
+    RewardEarlyRelease,
+    RewardModelAdoption,
+    SignedRewardModelAdoption,
+    prepare_initial_reward_adoption,
+    verify_adoption_selection,
+)
 from .competition_reward_decisions import (
     RewardActivation,
+    RewardControlDecision,
     StandingRewardControlReader,
     StandingRewardSelection,
     StandingRewardSeries,
@@ -26,6 +36,7 @@ from .competition_reward_manifest import (
     StandingRewardOpportunityManifest,
     verify_reward_manifest,
 )
+from .competition_verification_snapshot import VerifiedPackageSnapshot
 from .open_competition import CompetitionPolicy, digest, identity
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -152,6 +163,233 @@ def check_opportunity_claim(
     return rule
 
 
+def check_early_release_boundary(
+    adoption: RewardModelAdoption,
+    *,
+    series: StandingRewardSeries,
+    manifest: RewardManifest,
+    predecessor: RewardControlDecision,
+    current_block: int | None = None,
+) -> RewardEarlyRelease:
+    """One boundary check shared by signed adoption handoff and native readers."""
+    release = adoption.early_release
+    if release is None:
+        raise ValueError("early release is absent from the signed adoption")
+    cohorts = tuple(digest(c) for c in series.cohorts)
+    try:
+        index = cohorts.index(adoption.cohort_sha256)
+    except ValueError:
+        raise ValueError("early release successor is outside the signed series") from None
+    if (
+        index == 0
+        or predecessor.activation is None
+        or predecessor.activation.cohort_sha256 != cohorts[index - 1]
+        or release.predecessor_decision_sha256 != digest(predecessor)
+        or release.predecessor_activation_sha256 != digest(predecessor.activation)
+        or release.successor_cohort_sha256 != adoption.cohort_sha256
+        or release.successor_package_sha256 != adoption.package_sha256
+        or release.manifest_sha256 != digest(manifest)
+        or (current_block is not None and current_block < adoption.issued_at_block)
+    ):
+        raise ValueError("early release differs from its signed predecessor or successor")
+    return release
+
+
+def verify_signed_early_release(
+    selection: RewardAdoptionSelection | None,
+    *,
+    series: StandingRewardSeries,
+    policy: CompetitionPolicy,
+    manifest: RewardManifest,
+    predecessor: RewardControlDecision,
+    successor: RewardActivation,
+    current_block: int | None = None,
+) -> bool:
+    """Check the explicit quorum-signed alternative to a completed minimum.
+
+    A missing release returns False so the ordinary native opportunity path
+    remains mandatory. A malformed selected release is an error, never a hint.
+    """
+    selected = verify_adoption_selection(selection, series, policy)
+    if selected is None or successor.reward_adoption_sha256 is None:
+        return False
+    adoption = selected.get(successor.reward_adoption_sha256).adoption
+    release = adoption.early_release
+    if release is None:
+        return False
+    check_early_release_boundary(
+        adoption,
+        series=series,
+        manifest=manifest,
+        predecessor=predecessor,
+        current_block=current_block,
+    )
+    if (
+        successor.prior_opportunity_sha256 != digest(release)
+        or adoption.cohort_sha256 != successor.cohort_sha256
+        or adoption.package_sha256 != successor.package_sha256
+    ):
+        raise ValueError("early release differs from its signed predecessor or successor")
+    return True
+
+
+def prepare_early_release_revision(
+    selection: RewardAdoptionSelection,
+    *,
+    series: StandingRewardSeries,
+    policy: CompetitionPolicy,
+    manifest: RewardManifest,
+    predecessor: RewardControlDecision,
+    successor_cohort_sha256: str,
+    issued_at_block: int,
+    reason: str,
+) -> RewardModelAdoption:
+    """Build an unsigned, exact-package operator proposal for quorum review.
+
+    The caller must obtain ``issued_at_block`` from authenticated finalized
+    state. This builder has no signing, selection or transaction authority.
+    """
+    selected = verify_adoption_selection(selection, series, policy)
+    if selected is None:
+        raise ValueError("early release lacks a selected reward adoption")
+    verify_reward_manifest(canonical_json_bytes(manifest), series, policy)
+    cohorts = tuple(digest(c) for c in series.cohorts)
+    try:
+        index = cohorts.index(successor_cohort_sha256)
+    except ValueError:
+        raise ValueError("early release successor is outside the signed series") from None
+    latest = selected.latest(successor_cohort_sha256)
+    if (
+        index == 0
+        or latest is None
+        or latest.adoption.early_release is not None
+        or predecessor.activation is None
+        or predecessor.activation.cohort_sha256 != cohorts[index - 1]
+        or type(issued_at_block) is not int
+        or issued_at_block < max(latest.adoption.issued_at_block, predecessor.observed_at_block)
+    ):
+        raise ValueError("early release lacks an eligible signed predecessor or issuance")
+    release = RewardEarlyRelease(
+        schema="umi-reward-early-release/1",
+        predecessor_decision_sha256=digest(predecessor),
+        predecessor_activation_sha256=digest(predecessor.activation),
+        successor_cohort_sha256=successor_cohort_sha256,
+        successor_package_sha256=latest.adoption.package_sha256,
+        manifest_sha256=digest(manifest),
+        reason=reason,
+    )
+    return RewardModelAdoption.model_validate_json(
+        canonical_json_bytes(
+            latest.adoption.model_copy(
+                update={
+                    "schema_": "umi-standing-model-reward-adoption/5",
+                    "revision": latest.adoption.revision + 1,
+                    "predecessor_adoption_sha256": digest(latest.adoption),
+                    "issued_at_block": issued_at_block,
+                    "early_release": release,
+                }
+            )
+        )
+    )
+
+
+def prepare_initial_early_release_adoption(
+    package: VerifiedPackageSnapshot,
+    *,
+    selection: RewardAdoptionSelection | None,
+    series: StandingRewardSeries,
+    policy: CompetitionPolicy,
+    manifest: RewardManifest,
+    predecessor: RewardControlDecision,
+    parameters: GeometricRewardParameters | None = None,
+    issued_at_block: int,
+    reason: str,
+) -> RewardModelAdoption:
+    """Include the ordinary operator release in a future cohort's first vote."""
+    verify_reward_manifest(canonical_json_bytes(manifest), series, policy)
+    initial = prepare_initial_reward_adoption(
+        package,
+        series=series,
+        policy=policy,
+        parameters=parameters,
+        issued_at_block=issued_at_block,
+        previous=selection,
+    )
+    cohorts = tuple(digest(c) for c in series.cohorts)
+    index = cohorts.index(initial.cohort_sha256)
+    if (
+        index == 0
+        or predecessor.activation is None
+        or predecessor.activation.cohort_sha256 != cohorts[index - 1]
+        or issued_at_block < predecessor.observed_at_block
+    ):
+        raise ValueError("initial early release lacks its selected predecessor")
+    release = RewardEarlyRelease(
+        schema="umi-reward-early-release/1",
+        predecessor_decision_sha256=digest(predecessor),
+        predecessor_activation_sha256=digest(predecessor.activation),
+        successor_cohort_sha256=initial.cohort_sha256,
+        successor_package_sha256=initial.package_sha256,
+        manifest_sha256=digest(manifest),
+        reason=reason,
+    )
+    return RewardModelAdoption.model_validate_json(
+        canonical_json_bytes(
+            initial.model_copy(
+                update={
+                    "schema_": "umi-standing-model-reward-adoption/5",
+                    "early_release": release,
+                }
+            )
+        )
+    )
+
+
+def select_signed_early_release_revision(
+    selection: RewardAdoptionSelection,
+    signed: SignedRewardModelAdoption,
+    *,
+    series: StandingRewardSeries,
+    policy: CompetitionPolicy,
+    manifest: RewardManifest,
+    predecessor: RewardControlDecision,
+) -> RewardAdoptionSelection:
+    """Append one quorum-signed release, or reuse the exact existing append."""
+    selected = verify_adoption_selection(selection, series, policy)
+    signed = SignedRewardModelAdoption.model_validate_json(canonical_json_bytes(signed))
+    release = signed.adoption.early_release
+    if release is None:
+        raise ValueError("signed revision lacks an early release")
+    current = selected.latest(signed.adoption.cohort_sha256)
+    if current is not None and digest(current.adoption) == digest(signed.adoption):
+        if current != signed:
+            raise ValueError("early release repeat changes its signed bytes")
+        return selected
+    expected = prepare_early_release_revision(
+        selected,
+        series=series,
+        policy=policy,
+        manifest=manifest,
+        predecessor=predecessor,
+        successor_cohort_sha256=signed.adoption.cohort_sha256,
+        issued_at_block=signed.adoption.issued_at_block,
+        reason=release.reason,
+    )
+    if signed.adoption != expected:
+        raise ValueError("signed early release differs from its qualified proposal")
+    candidate = RewardAdoptionSelection(
+        schema="umi-standing-reward-adoption-selection/1",
+        adoptions=tuple(
+            sorted(
+                (*selected.adoptions, signed),
+                key=lambda v: (v.adoption.cohort_sha256, v.adoption.revision),
+            )
+        ),
+        maximum_decisions=selected.maximum_decisions,
+    )
+    return verify_adoption_selection(candidate, series, policy)
+
+
 def require_previous_opportunity(
     value: object | None,
     *,
@@ -180,8 +418,6 @@ def require_previous_opportunity(
         and (type(value) is not VerifiedLegacyRewardHandoff or validator_hotkey is None)
     ):
         raise ValueError("first standing activation requires qualified legacy handoff evidence")
-    if index != 0:
-        validate_opportunity(value)
     prefix = retained_reward_decisions(reader)
     original = original_activation_decision(prefix, selection.activation.cohort_sha256)
     current = effective_activation_decision(
@@ -229,6 +465,19 @@ def require_previous_opportunity(
     prior = effective_activation_decision(
         prefix, digest(reader.series.cohorts[index - 1]), through_sequence=original.sequence - 1
     )
+    if prior is not None and verify_signed_early_release(
+        reader.reward_adoptions,
+        series=reader.series,
+        policy=reader.policy,
+        manifest=manifest,
+        predecessor=prior,
+        successor=current.activation,
+        current_block=current_block,
+    ):
+        if original.predecessor_sha256 != digest(prior):
+            raise ValueError("early reward release changes the selected predecessor")
+        return
+    validate_opportunity(value)
     if (
         prior is None
         or prior.activation is None

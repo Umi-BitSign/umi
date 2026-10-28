@@ -1,10 +1,21 @@
 """History completion estimates include retry wall time, never restored proofs."""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
 from umi import competition_reward_history_progress as module
+
+
+def test_native_tip_refreshes_keep_the_current_target_scope():
+    progress = module.HistoryProgress(10)
+    progress.start(20, 10)
+    progress.completed_tip_refreshes = 3
+    progress.start(20, 12)
+    assert progress.completed_tip_refreshes == 3
+    progress.start(21, 12)
+    assert progress.completed_tip_refreshes == 0
 
 
 @pytest.fixture
@@ -20,6 +31,31 @@ def advance(progress, reader, count):
         progress.applied(height)
     reader._next += count
     progress.report(reader, "running")
+
+
+def test_shutdown_withdraws_history_forecast_and_reports_drain_without_false_completion(clock):
+    progress = module.HistoryProgress(100)
+    stop = asyncio.Event()
+    reader = SimpleNamespace(_next=100, shutdown_event=stop)
+    progress.start(199, reader._next)
+    progress.native_start()
+    clock[0] = 5
+    advance(progress, reader, 5)
+    assert progress.latest["eta_seconds"] == 95
+    stop.set()
+    progress.report(reader, "running", force=True)
+    assert progress.latest["eta_seconds"] is None
+    assert progress.latest["planning_eta_seconds"] is None
+    assert progress.latest["eta_basis"] == "withdrawn_shutdown_requested"
+    assert progress.latest["shutdown_state"] == "draining"
+    clock[0] = 8
+    progress.finish()
+    progress.report(reader, "pending", force=True)
+    assert progress.latest["shutdown_elapsed_seconds"] == 3
+    assert progress.latest["shutdown_state"] == "drained"
+    assert progress.latest["shutdown_eta_seconds"] == 0
+    assert progress.latest["completed_blocks"] == 5
+    assert progress.latest["eta_seconds"] is None
 
 
 def test_cold_restore_and_native_rates_are_separate(clock):

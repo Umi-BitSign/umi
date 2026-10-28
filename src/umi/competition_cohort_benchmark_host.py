@@ -11,13 +11,14 @@ import logging
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_execution_journal import CohortExecutionConfig, CohortExecutionJournal
 from .competition_cohort_executor import CohortExecutionWorker, CohortExecutor
 from .competition_cohort_history_http import CohortHistoryHTTPClient, CohortHistoryReader
 from .competition_cohort_legacy_model_cache import LegacyCohortModelCache
 from .competition_cohort_model_acceptance import ModelAcceptanceIntent, ModelReviewRequest
+from .competition_cohort_model_execution_source import CertifiedModelExecutionSources
 from .competition_cohort_order_http import order_routes
 from .competition_cohort_order_inbox import CohortOrderInbox, CohortOrderInboxConfig
 from .competition_cohort_order_signer import (
@@ -25,12 +26,16 @@ from .competition_cohort_order_signer import (
     CohortOrderSigner,
     CohortOrderSignerConfig,
 )
+from .competition_cohort_reference_cache import CohortReferenceModelCache
 from .competition_cohort_request_export_worker import RequestExportWorker
 from .competition_cohort_request_files import RequestCompletionFiles
 from .competition_cohort_sandbox import CohortCpuSandbox, DirectCohortCpuSandbox
+from .competition_cohort_settlement_progress import SettlementProgressRelay
 from .competition_reward_boot import _disjoint
 from .competition_round_journal import RoundJournal
 from .concurrency import await_owned_task
+from .host_memory_runtime import HostMemoryAdmissionSelection
+from .host_model_execution import ModelExecutionAdmission
 from .open_competition import digest, identity
 from .private_files import Directory
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -42,7 +47,7 @@ class BenchmarkWorkerFailure(RuntimeError):
     """Report which owned worker stopped without exposing private exception text."""
 
     def __init__(self, worker: str):
-        if worker not in {"execution", "exports", "endpoints"}:
+        if worker not in {"execution", "exports", "endpoints", "settlement_progress"}:
             raise ValueError("benchmark worker name is invalid")
         self.reason_code = f"benchmark_{worker}_worker_stopped"
         super().__init__(self.reason_code)
@@ -62,6 +67,14 @@ class BenchmarkHostConfig(StrictProtocolModel):
     concurrency: Annotated[int, Field(ge=1, le=32)] = 4
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     maximum_state_bytes: Annotated[int, Field(ge=1024**2, le=16 * 1024**3)] = 1024**3
+    model_execution_admission: HostMemoryAdmissionSelection | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_config(self, handler):
+        value = handler(self)
+        if self.model_execution_admission is None:
+            value.pop("model_execution_admission", None)
+        return value
 
     def stores(self):
         return tuple(
@@ -104,6 +117,7 @@ class BenchmarkHost:
         model_reviewer=None,
         direct_artifacts=None,
         legacy_readers=None,
+        promotion_store=None,
     ):
         self.config = c = BenchmarkHostConfig.model_validate_json(
             canonical_json_bytes(config.benchmark)
@@ -131,6 +145,10 @@ class BenchmarkHost:
             videos=Path(c.videos_directory),
             workspace=Path(c.workspace_directory),
         )
+        if c.model_execution_admission is not None:
+            sandbox["execution_admission"] = ModelExecutionAdmission(
+                c.model_execution_admission, config.policy
+            )
         if direct_artifacts is not None and model_reviewer is None:
             raise ValueError("direct benchmark artifact review requires the review journal")
         if legacy_readers is not None and direct_artifacts is None:
@@ -139,11 +157,11 @@ class BenchmarkHost:
             self.sandbox = CohortCpuSandbox(**sandbox)
         else:
 
-            def request(job):
+            async def request(job):
                 slot = job.round.cohort_sha256 + ":" + digest(job.submission.submission)
                 raw = model_reviewer.journal.get("model_request", slot)
                 if raw is None:
-                    raise OSError("direct model review request is unavailable")
+                    return await self.model_sources.request(job)
                 value = ModelReviewRequest.model_validate_json(canonical_json_bytes(raw))
                 if value.record.request.signed_submission != job.submission:
                     raise ValueError("direct model review request differs from execution")
@@ -160,14 +178,47 @@ class BenchmarkHost:
                         raise ValueError("legacy execution changes its private reviewed intent")
                 return value
 
+            def reference(job, bundle):
+                if promotion_store is None:
+                    return None
+                if digest(
+                    bundle
+                ) != job.round.incumbent_model_sha256 or job.round.policy_sha256 != digest(
+                    self.policy
+                ):
+                    raise ValueError("certified reference differs from its frozen execution")
+                return promotion_store.certified_cohort_baseline_reference(
+                    job.round.cohort_sha256,
+                    job.round.sequence,
+                    digest(bundle),
+                    maximum_bytes=config.maximum_promotion_bytes,
+                )
+
+            def reference_authorized(job, bundle):
+                return reference(job, bundle) is not None
+
             self.sandbox = DirectCohortCpuSandbox(
                 **sandbox,
+                **(
+                    {"concurrency": c.concurrency}
+                    if c.model_execution_admission is not None
+                    else {}
+                ),
                 artifacts=direct_artifacts,
                 request=request,
                 legacy_artifacts=(
-                    None
-                    if legacy_readers is None
-                    else LegacyCohortModelCache(direct_artifacts, legacy_readers)
+                    CohortReferenceModelCache(
+                        direct_artifacts,
+                        legacy=None
+                        if legacy_readers is None
+                        else LegacyCohortModelCache(
+                            direct_artifacts,
+                            legacy_readers,
+                            reference_authorized=reference_authorized,
+                        ),
+                        journal=model_reviewer.journal,
+                        reference=reference,
+                    )
                 ),
             )
         self.worker = CohortExecutionWorker(
@@ -192,6 +243,15 @@ class BenchmarkHost:
         self.files = RequestCompletionFiles(
             Path(c.request_export_directory), maximum_bytes=config.request_replay_bytes
         )
+        self.model_sources = CertifiedModelExecutionSources(
+            client,
+            config.owner_origin,
+            token=owner_token,
+            policy=config.policy,
+            cohorts=self.execution.cohorts,
+            journal=self.journal,
+            timeout_seconds=timeout,
+        )
         self.exporter = RequestExportWorker(
             (self.execution,), provider, sign, self.files, self.journal, batch_size=c.batch_size
         )
@@ -200,7 +260,17 @@ class BenchmarkHost:
         )
         self.tasks, self.last_reports = {}, {}
         self.stop = None
-        self.workers = {"execution": self.worker, "exports": self.exporter}
+        self.settlement_progress = SettlementProgressRelay(
+            self.execution.journal.root,
+            series=digest(config.series),
+            evaluator=identity(c.execution.signer),
+            cohorts=tuple(self.execution.cohorts),
+        )
+        self.workers = {
+            "execution": self.worker,
+            "exports": self.exporter,
+            "settlement_progress": self.settlement_progress,
+        }
 
     def report(self, name, result):
         previous = self.last_reports.get(name)

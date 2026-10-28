@@ -37,6 +37,7 @@ from .competition_transport_verification import TransferProgress
 from .open_competition import CompetitionPolicy, digest, identity
 from .private_files import MAX_CONFIGURED_PRIVATE_BYTES
 from .protocol import canonical_json_bytes
+from .r2_evidence import R2EvidenceHTTPError
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +47,12 @@ def _log_retry(error, *, phase, operation, hotkey=None, block=None):
     # Report only source coordinates inside this installed package, never locals.
     details = _failure_details(error)
     runtime_code = None
+    r2_http_status = None
     cause, seen = error, set()
     while cause is not None and id(cause) not in seen and len(seen) < 6:
         seen.add(id(cause))
+        if isinstance(cause, R2EvidenceHTTPError):
+            r2_http_status = cause.status_code
         if isinstance(cause, RewardRuntimeCodeMismatch):
             runtime_code = {
                 "expected_sha256": cause.expected_runtime_code_sha256,
@@ -76,6 +80,7 @@ def _log_retry(error, *, phase, operation, hotkey=None, block=None):
             "error_type": type(error).__name__,
             "reason_codes": [detail["reason_code"] for detail in details],
             "runtime_code": runtime_code,
+            "r2_http_status": r2_http_status,
             "origin": origin,
         },
     )
@@ -93,6 +98,7 @@ class CoverageProgress:
     errors: tuple[tuple[str, str], ...]
     certificate: RewardOpportunityCertificate | None
     immediate: bool = False
+    retained_page: bool = False
 
 
 class RewardCoverageCollector:
@@ -106,6 +112,7 @@ class RewardCoverageCollector:
         policy: CompetitionPolicy,
         activation: RewardActivation,
         first_block: int,
+        last_block: int | None = None,
         maximum_replay_intervals: int = 8,
         maximum_endpoints_per_validator: int = 4,
         maximum_backfill_endpoints_per_validator: int = 4,
@@ -134,12 +141,20 @@ class RewardCoverageCollector:
             manifest.opportunity.minimum_validator_ms,
         )
         self.first_block = first_block
+        self.last_block = None
         self.maximum_replay_intervals = maximum_replay_intervals
         self.maximum_endpoints = maximum_endpoints_per_validator
         self.maximum_backfill = maximum_backfill_endpoints_per_validator
         self.capture_window = capture_window_blocks
         self._cursor = None
         self._replayed: set[str] = set()
+        # This collector is the journal's sole live credit writer. Captures
+        # below add their freshly credited intervals to _replayed; a restarted
+        # collector scans retained evidence again before claiming any credit.
+        self._retained_inventory_drained = False
+        self._retained_scan_failed = False
+        self._retained_scan_started: float | None = None
+        self._retained_scanned = 0
         self._next: dict[str, int] = {}
         self._left: dict[str, CoverageEndpoint] = {}
         self._backfill_next: dict[str, int] = {}
@@ -151,7 +166,39 @@ class RewardCoverageCollector:
         self._gap_samples = 0
         self._gap_frontiers: dict[str, tuple[int, float]] = {}
         self._certificate = None
+        self._owner_counts = {}
+        self._credit_start = None
+        self._credit_observations = 0
         self._lock = asyncio.Lock()
+        if last_block is not None:
+            self.limit_through_block(last_block)
+
+    def limit_through_block(self, last_block: int) -> None:
+        """Stop an old activation at its native-reviewed successor boundary."""
+        _uint(last_block, 2**53 - 1)
+        if last_block < self.first_block - 1 or (
+            self.last_block is not None and last_block > self.last_block
+        ):
+            raise ValueError("coverage capture boundary changed its selected interval")
+        if self.last_block == last_block:
+            return
+        self.last_block = last_block
+        floor = max(self.first_block, last_block - self.capture_window + 1)
+        for hotkey, next_block in self._next.items():
+            if next_block > last_block:
+                self._next[hotkey] = floor
+                self._left.pop(hotkey, None)
+        if self._initial_head is not None:
+            self._initial_head = min(self._initial_head, last_block)
+        logger.info(
+            "coverage_capture_boundary %s",
+            {
+                "activation_sha256": self.activation,
+                "first_block": self.first_block,
+                "last_block": last_block,
+                "basis": "native_reviewed_successor_activation",
+            },
+        )
 
     async def _totals(self):
         return tuple(
@@ -178,6 +225,8 @@ class RewardCoverageCollector:
         # an assumption that every capture is eligible. Saved replay is finite
         # and must not be mixed into the fresh lane's sustained-rate forecast.
         previous = dict(before)
+        if phase == "retained_interval_replay":
+            self._credit_observations += 1
         logger.info(
             "coverage_credit_progress %s",
             {
@@ -190,7 +239,45 @@ class RewardCoverageCollector:
                 "eta_basis": "withdrawn_retrying" if retrying else "completed_credit_phase",
                 "eta_scope": "this_pass_and_phase_only_not_remaining_opportunity",
                 "certification_authority": False,
+                "opportunities": [
+                    dict(validator_hotkey=k, **self._credit_forecast(k, n, retrying=retrying))
+                    for k, n in after
+                ],
             },
+        )
+
+    def _credit_forecast(self, hotkey, credited, *, retrying=False, stalled=False):
+        elapsed = max(0.0, time.monotonic() - self._started)
+        remaining = max(0, self.minimum_ms - credited)
+        baseline = (self._credit_start or {}).get(hotkey, credited)
+        delta = max(0, credited - baseline)
+        rate = delta / elapsed if elapsed else 0
+        measured = (
+            not retrying
+            and not stalled
+            and self._credit_observations >= 2
+            and elapsed >= 60
+            and delta >= 12000
+            and rate > 0
+        )
+        return dict(
+            credited_ms=credited,
+            minimum_ms=self.minimum_ms,
+            remaining_credit_ms=remaining,
+            minimum_remaining_full_intervals=math.ceil(
+                remaining / self.journal.rule.maximum_interval_ms
+            ),
+            opportunity_eta_seconds=0 if not remaining else remaining / rate if measured else None,
+            opportunity_eta_scope="remaining_native_credit_restore_and_capture_excludes_activation",
+            opportunity_eta_basis="completed_opportunity"
+            if not remaining
+            else (
+                "measured_process_credit_rate_including_waits_assumes_remaining_mix"
+                if measured
+                else "withdrawn_retry_stall_or_insufficient_credit_samples"
+            ),
+            credit_rate_ms_per_second=rate if measured else None,
+            reward_opportunity_percent=100 * min(credited, self.minimum_ms) / self.minimum_ms,
         )
 
     async def step(self) -> CoverageProgress:
@@ -238,6 +325,16 @@ class RewardCoverageCollector:
                 except Exception as error:
                     # Preserve both lane cursors and their preceding endpoints
                     # until retention and adjacent credit are acknowledged.
+                    if operation == "credit_interval":
+                        # A lost acknowledgement can leave an interval durable
+                        # without this collector knowing its native credit. Reopen
+                        # the retained scan so a later pass can recover it even
+                        # if the live endpoint source remains unavailable.
+                        self._retained_inventory_drained = False
+                        self._retained_scan_failed = False
+                        self._retained_scan_started = None
+                        self._retained_scanned = 0
+                        self._cursor = None
                     errors.append((hotkey, type(error).__name__))
                     _log_retry(error, phase=phase, operation=operation, hotkey=hotkey, block=height)
                     progress.emit("retrying", reason=type(error).__name__)
@@ -307,6 +404,7 @@ class RewardCoverageCollector:
                     "backfill_enabled": bool(self.maximum_backfill),
                     "stalled": stalled,
                     "first_block": self.first_block,
+                    "capture_limit_block": self.last_block,
                     "next_block": next_block,
                     "target_block": target,
                     "completed_endpoints": completed,
@@ -322,11 +420,11 @@ class RewardCoverageCollector:
                     "rate_window_scope": (
                         "since_collector_creation_excludes_prior_owner_restoration"
                     ),
-                    "credited_ms": credited,
-                    "minimum_ms": self.minimum_ms,
-                    "reward_opportunity_percent": 100
-                    * min(credited, self.minimum_ms)
-                    / self.minimum_ms,
+                    **self._owner_counts,
+                    "replay_page_limit": self.maximum_replay_intervals,
+                    "replay_cursor": self._cursor,
+                    "replayed_intervals_this_collector": len(self._replayed),
+                    **self._credit_forecast(hotkey, credited, retrying=failed, stalled=stalled),
                     "backfill_native_endpoints": self._backfill_native.get(hotkey, 0),
                     "backfill_restored_endpoints": self._backfill_restored.get(hotkey, 0),
                     "sample_count": self._gap_samples,
@@ -340,15 +438,41 @@ class RewardCoverageCollector:
     async def _step(self):
         errors = []
         replayed = 0
+        restored_credits = 0
         if self._certificate is not None:
             return CoverageProgress(await self._totals(), (), self._certificate)
         before_replay = await self._totals()
+        if self._credit_start is None:
+            self._credit_start = dict(before_replay)
         phase_started = time.monotonic()
-        # Cycling, rather than a terminal retry count, revisits unavailable old
-        # evidence. New coverage collection still runs after each bounded page.
-        keys = await self.journal.interval_keys(
-            after=self._cursor, limit=self.maximum_replay_intervals
+        already_drained = self._retained_inventory_drained
+        if not already_drained and self._retained_scan_started is None:
+            self._retained_scan_started = phase_started
+        # Retry an incomplete first scan from the start. Once all retained
+        # intervals have been checked, new intervals from this owner are already
+        # natively credited by _capture_page and need no second inventory pass.
+        keys = (
+            ()
+            if already_drained
+            else await self.journal.interval_keys(
+                after=self._cursor, limit=self.maximum_replay_intervals
+            )
         )
+        self._owner_counts = await self.journal.diagnostic_counts()
+        if not already_drained:
+            logger.info(
+                "coverage_native_credit_restore %s",
+                dict(
+                    **self._owner_counts,
+                    status="running",
+                    replay_cursor=self._cursor,
+                    selected_intervals=len(keys),
+                    credited_ms=dict(before_replay),
+                    minimum_ms=self.minimum_ms,
+                    eta_seconds=None,
+                    eta_basis="counted_owner_inventory_not_yet_activation_scoped_credit",
+                ),
+            )
         for key in keys:
             self._cursor = key
             if key in self._replayed:
@@ -356,6 +480,18 @@ class RewardCoverageCollector:
             try:
                 interval = await self.journal.retained_interval(key)
                 if interval.activation_sha256 != self.activation:
+                    continue
+                restore_credit = getattr(self.source, "restore_credit", None)
+                restored_credit = None if restore_credit is None else await restore_credit(key)
+                if restored_credit is not None:
+                    from .competition_reward_coverage_credits import validate_native_credit
+
+                    native_interval, _ = validate_native_credit(restored_credit, self.journal)
+                    if native_interval != interval:
+                        raise ValueError("native credit differs from original interval")
+                    self._replayed.add(key)
+                    replayed += 1
+                    restored_credits += 1
                     continue
                 left, right = (
                     await self.source.replay(interval.left),
@@ -368,18 +504,113 @@ class RewardCoverageCollector:
                 replayed += 1
             except Exception as error:
                 errors.append(("replay", type(error).__name__))
+                self._retained_scan_failed = True
                 _log_retry(error, phase="replay", operation="restore_and_credit_interval")
-        if len(keys) < self.maximum_replay_intervals:
-            self._cursor = None
+        if not already_drained:
+            self._retained_scanned += len(keys)
+        scan_failed = self._retained_scan_failed
         totals = await self._totals()
-        self._report_credit(
-            "retained_interval_replay", before_replay, totals, phase_started, retrying=bool(errors)
-        )
+        if not already_drained and len(keys) < self.maximum_replay_intervals:
+            self._cursor = None
+            if not self._retained_scan_failed:
+                self._retained_inventory_drained = True
+                logger.info(
+                    "coverage_native_credit_restore %s",
+                    dict(
+                        **self._owner_counts,
+                        status="completed",
+                        selected_intervals=len(keys),
+                        credited_ms=dict(totals),
+                        minimum_ms=self.minimum_ms,
+                        eta_seconds=0,
+                        eta_basis="completed_retained_inventory_scope_not_activation",
+                    ),
+                )
+            else:
+                # A failed item on an earlier full page must be revisited even
+                # if the final page in this pass had no errors. Successful
+                # native credits in _replayed remain reusable.
+                self._retained_scan_failed = False
+        if not already_drained:
+            total = self._owner_counts["retained_intervals"]
+            scanned = min(self._retained_scanned, total)
+            remaining = max(0, total - scanned)
+            elapsed = max(0.0, time.monotonic() - self._retained_scan_started)
+            enough = scanned >= 8 and elapsed >= 1
+            measured_eta = (
+                remaining * elapsed / scanned
+                if enough and not scan_failed and not self._retained_inventory_drained
+                else None
+            )
+            planning_eta = (
+                [remaining, 600 * remaining]
+                if remaining and not enough and not scan_failed
+                else None
+            )
+            logger.info(
+                "coverage_retained_inventory_progress %s",
+                {
+                    "state": "completed"
+                    if self._retained_inventory_drained
+                    else "retrying"
+                    if scan_failed
+                    else "running",
+                    "completed_intervals": scanned,
+                    "total_intervals": total,
+                    "percent": 100 * scanned / total if total else 100.0,
+                    "elapsed_seconds": elapsed,
+                    "eta_seconds": 0 if self._retained_inventory_drained else measured_eta,
+                    "planning_eta_seconds": planning_eta,
+                    "eta_basis": "completed_retained_inventory_scope"
+                    if self._retained_inventory_drained
+                    else "withdrawn_retrying"
+                    if scan_failed
+                    else "measured_current_scan_intervals_per_elapsed_second"
+                    if enough
+                    else "planning_1_to_600_seconds_per_interval_excludes_external_waits",
+                    "eta_scope": (
+                        "retained_inventory_current_attempt_not_native_credit_or_activation"
+                    ),
+                    "stalled_or_retrying": scan_failed,
+                },
+            )
+            if scan_failed and self._cursor is None:
+                self._retained_scan_started = None
+                self._retained_scanned = 0
+        if not already_drained:
+            self._report_credit(
+                "retained_interval_replay",
+                before_replay,
+                totals,
+                phase_started,
+                retrying=scan_failed,
+            )
         if await self._complete(totals) is not None:
             return CoverageProgress(totals, tuple(errors), self._certificate)
+        if len(keys) == self.maximum_replay_intervals and not errors:
+            # Both first-adoption native endpoint replay and durable credit
+            # restoration finish a bounded retained page before moving-head
+            # work. The outer owner yields between pages and minimum completion
+            # above stops the drain without requiring the full historical gap.
+            self._owner_counts = await self.journal.diagnostic_counts()
+            logger.info(
+                "coverage_native_credit_restore %s",
+                dict(
+                    **self._owner_counts,
+                    restored_intervals=restored_credits,
+                    replayed_intervals=replayed,
+                    replay_cursor=self._cursor,
+                    credited_ms=dict(totals),
+                    minimum_ms=self.minimum_ms,
+                    eta_seconds=None,
+                    eta_basis="bounded_native_credit_page_remaining_count_not_activation",
+                ),
+            )
+            return CoverageProgress(totals, (), None, True, retained_page=True)
         try:
-            head = await self.source.finalized_height()
-            _uint(head, 2**53 - 1)
+            chain_head = await self.source.finalized_height()
+            _uint(chain_head, 2**53 - 1)
+            head = min(chain_head, self.last_block) if self.last_block is not None else chain_head
         except Exception as error:
             _log_retry(error, phase="head", operation="finalized_height")
             return CoverageProgress(totals, tuple([*errors, ("head", type(error).__name__)]), None)
@@ -436,6 +667,7 @@ class RewardCoverageCollector:
             retrying=len(errors) > prior_errors,
         )
         await self._complete(totals)
+        self._owner_counts = await self.journal.diagnostic_counts()
         self._report_backfill(floor, head, totals, errors)
         pending_gap = self.maximum_backfill and any(
             total < self.minimum_ms and self._backfill_next.get(k, self.first_block) <= floor

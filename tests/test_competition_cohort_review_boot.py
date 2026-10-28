@@ -229,6 +229,7 @@ def test_benchmark_host_binds_orders_execution_and_private_stores(selected, faul
 
 async def test_benchmark_boot_routes_exclusive_execution_and_restart(selected, providers):
     c = with_benchmark(selected.config)
+    epochs = []
     for _ in range(2):
         async with boot.phase_review_app(c) as app:
             assert app.state.benchmark is not None
@@ -237,11 +238,19 @@ async def test_benchmark_boot_routes_exclusive_execution_and_restart(selected, p
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="https://review.example"
             ) as client:
+                path = "/internal/cohorts/execution-producer"
+                assert (await client.get(path)).status_code == 401
+                headers = {"authorization": "Bearer " + "vote-token" * 4}
+                first = await client.get(path, headers=headers)
+                assert first.status_code == 200 and first.json()["execution_enabled"]
+                epochs.append(first.json()["epoch_sha256"])
+                assert (await client.get(path, headers=headers)).content == first.content
                 for path in ("votes/lookup", "votes/attest", "inbox/lookup", "inbox/accept"):
                     assert (
                         await client.post("/internal/cohorts/orders/" + path, json={})
                     ).status_code == 401
     assert providers.events.count("started") == providers.events.count("closed") == 2
+    assert len(set(epochs)) == 2
     os.close(lock_private_file(Path(c.benchmark.directory) / "service.lock"))
 
 
@@ -571,7 +580,7 @@ async def test_restart_retains_host_selection_and_allows_capacity_change(selecte
 
 
 @pytest.mark.parametrize("selected_profile", [False, True])
-@pytest.mark.parametrize("adoption", ["request_tail", "model_delivery"])
+@pytest.mark.parametrize("adoption", ["request_tail", "model_delivery", "evaluation_suite"])
 async def test_boot_selects_adoption_route_and_readers_from_same_profile(
     selected, providers, monkeypatch, selected_profile, adoption
 ):
@@ -596,6 +605,8 @@ async def test_boot_selects_adoption_route_and_readers_from_same_profile(
             signer.reviewer.adoption
             if adoption == "request_tail"
             else signer.reviewer.model_delivery_adoption
+            if adoption == "model_delivery"
+            else signer.reviewer.evaluation_suite_adoption
         )
         assert reviewer.budget == c.phase_review_budget
         assert reviewer.history.timeout == (
@@ -1283,3 +1294,51 @@ async def test_r2_phase_review_boot_selects_only_import_on_restart(
         PhaseReviewServiceConfig.model_validate_json(
             canonical_json_bytes(selected.config.model_copy(update={"proof_stores": stores}))
         )
+
+
+def test_optional_suite_review_config_binds_independent_owner_budget_and_private_stores(selected):
+    from umi.competition_cohort_suite_adoption_candidate import (
+        EvaluationSuiteAdoptionCandidateConfig,
+    )
+
+    from .test_competition_cohort_review_budget import profile, select
+
+    c = selected.config
+    original = canonical_json_bytes(c)
+    assert b"evaluation_suite_adoption_candidates" not in original
+    root = Path(c.signing.directory).parent / "private-suite"
+    candidate = EvaluationSuiteAdoptionCandidateConfig(
+        schema="umi-evaluation-suite-adoption-candidate/1",
+        cohort_sha256=digest(c.series.cohorts[0]),
+        verification_owner_hotkey=c.signing.signer,
+        **{
+            name: str(root / name)
+            for name in (
+                "suite_file",
+                "selection_manifest_file",
+                "inventory_file",
+                "exclusions_file",
+                "selection_key_file",
+                "reference_qa_directory",
+                "videos_directory",
+                "verification_directory",
+                "ffmpeg_binary",
+                "ffprobe_binary",
+            )
+        },
+        ffmpeg_sha256="a1" * 32,
+        ffprobe_sha256="a2" * 32,
+    )
+    value = c.model_copy(update={"evaluation_suite_adoption_candidates": (candidate,)})
+    with pytest.raises(ValueError, match="full phase review budget"):
+        PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(value))
+    config = select(value, profile(c.policy))
+    assert set(candidate.stores()) <= set(config.stores())
+    changed = candidate.model_copy(update={"verification_owner_hotkey": c.owner_hotkey})
+    with pytest.raises(ValueError, match="independent reviewer"):
+        PhaseReviewServiceConfig.model_validate_json(
+            canonical_json_bytes(
+                config.model_copy(update={"evaluation_suite_adoption_candidates": (changed,)})
+            )
+        )
+    assert canonical_json_bytes(c) == original

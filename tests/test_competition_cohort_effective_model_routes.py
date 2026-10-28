@@ -194,6 +194,9 @@ async def test_discovery_holds_during_adoption_then_advertises_effective_route(d
         assert response.status_code == 200
         entry = response.json()["cohorts"][0]
         assert entry["cohort_sha256"] == digest(plan)
+        assert entry["effective_eligible_tracks"] == ["endpoint", "model"]
+        assert entry["effective_service_pool_bps"] == h.intake.policy.endpoint_reward_bps
+        assert entry["profile_source"] == "signed_model_delivery_adoption"
         assert "direct_model_upload_url" in entry
         assert "model_upload_url" not in entry
 

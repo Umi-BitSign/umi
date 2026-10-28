@@ -81,14 +81,16 @@ class CohortRequestSettlementPublisher:
         self.intake = CohortIntakePublisher(source.intake, capture, decisions)
         retained = source.journal.root / "request-publication"
         self.objects = PublicationObjects(source.objects, self.files, retained / "objects")
-        self.verification_reuse = VerificationReuse(
-            retained / "verification",
-            owner={
-                "kind": "request_publication",
-                "journal": self.objects.binding,
-                "cohort": source.cohort,
-                "sources": sources,
-            },
+        self.verification_reuse = source.select_verification(
+            lambda: VerificationReuse(
+                retained / "verification",
+                owner={
+                    "kind": "request_publication",
+                    "journal": self.objects.binding,
+                    "cohort": source.cohort,
+                    "sources": sources,
+                },
+            )
         )
         source.journal.put(
             "request_delivery_binding",

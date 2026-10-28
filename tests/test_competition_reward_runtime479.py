@@ -72,7 +72,13 @@ def test_reviewed_runtime_pair_is_qualified_without_authorizing_other_code():
         )
 
 
-@pytest.fixture(params=[YUMA_REVISION, "6a972693ae9580541225bd37696ac2fee26b8ae9"])
+@pytest.fixture(
+    params=[
+        YUMA_REVISION,
+        "6a972693ae9580541225bd37696ac2fee26b8ae9",
+        "b335b5ef339ceb4366e5452d24c22978821c595f",
+    ]
+)
 def yuma_source(request):
     return request.param
 

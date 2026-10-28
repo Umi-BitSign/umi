@@ -113,6 +113,172 @@ async def publish_all(h):
         assert report["assignments_exported"] == len(worker.executions), report
 
 
+@pytest.mark.parametrize("restart", [False, True])
+async def test_order_reads_reuse_exact_native_result_without_original_payload_reads(
+    exporting, monkeypatch, restart
+):
+    from umi import competition_cohort_request_order_reuse as reuse
+
+    h = exporting
+    await publish_all(h)
+    expected = tuple(h.files.orders(h.b["roster"]))
+    assert expected
+    if restart:
+        h.files = RequestCompletionFiles(h.files.root)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unchanged successful order was read or rehashed again")
+
+    monkeypatch.setattr(reuse, "read_endpoint_object", forbidden)
+    assert tuple(h.files.orders(h.b["roster"])) == expected
+    # Public callers cannot poison another observation's private typed result.
+    returned = next(h.files.orders(h.b["roster"]))
+    returned.order.submission.submission.__dict__["hotkey"] = "caller-mutation"
+    assert tuple(h.files.orders(h.b["roster"])) == expected
+    # An undersized typed working set restores durable results; it never
+    # converts eviction into another original-byte verification.
+    from umi.competition_assignment_reuse import AssignmentVerificationReuse
+
+    h.files._order_reads.cache = AssignmentVerificationReuse(1, 1, purpose="request_order")
+    assert tuple(h.files.orders(h.b["roster"])) == expected
+    assert h.files._order_reads.cache._counts["oversized"] == len(expected)
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+async def test_order_restart_repairs_only_the_damaged_result_with_counted_progress(
+    exporting, monkeypatch, caplog, damage
+):
+    from umi import competition_cohort_request_order_reuse as reuse
+
+    h = exporting
+    await publish_all(h)
+    expected = tuple(h.files.orders(h.b["roster"]))
+    directory = h.files._order_reads._store(digest(h.b["roster"].round)).directory
+    receipt = next(directory.glob("*.json"))
+    if damage == "missing":
+        receipt.unlink()
+    else:
+        receipt.write_bytes(b"{}")
+    native = reuse.read_endpoint_object
+    reads = []
+
+    def read(source, key):
+        reads.append(key)
+        return native(source, key)
+
+    monkeypatch.setattr(reuse, "read_endpoint_object", read)
+    caplog.set_level("INFO", logger="umi.competition.progress")
+    restored = RequestCompletionFiles(h.files.root)
+    assert tuple(restored.orders(h.b["roster"])) == expected
+    assert len(reads) == 1
+    assert "repair_required" in caplog.text
+    assert '"stage":"request_order_read"' in caplog.text
+    assert '"eta_seconds":0' in caplog.text
+
+
+async def test_changed_original_order_is_not_hidden_by_a_warm_result(exporting):
+    h = exporting
+    await publish_all(h)
+    order = next(h.files.orders(h.b["roster"]))
+    h.files.objects._path(digest(order)).write_bytes(b"{}")
+    with pytest.raises(ValueError):
+        tuple(h.files.orders(h.b["roster"]))
+
+
+async def test_order_reference_cannot_select_another_participant_from_the_same_round(exporting):
+    h = exporting
+    await publish_all(h)
+    orders = tuple(h.files.orders(h.b["roster"]))
+    assert len(orders) >= 2
+    first, other = orders[:2]
+    path = h.files._order_path(digest(first.order.round), digest(first.order.submission.submission))
+    path.write_bytes(canonical_json_bytes({"sha256": digest(other)}))
+    with pytest.raises(ValueError, match="selected participant"):
+        tuple(h.files.orders(h.b["roster"]))
+
+
+async def test_unqualified_file_clock_never_creates_an_order_reuse_result(exporting, monkeypatch):
+    from umi import competition_cohort_request_order_reuse as reuse
+
+    h = exporting
+    await publish_all(h)
+    monkeypatch.setattr(reuse, "verification_tick", lambda *_: False)
+    native = reuse.read_endpoint_object
+    calls = []
+
+    def read(source, key):
+        calls.append(key)
+        return native(source, key)
+
+    monkeypatch.setattr(reuse, "read_endpoint_object", read)
+    expected = tuple(h.files.orders(h.b["roster"]))
+    assert tuple(h.files.orders(h.b["roster"])) == expected
+    assert len(calls) == 2 * len(expected)
+    assert not list(
+        h.files._order_reads._store(digest(h.b["roster"].round)).directory.glob("*.json")
+    )
+
+
+@pytest.mark.parametrize("restart", [False, True])
+async def test_reused_order_accounts_for_original_shapes_and_aggregate_bytes(
+    exporting, monkeypatch, restart
+):
+    from umi import host_memory_request_bounds as bounds
+    from umi.host_memory_requests import RequestStageBounds
+
+    h = exporting
+    await publish_all(h)
+    selected = RequestStageBounds(
+        maximum_records=1024,
+        maximum_objects=1024,
+        maximum_services=1024,
+        maximum_orders=1024,
+        maximum_inventory_entries=1024,
+        maximum_participants=1024,
+        maximum_catalogs=64,
+        maximum_input_bytes=16 * 1024**2,
+        maximum_object_bytes=16 * 1024**2,
+        maximum_declaration_bytes=32 * 1024**2,
+        maximum_json_values=1_000_000,
+        maximum_json_depth=128,
+    )
+    monkeypatch.setattr(bounds, "stage_bounds", lambda: selected)
+
+    @bounds.bounded_stage_declarations
+    def observe():
+        orders = tuple(h.files.orders(h.b["roster"]))
+        values = bounds._evidence_values.get()
+        return orders, bounds._declarations.get()[0], values["remaining"], dict(values["seen"])
+
+    expected = observe()
+    if restart:
+        h.files = RequestCompletionFiles(h.files.root)
+    assert observe() == expected
+    # An operation-local object limit is not a static profile change.
+    with bounds.stage_object_budget(1), pytest.raises(ValueError, match="byte bound"):
+        observe()
+
+
+async def test_native_endpoint_exports_do_not_inflate_model_execution_progress(
+    exporting, monkeypatch
+):
+    from umi import competition_cohort_execution_progress as progress
+
+    h = exporting
+    await publish_all(h)
+    meter = progress.ExecutionExportProgress(h.files.root, h.b["roster"])
+    report = meter.sample()
+    assert report["total"] == report["completed"] == 0, report
+    assert report["exported_executions"] == 0 and report["percent"] is None
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("restart must reuse saved metadata facts")
+
+    monkeypatch.setattr(progress, "_read_private_bytes", forbidden)
+    restarted = progress.ExecutionExportProgress(h.files.root, h.b["roster"]).sample()
+    assert restarted["exported_executions"] == report["exported_executions"]
+
+
 async def test_exports_use_owned_finality_without_fresh_membership(exporting, monkeypatch):
     h = exporting
     current = AsyncMock(return_value=h.block)
@@ -1064,9 +1230,14 @@ async def test_partial_restart_reuses_verification_until_an_original_changes(
     monkeypatch.setattr(module, "review_partial_request", observed)
     assert await worker._export(owner, slot, h.block) is False
     assert calls == []
-    h.files.objects._path(manifest.steps[0].sha256).unlink()
+    missing = h.files.objects._path(manifest.steps[0].sha256)
+    original_bytes = missing.read_bytes()
+    missing.unlink()
     assert await worker._export(owner, slot, h.block) is False
-    assert calls == [key]
+    # The original native source and verdict did not change. Repairing its
+    # delivered copy must not repeat the completed semantic/proof review.
+    assert calls == []
+    assert missing.read_bytes() == original_bytes
     assert review_partial(h, worker.files, key, assignment) == assignment
 
 

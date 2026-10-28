@@ -63,7 +63,7 @@ async def test_growth_rejects_unrelated_changes_without_writes(chain, change):
     if change == "directory":
         update["state_directory"] = chain.config.state_directory + "-other"
     if change == "too_large":
-        update["maximum_cache_bytes"] = 21 * 1024**3
+        update["maximum_cache_bytes"] = 2**53
     with pytest.raises(ValueError):
         grow_registration_cache(path, chain.config, chain.config.model_copy(update=update))
     assert snapshot(path) == before

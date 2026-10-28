@@ -2,20 +2,37 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
+import time
 import xml.etree.ElementTree as ET
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime
+from functools import wraps
 
 import httpx
 
 from .competition_cohort_direct_model_upload import DirectModelUploadPart
 from .r2_connection_pool import R2ConnectionPool
 from .r2_limits import R2_MAXIMUM_PART_BYTES, R2_MAXIMUM_PARTS, R2_MINIMUM_PART_BYTES
+from .r2_metadata_batch import MAX_HEAD_KEYS, R2MetadataBatch
 from .r2_sigv4 import R2SigV4
 
 _MAXIMUM_RESPONSE_BYTES = 64 * 1024
 MAXIMUM_RANGE_BYTES = 64 * 1024**2
+_LOG = logging.getLogger("umi.competition.progress")
+
+
+class _R2HTTPFailure(OSError):
+    def __init__(self, status, retry_after):
+        super().__init__(f"R2 multipart request failed with HTTP {status}")
+        self.http_status = status
+        try:
+            self.retry_after = min(30, max(0, float(retry_after)))
+        except (TypeError, ValueError):
+            self.retry_after = 0
 
 
 def _element(root: ET.Element, name: str) -> str:
@@ -45,6 +62,17 @@ def r2_connection_scope(client: object) -> AbstractAsyncContextManager[None]:
     return client.connection_scope() if isinstance(client, R2MultipartClient) else nullcontext()
 
 
+def pooled_r2_reads(operation):
+    """Retain the existing native pool through one complete owned reader call."""
+
+    @wraps(operation)
+    async def run(reader, *args, **kwargs):
+        async with r2_connection_scope(reader.multipart):
+            return await operation(reader, *args, **kwargs)
+
+    return run
+
+
 class R2MultipartClient:
     def __init__(
         self,
@@ -59,12 +87,79 @@ class R2MultipartClient:
         self.transport = transport
         self.timeout = httpx.Timeout(timeout_seconds, connect=min(timeout_seconds, 15))
         self._connections = R2ConnectionPool(transport=transport, timeout=self.timeout)
+        self._metadata_batch = (
+            R2MetadataBatch(signer, self._connections)
+            if signer.credentials.metadata_batch_origin is not None
+            else None
+        )
+
+    @property
+    def head_batch_limit(self) -> int:
+        return MAX_HEAD_KEYS if self._metadata_batch is not None else 0
+
+    async def head_batch(self, keys: tuple[str, ...]):
+        if self._metadata_batch is None:
+            raise ValueError("R2 metadata batch is not configured")
+        return await self._metadata_batch.heads(keys)
 
     def connection_scope(self) -> AbstractAsyncContextManager[None]:
         """Reuse connections until all overlapping scopes and requests drain."""
         return self._connections.scope()
 
-    async def _exchange(
+    async def _exchange(self, method: str, key: str, **options) -> httpx.Response:
+        started = time.monotonic()
+        for attempt in range(1, 4):
+            try:
+                return await self._exchange_once(method, key, **options)
+            except OSError as error:
+                status = error.http_status if isinstance(error, _R2HTTPFailure) else None
+                transport = isinstance(
+                    error.__cause__,
+                    (httpx.NetworkError, httpx.TimeoutException, httpx.RemoteProtocolError),
+                )
+                if status is None and not transport:
+                    raise
+                retry = (
+                    method in {"HEAD", "GET"}
+                    and (transport or status in {429, 500, 502, 503, 504})
+                    and attempt < 3
+                )
+                retry_after = error.retry_after if isinstance(error, _R2HTTPFailure) else 0
+                delay = max(0.25 * 2 ** (attempt - 1), retry_after) if retry else None
+                _LOG.warning(
+                    "r2_request_status %s",
+                    json.dumps(
+                        dict(
+                            stage="r2_request",
+                            method=method,
+                            http_status=status,
+                            transport_error_type=type(error.__cause__).__name__
+                            if transport
+                            else None,
+                            attempt=attempt,
+                            maximum_attempts=3 if method in {"HEAD", "GET"} else 1,
+                            completed=0,
+                            total=1,
+                            elapsed_seconds=time.monotonic() - started,
+                            eta_seconds=None,
+                            eta_basis="bounded_read_retry"
+                            if retry
+                            else "transport_unavailable"
+                            if transport
+                            else "provider_refusal",
+                            stalled_or_retrying=retry,
+                            retry_seconds=delay,
+                            certification_authority=False,
+                        ),
+                        separators=(",", ":"),
+                    ),
+                )
+                if not retry:
+                    raise
+                await asyncio.sleep(delay)
+        raise AssertionError("bounded R2 retry exhausted without result")
+
+    async def _exchange_once(
         self,
         method: str,
         key: str,
@@ -114,14 +209,26 @@ class R2MultipartClient:
                 ) as streamed,
             ):
                 if streamed.status_code not in expected_status:
-                    raise OSError(f"R2 multipart request failed with HTTP {streamed.status_code}")
+                    raise _R2HTTPFailure(streamed.status_code, streamed.headers.get("retry-after"))
                 if streamed.headers.get("content-encoding") not in {None, "identity"}:
                     raise ValueError("R2 multipart response used content encoding")
                 content = bytearray()
-                async for chunk in streamed.aiter_bytes():
-                    if len(content) + len(chunk) > maximum_response_bytes:
-                        raise ValueError("R2 multipart response is too large")
-                    content.extend(chunk)
+                # Lazy import keeps the transport's existing dependency graph.
+                # Only exact range responses have a known complete byte count;
+                # small metadata responses retain their original handling.
+                from .competition_transport_verification import response_read_progress
+
+                with (
+                    response_read_progress(maximum_response_bytes)
+                    if method == "GET" and streamed.status_code == 206
+                    else nullcontext(None)
+                ) as progress:
+                    async for chunk in streamed.aiter_bytes():
+                        if len(content) + len(chunk) > maximum_response_bytes:
+                            raise ValueError("R2 multipart response is too large")
+                        content.extend(chunk)
+                        if progress is not None:
+                            progress.advance(len(chunk))
                 response = httpx.Response(
                     streamed.status_code,
                     headers=streamed.headers,

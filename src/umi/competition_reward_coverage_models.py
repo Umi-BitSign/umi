@@ -273,7 +273,60 @@ def _clear_hold(verifier, item):
         os.close(directory)
 
 
-def check_coverage_model_metadata(value: CoverageModelDependencies):
+def model_metadata_seal(value: CoverageModelDependencies):
+    """Identity-check native small receipts and completed snapshot metadata only."""
+    if value.mode not in {"direct", "remote"}:
+        return []
+    from .competition_cohort_legacy_model_settlement import legacy_seal_path, legacy_snapshot_path
+    from .file_identity import file_fingerprint
+
+    context = value.context
+    paths = [
+        context.receipts,
+        context.receipts / "coverage-qualification-owner.json",
+        context.receipts / "coverage-qualification-ledger/rounds.sqlite3",
+    ]
+    for item in value.items:
+        paths.extend(
+            (
+                _receipt_path(context, item),
+                _hold_path(context, item),
+                _qualification_path(context, context, item),
+            )
+        )
+        if isinstance(item, LegacyCoverageModelDependency):
+            paths.extend(
+                (
+                    legacy_seal_path(context.receipts, item.receipt),
+                    legacy_snapshot_path(context.receipts, item.receipt),
+                )
+            )
+    result = []
+    for path in paths:
+        private_path(str(path))
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            result.append([str(path), None])
+            continue
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise CoverageModelDependencyRepairRequired(
+                "coverage dependency metadata owner changed"
+            )
+        result.append([str(path), list(map(str, file_fingerprint(info)))])
+        if path.suffix == ".sqlite3":
+            for suffix in ("-wal", "-journal"):
+                side = Path(str(path) + suffix)
+                result.append(
+                    [
+                        str(side),
+                        list(map(str, file_fingerprint(side.lstat()))) if side.exists() else None,
+                    ]
+                )
+    return result
+
+
+def check_coverage_model_metadata(value: CoverageModelDependencies, *, checked_cache=None):
     """Keep issued compact endpoints subject to known damage in every consumer.
 
     This never probes R2: its selected restore owner performs the generation
@@ -281,6 +334,10 @@ def check_coverage_model_metadata(value: CoverageModelDependencies):
     dependencies when a caller later credits an already issued endpoint.
     """
     if value.mode not in {"direct", "remote"}:
+        return
+    before = model_metadata_seal(value) if checked_cache is not None else None
+    cache_key = digest(value) if checked_cache is not None else None
+    if checked_cache is not None and checked_cache.get(cache_key) == before:
         return
     owner = value.context
     try:
@@ -326,6 +383,11 @@ def check_coverage_model_metadata(value: CoverageModelDependencies):
             raise CoverageModelDependencyRepairRequired(
                 "coverage model metadata requires explicit scoped repair"
             ) from error
+
+    if checked_cache is not None:
+        if model_metadata_seal(value) != before:
+            raise CoverageModelDependencyRepairRequired("coverage metadata changed during check")
+        checked_cache[cache_key] = before
 
 
 async def _check_item(verifier, item, *, context=None, repairing=False):
@@ -570,7 +632,18 @@ async def capture_coverage_model_dependencies(
     return value.model_dump(mode="json", by_alias=True)
 
 
-async def restore_coverage_model_dependencies(preparation, raw):
+def _historical_non_direct_delivery(preparation, cohort_sha256):
+    if cohort_sha256 is None:
+        return False
+    if cohort_sha256 not in preparation.cohort_sha256s:
+        raise CoverageModelDependencyRepairRequired(
+            "coverage cohort is outside the authenticated reward series"
+        )
+    delivery = preparation.model_deliveries.get(cohort_sha256)
+    return delivery is None or delivery.mechanism != "direct_r2_multipart_v1"
+
+
+async def restore_coverage_model_dependencies(preparation, raw, *, cohort_sha256=None):
     """Return False only for an explicit supported native migration/fallback."""
     verifier = preparation.model_artifacts
     if raw is None:
@@ -585,7 +658,12 @@ async def restore_coverage_model_dependencies(preparation, raw):
         return False
     value = CoverageModelDependencies.model_validate_json(canonical_json_bytes(raw))
     if value.mode == "not_selected":
-        if verifier is not None:
+        historical = _historical_non_direct_delivery(preparation, cohort_sha256)
+        if cohort_sha256 is not None and not historical:
+            raise CoverageModelDependencyRepairRequired(
+                "direct model cohort cannot reuse a non-selected dependency"
+            )
+        if verifier is not None and not historical:
             raise CoverageModelDependencyRepairRequired("coverage model verifier selection changed")
         return True
     context = await run_owned_thread(_context, verifier)
@@ -615,3 +693,40 @@ async def restore_coverage_model_dependencies(preparation, raw):
     if await run_owned_thread(_context, verifier) != context:
         raise CoverageModelDependencyRepairRequired("coverage model owner changed during restore")
     return True
+
+
+async def restore_completed_model_dependencies(
+    preparation, raw, checked_cache, *, cohort_sha256=None
+):
+    """Refresh identical completed endpoint dependencies once per selected owner."""
+    if raw is None:
+        return await restore_coverage_model_dependencies(
+            preparation, raw, cohort_sha256=cohort_sha256
+        )
+    value = CoverageModelDependencies.model_validate_json(canonical_json_bytes(raw))
+    historical = value.mode == "not_selected" and _historical_non_direct_delivery(
+        preparation, cohort_sha256
+    )
+    if checked_cache is None:
+        return await restore_coverage_model_dependencies(
+            preparation, raw, cohort_sha256=cohort_sha256
+        )
+    key = digest(value)
+    before = await run_owned_thread(model_metadata_seal, value)
+    verifier = preparation.model_artifacts
+    context = None if verifier is None or historical else await run_owned_thread(_context, verifier)
+    if context != value.context or (
+        context is not None and context.policy_sha256 != preparation.policy_sha256
+    ):
+        raise CoverageModelDependencyRepairRequired("coverage dependency verifier context changed")
+    if checked_cache.get(key) == before:
+        return True
+    result = await restore_coverage_model_dependencies(
+        preparation, raw, cohort_sha256=cohort_sha256
+    )
+    after = await run_owned_thread(model_metadata_seal, value)
+    if after != before:
+        raise CoverageModelDependencyRepairRequired("coverage dependencies changed during refresh")
+    if result:
+        checked_cache[key] = after
+    return result

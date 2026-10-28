@@ -3,6 +3,7 @@
 # Connect and expose a miner model
 
 - [Miner model integration](#miner-model-integration)
+- [Download a certified public model](#download-a-certified-public-model)
 - [Miner endpoint IPs and hostnames](#miner-endpoint-hostnames)
 
 <a id="miner-model-integration"></a>
@@ -14,6 +15,46 @@ For current deployment requirements, first read
 checks endpoint health without replaying pilot evidence; it does not run fresh
 translation challenges. The integration below is for a miner that serves actual
 translation requests under the corresponding release and policy.
+
+## Download a certified public model
+
+The public catalog lists admitted model submissions, including revisions with
+zero reward. For C6, read both pages to see all 103 listed models (the API allows
+at most 100 per page):
+
+```text
+https://api.umi.vision/v1/competition/cohorts/06b8074172f29bcbead0ae5e88e25ca94af2fe5c7bca71b6821df7c1139a83af/models?offset=0&limit=100
+https://api.umi.vision/v1/competition/cohorts/06b8074172f29bcbead0ae5e88e25ca94af2fe5c7bca71b6821df7c1139a83af/models?offset=100&limit=100
+```
+
+For later cohorts, substitute their full cohort digest and follow `next_offset`
+until it is null. Choose an item with `download_available: true` and copy its
+`model_sha256` (the model identity, not the UID or submission digest). Use a
+current UMI Python environment that can run the downloader; check it with
+`python -m umi.competition_cohort_public_download_cli --help`. From a source
+checkout with its dependencies installed, `PYTHONPATH=src python -m ...` also
+runs the same module.
+
+For example, the C6 UID 5 model has SHA-256
+`77d075ac84aaa51f241806bfed239b94885a8fa158d20267e2e69067d3c335aa`:
+
+```sh
+python -m umi.competition_cohort_public_download_cli \
+  --api https://api.umi.vision \
+  --cohort 06b8074172f29bcbead0ae5e88e25ca94af2fe5c7bca71b6821df7c1139a83af \
+  --model 77d075ac84aaa51f241806bfed239b94885a8fa158d20267e2e69067d3c335aa \
+  --output /absolute/path/to/new-output-directory
+```
+
+Allow space for the complete model. The command creates `manifest.json`,
+`model/` and a private `.umi-download/` journal in the output directory. Wait
+for a successful exit before using the files. To resume after interruption, run
+the **same command with the same output directory**; keep `.umi-download/`.
+The client renews expired download URLs and verifies the native files. C6's
+download metadata provides a concatenated payload and file ranges, not a
+ready-made tar archive. Use the downloader rather than treating the payload URL
+as a tarball. [API format and repair details](../reference/competition-results-api.md#download-with-restart-support)
+are in the reference guide.
 
 ### Model files for recoverable cohorts
 
@@ -27,9 +68,112 @@ its bundle manifest:
 "$HOME/.local/share/umi/model-client/umi-model-client" \
   --policy competition-policy.json submit-cohort-model \
   --request model-participation.json --source /absolute/path/to/model \
-  --origin https://REVIEWED_INTAKE_HOST \
+  --origin https://api.umi.vision \
   --wallet-name miner --hotkey-name hotkey --wallet-path /absolute/path/to/wallets
 ```
+
+C6 and later use public-model participation. For a retained mixed plan, a
+quorum-signed intake amendment can select only `model` and a zero service pool
+while preserving the original plan and clocks. Update the published model client
+before submitting to that amended history; an older client that rejects the
+history cannot safely continue. Resume the same signed model request after the
+update. New endpoint participation is refused for the amended cohort; retained
+endpoint receipts and journals remain recoverable evidence.
+
+Save the command's stdout as your initial receipt; keep the original
+`model-participation.json` request separately. C6 model bytes go directly to R2.
+A successful command can print `pending_attestation`: that is the immutable
+acknowledgement, not a continuously updated admission result.
+
+#### Check admission after upload
+
+Use the same installed client and original signed request:
+
+```sh
+"$HOME/.local/share/umi/model-client/umi-model-client" \
+  --policy competition-policy.json query-cohort-admission \
+  --request model-participation.json --origin https://api.umi.vision
+```
+
+This command queries and verifies the current admission certificate. It does not
+upload the model again or require a new signature. Read its returned `status`:
+
+- `admission_certified`: this exact participation has its admission certificate.
+- `pending_attestation`: independent admission attestation is still pending.
+
+The original upload receipt's `status` always remains `pending_attestation`, even
+when this query returns `admission_certified`. Do not wait for that saved receipt
+to change. Admission certification is separate from quality scoring, final cohort
+certification and active chain rewards.
+
+For the cohort's current stage, percentage and ETA, query
+`GET /v1/competition/cohorts/<cohort_sha256>/progress` at the published API origin.
+This reports stage progress, not your model's quality score. A null ETA includes
+its reason; certification and scoring are separate stages. Artifact review runs
+during intake, including for replacements, and completed work resumes after
+restart rather than waiting until intake closes.
+After a replacement changes the latest-submission roster, certification has no
+comparable completion rate yet. Until the first certificate in that roster,
+`planning_eta_seconds` gives a labeled 30–1,200-second range per remaining
+certificate, based on prior completed acceptance stages. It counts down and is
+withdrawn if progress goes idle. It excludes waiting behind other cohorts and
+is not an end-to-end cohort forecast.
+
+During evaluation, `components.execution` counts confirmed exported results.
+`components.execution_workers.workers` separately shows cached evaluator stages,
+such as model downloads, with each stage's counts, percentage, elapsed time,
+ETA basis and freshness. A download percentage is not the cohort completion
+percentage. Exports can pause while a worker is downloading or running a model.
+An unavailable or older evaluator reports unknown stage details; an empty active
+stage list does not establish completed evaluation. These advisory reads do not
+start verification, load models or request chain data.
+
+After the request handoff, `components.settlement` reports the selected native
+settlement owner's phase, current stage, counts, retry status and scoped ETA.
+`quality_vote_publication` counts original assigned votes only after publication
+succeeds. It does not count signing attempts, and it never combines evaluator
+percentages. A native package publication is separate from chain reward activation.
+Unknown totals and insufficient rate samples remain `null`; stale or retrying
+observations withdraw their ETA. Producer timestamps and restart epochs are
+preserved through the reviewer relay, so repeated API polling cannot make a
+stopped producer look current. Older reviewers without this diagnostic route
+report settlement diagnostics unavailable. The public GET reads memory only.
+
+Certified public-model scores are published at
+`GET /v1/competition/cohorts/<cohort_sha256>/model-results?limit=100`.
+Follow `next_offset` until it is null to read the complete table. Each submission
+has its retained admission UID/hotkey, exact aggregate quality, frozen-baseline
+quality, quality rank and separate model-reward disposition. Exact ties share a
+rank. Decimal quality uses a 0–1 scale; multiply by 100 for a points display.
+This metric is not prediction accuracy or a share of rewards.
+
+Models below the baseline still have their quality score and rank. An above-floor
+model can remain unselected under the certified reward rule, including duplicate
+handling. Unperformed submissions have `not_scored`, with no invented zero or
+rank. `certified_raw_weight_for_hotkey` is the original complete-cohort allocation
+for that hotkey, including service work in older mixed-track cohorts. Registration
+projection and live chain rewards are separate; this endpoint does not assess
+reward activation. Publication happens automatically after a certified native
+allocation is available. A 404 means that the score artifact has not been published.
+
+The certified cohort's public model catalog and renewable download metadata are
+published automatically as well. Read
+`GET /v1/competition/cohorts/<cohort_sha256>/models`, then use each model's
+`download_url` with the [supported resumable download client](../reference/competition-results-api.md#download-with-restart-support).
+The `/download` response includes the native bundle manifest. A C6+ concatenated
+payload is not a tar archive: use the client to split its file ranges in manifest
+order and verify the original file hashes. Download availability and score rank
+remain separate, and neither establishes live chain payments.
+
+The equivalent public read is
+`GET /v1/competition/cohorts/{cohort_sha256}/admissions/{consent_sha256}`.
+Both digests appear under `proposed_admission` in the original receipt. Use the
+**consent digest**, not the model digest or submission digest. The CLI also verifies
+the returned certificate against your request and policy, so it is the preferred
+check. If the live query remains pending, report those digests, your hotkey/UID,
+client revision and retry reason; preserve the original signed request and source.
+
+#### Delivery, retries and retained state
 
 The command checks local hashes, verifies the cohort history, selects the model
 delivery mechanism from the signed plan or its authenticated transport adoption, waits for complete byte
@@ -46,7 +190,16 @@ offsets; direct delivery reuses its retained reservation and may safely resend
 idempotent parts. If the object store has expired an old unfinished multipart
 generation, the command obtains a signed replacement generation and restarts
 the parts automatically. The original signed model request and local source do
-not change.
+not change. This also recovers expiry after you sent completion metadata: an
+unfinished completion intent does not count as a completed object. The client
+requests an authenticated replacement only after the server confirms that both
+the multipart generation and completed object are absent. A lost completion
+response for an existing object is reconciled without another upload. Provider
+outages do not impose a lifetime generation limit on your upload. If intake reports `model_upload_metadata_capacity_pending` or
+`model_upload_metadata_repair_required` in the `X-UMI-Reason-Code` response header,
+keep retrying the same signed request; the operator must provision metadata
+capacity or repair the retained index. Changing your nonce or signing a new
+participation does not repair server metadata.
 An upgraded client checks for a retained legacy reservation for the exact same
 signed request before starting direct R2 delivery. A certified legacy original
 keeps its original protocol; already preserved remote bytes need no reupload.

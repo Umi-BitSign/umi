@@ -39,6 +39,11 @@ history directory. Run under the owning service account with its supported
 state and native finality permissions. `--check-only` does not prove that the
 current finalized head is inside the certificate's application window.
 
+Actual retained rounds and disputed history block publication. An unused cycle
+of the legacy continuous calendar does not block a certified cohort winner;
+existing round records retain their original baseline and signed schedule.
+Runtime-port publication keeps its separate published-calendar guard.
+
 Before applying, quiesce all writers to that history and independently verify
 the supported backup/restore coverage. Run the same command with
 `--confirm-quiesced-backup` in place of `--check-only`. It obtains its own native
@@ -56,6 +61,77 @@ restore or repair that exact history through its supported recovery path; do
 not clear the receipt or rerun the completed native review. Select only a
 qualified compatible runtime for every writer before restarting the service:
 the new history fences older writers while retaining historical readers.
+
+For an R2-adopted cohort, the frozen legacy inventory continues to describe its
+original baseline and execution incumbents. Do not rewrite that signed inventory
+when publishing a new winner. The phase reviewer separately authenticates the
+locally applied cohort-baseline receipt, including the exact target cohort,
+sequence and model, before selecting reference bytes. If the winner is already
+a preserved participant in an authenticated legacy inventory, the sandbox restores
+that exact original through its R2 association into the bounded model cache.
+A later direct-upload winner uses its retained source-cohort review request and
+matching private acceptance intent to select the preserved R2 object. The source
+submission, contributor, policy and complete bundle must match the certified
+baseline. Unknown models still require their original authenticated source;
+a missing or damaged promotion receipt requires repair. Candidate admission,
+rights review and execution-order checks are unchanged.
+
+Retain those source records and the applied baseline receipt while any cohort
+uses the reference. Missing or damaged source records require explicit repair;
+they are not ordinary cache misses. Successful byte verification stays outside
+the disposable cache and survives eviction and restart. Each active invocation
+holds the cache lease, including inherited references, so another model cannot
+evict its bytes. Materialization progress counts chunk/file-finalization work as
+well as bytes; the last payload byte does not mean publication is finished.
+Direct-object restoration combines adjacent missing files into bounded R2 reads
+while retaining the original file and payload checks. Retained local files split
+those ranges, so interrupted restoration never downloads their bytes again.
+Its ETA includes completed file operations and final publication; restored work
+does not inflate the measured transfer rate.
+Legacy chunk restoration overlaps up to four missing 8 MiB chunks (32 MiB of
+payload buffers), then writes and checkpoints files in manifest order. Pending
+reads are cancelled and drained before releasing the cache lease on failure;
+already completed local files are excluded from prefetch after restart.
+Native legacy chunk readers retain one HTTP connection pool through inventory,
+range reads and generation confirmation. Requests remain separately signed and
+bounded; cancellation drains outstanding reads before closing the pool. A
+required unfinished child operation withdraws the parent ETA until it has a
+positive forecast or completes, preventing the last payload byte from implying
+that confirmation is finished.
+
+### Rootless CPU namespace readiness
+
+CPU phase reviewers keep `NoNewPrivileges=yes`. Prepare their existing rootless
+Podman namespace in the separate `umi-cohort-cpu-namespace@.service`, which runs
+as the same unprivileged account and can use `newuidmap`. An OOM event or stopped
+user session can remove Podman's pause process; the timer recreates that namespace
+without resetting storage, pulling images or changing model results.
+
+Install `deploy/standing-reward-coordinator/ensure-cpu-namespace.py` root-owned
+at `/usr/local/lib/umi/ensure-cpu-namespace.py`, and render the companion service
+and timer for the reviewer. Use the reviewer's existing service user/group and
+numeric `SERVICE_UID`. Its `%i.cpu-runtime.env` file under `CONFIG_DIRECTORY`
+must preserve the installed `HOME`, `CONTAINERS_STORAGE_CONF`,
+`CONTAINERS_CONF_OVERRIDE`, `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`.
+Inspect the supported installed layout first; do not substitute a fresh store
+or grant directory. Enable the companion timer for continuous recovery. The
+phase-reviewer template orders its initial startup after namespace preparation;
+phase-only reviewers without a CPU environment file skip that preparation.
+
+Healthy repeats check the private pause-process and readiness metadata without
+rerunning Podman inspection. Changed configuration, boot or process identity
+causes a new local check. Counted progress and bounded failure details go to the
+journal. A missing image, unsupported namespace or failed mapping remains an
+infrastructure retry; preserve the original model assignment and journals.
+
+Original baselines without an authenticated remote source continue to require
+their canonical preserved archive. Bounded-cache selection alone never authorizes
+canonical archive retirement, reservation release or a change to another live
+consumer's retention contract. Preserve those bytes until durable remote custody,
+required restoration and every consumer release are independently established.
+Select a compatible phase-reviewer runtime with the committed R2 configuration
+before the successor cohort executes; merely publishing the baseline or
+configuring a transport-adoption reviewer is insufficient.
 
 <a id="open-competition-promotion-agreement"></a>
 

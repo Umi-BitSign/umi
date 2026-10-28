@@ -78,6 +78,13 @@ a certified artifact review with retained supporting evidence.
 
 ### Runtime interface
 
+Declare one Python file with role `inference`. If your bundle declares several
+inference files (for example a translator and fingerspelling helpers), declare
+the root `umi_inference.py` as `inference`; that wrapper is always the entrypoint.
+Other helper files can use role `dependency`. The submission client and intake
+check this interface before reserving a new upload. Existing signed bundles do
+not need to be relabelled or resubmitted for the root-wrapper convention.
+
 The offline entrypoint receives `/input/video.mp4` as its only argument. The
 evaluator does not pass the case ID, reference, task or stratum through an
 argument, environment variable or sidecar file. A bundle may inspect the video

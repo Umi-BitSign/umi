@@ -73,6 +73,202 @@ acceptance before its intake opens. The prospective procedure in
 [private holdout operation](../operators/private-holdout.md) is not active merely
 because its implementation exists.
 
+## Certification progress
+
+Request-phase observations share each exact order/evaluator terminal read within
+that observation, without serializing the order's complete round for a lookup.
+Later observations read terminals again so new arrivals remain visible. This
+local bookkeeping grants no proof, closure or certification authority.
+
+Model artifact acceptance runs continuously during intake, including while an
+operator holds automatic progression. Latest replacement submissions take
+priority over the ordinary export scan. When several cohorts have pending latest
+models, the owner gives each cohort one model per pass and rotates which cohort
+goes first. A large model in an earlier hash-sorted cohort therefore cannot hold
+every later cohort behind its full batch. Keep the upload, acceptance and reviewer
+owners running during intake; do not defer this work until roster closure.
+Completed certificates and votes survive restart and are reused. Closure still
+uses the native finalized-registration filter and exact certificates; a last-minute
+upload or an unresolved review can leave unfinished work at closure.
+
+Restoring completed model-file byte checkpoints yields between files so cached
+progress and other service requests can run. Bulk receipt migration and byte-fact
+imports use owned metadata workers; cancellation drains them before releasing
+their original byte-store lease. These operations reuse successful byte verdicts
+without fetching or rehashing completed model payloads.
+
+Roster reviewers reuse their own committed admission verdicts for exact original
+participations. Unfinished records receive native proof review and an atomic
+checkpoint before their progress count advances. These private results bind the
+original record, policy, cohort authority and verifier semantics; damaged completed
+metadata requires repair. Existing signed admission journals remain supported.
+Decision signing reuses the same signer's committed exact-progress review while
+still checking the proposed transition and current owner history. Seal registration
+and current finality remain independently verified. Preparation consumes the same
+owned per-participation results rather than repeating historical proof work.
+Final freshness checks use the verifier-owned finalized height; they do not
+collect a new subnet membership snapshot when only the height is needed.
+
+Preparation publishes the selected incumbent's small model declaration alongside
+the round. A successor's newly certified baseline can therefore supply benchmark
+orders without a manual setup-file copy. Missing declarations are restored from
+the retained cohort-baseline certificate; model payloads stay in R2. Existing
+immutable declarations are reused, and damaged declarations require repair.
+
+Execution owners retain private exact-input history and order verification under
+their existing execution journal's `authority-verification/` directory. The
+records bind policy, configured evaluator/authorities, verifier semantics and
+original signed inputs, and survive owner restart. Fresh finalized observations,
+the selected owner history and the journal's monotonic/conflict fences are still
+checked for each execution step. No miner reset or signed-history migration is
+required for this additive private working state.
+
+Request owners also retain the first successful read of each delivered order.
+Private results bind the exact reference/object file identities, selected round
+and submission, native semantics and requests-stage bounds. Later polls copy a
+bounded private typed result and replay its original resource accounting; restart
+restores the retained result without rereading or hashing the original order.
+Changed originals or bounds and missing/damaged results expose a counted native
+repair for the affected order. File clocks that cannot establish safe identity
+reuse keep the original native reader. This does not establish completion,
+current authority, a closure or a reward; those native checks remain separate.
+
+Keep `.order-read-verification/` with the owner's retained state (or the selected
+native-verification directory). Records are divided by round to bound directory
+entries and can follow the ordinary durable R2 retention of inactive owner state.
+The typed working set defaults to 256 MiB and 2048 entries. Explicit operating
+overrides `UMI_REQUEST_ORDER_CACHE_BYTES` (up to 1 GiB) and
+`UMI_REQUEST_ORDER_CACHE_ENTRIES` (up to 16384) change only that working set;
+eviction preserves the durable results. Reuse counters report hits, misses and
+capacity pressure under `purpose=request_order`. Deploy through the supported
+cooperative source/config selection and preserve the original journals and signed
+inputs. Older supported readers continue reading the unchanged original files;
+miners need no new flag, signed request or state reset for this private change.
+
+Held-cohort transport reservation proofs reopen their original lifecycle owner
+after intake restart through the same serialized native initialization as
+prepare/reserve. This restores the exact pending reservation and still checks
+both original journals before signing a fresh challenge. It does not release the
+hold or run an automatic phase. Repeating its exact pending reservation retains
+the fresh local dual census
+without repeating the completed remote model pass. Unreserved proposals still
+require their initial independent verification. The change is private to intake;
+existing miner requests, reviewer proof readers and published client formats
+remain compatible. Select the updated owner through its supported cooperative
+source/config updater, preserving the original state and signed plans.
+
+A natively verified closed request history is retained as a monotonic denial
+before collecting another registration snapshot. This does not advance finalized
+highwater, create an execution observation, complete an obligation or remove any
+endpoint response/retirement state. Existing endpoint retirement and evidence
+recovery remain separate consumers. `execution_history_phase` reports this
+substage with counted progress and a scoped ETA; native verification diagnostics
+distinguish first verification, retained results, reuse and required repairs.
+
+`GET /v1/competition/cohorts/{cohort_sha256}/progress` returns public diagnostics:
+current `phase`, `stage`, `completed`, `total`, `percent`, elapsed time,
+`eta_seconds`, its basis/scope, estimated UTC finish time in Unix milliseconds,
+and stalled/retrying status. `components` separates intake certification,
+selected-roster certification, the current acceptance operation and measured work.
+After selected-roster certification completes, the current stage follows phase
+review and decision certification. Their waiting heartbeats and ETAs remain
+visible while unrelated uploads or exports run concurrently. R2 verification
+reports bytes and promotion copies report parts within their cohort's work.
+The owner copies up to four independent R2 parts at once, bounded by the signed
+delivery profile. It completes parts in their original order and verifies the
+new preserved object before recording promotion.
+Each single-model acceptance substage also exposes `planning_eta_seconds` and
+`eta_basis` under `components.acceptance` and the live nested work component.
+The first planning range uses observed acceptance-stage bounds; after five
+successful current-process examples of the same stage it uses their completed
+durations with a twofold upper allowance. The range counts down from elapsed
+time, and an overrun withdraws it with `planning_range_exceeded_retrying`.
+These are current-substage planning ranges, not cohort completion forecasts;
+provider retries and different model sizes can exceed them. Restart begins with
+the initial range while retained certification and artifact checks still reuse
+their own durable results.
+Native R2 readers may select the [authenticated metadata batch transport](../../deploy/public-model-artifacts/README.md#private-metadata-transport)
+without changing signed submissions, model identities, clocks or byte checkpoints.
+Individual R2 HEAD/GET requests retry transient connection failures and temporary
+provider status errors at most three times, preserving the exact selected object
+and range. A failed partial response is discarded. Retry diagnostics expose the
+attempt, transport error type, elapsed time and delay without provider details or
+object credentials. Mutating requests retain their existing single-attempt
+behavior; an ambiguous completion still requires native reconciliation. This
+private read fix uses the ordinary consumer source/config update path and changes
+no miner request, signed history, runtime requirement or retained verification ABI.
+Keep historical credential exports for services that have not adopted the updated
+reader; opt in through a new private export and the supported cooperative updater.
+Intake counts cover latest accepted model submissions before registration
+filtering; selected-roster counts cover the native seal's actual selection.
+Percentages and ETAs apply to their stated stage, not the whole cohort.
+Unmeasured, blocked, overdue or stale forecasts have a null ETA with a reason.
+Overall ETA stays null until an end-to-end forecast is established. Responses
+include observation age, disable caching, and never trigger verification or RPC.
+After restart an unknown observation is null, not zero or complete. This separate
+endpoint leaves signed history, readiness and existing client schemas unchanged.
+For active successor intake, the owner restores its retained certification count
+before reconciling older cohort exports. Pending successor submissions run first
+in that poll, with one turn per pending cohort while multiple cohorts compete.
+The owner discovers pending cohorts from its retained intake metadata without a
+per-cohort priority setting. The HTTP read uses the cached
+observation without opening the owner journal.
+
+During model evaluation, `components.execution` reports completed selected models
+with every evaluator terminal exported, the selected-model denominator, saved
+execution and paired-comparison counts, and delivered orders. Its percentage
+counts completed models, not equal-cost inference work or reward readiness.
+Background history delivery, intake continuations and repair of earlier preparation publications
+stay visible in their components without replacing the current evaluation counts.
+Counts are confirmed export floors: unfinished or delayed exports can lag actual
+execution. `projected_executions` assumes undelivered orders use the same case and
+evaluator counts as delivered orders; `projection_basis` states that assumption.
+Once all orders arrive, that total is exact even for differing order sizes.
+Partial and terminal exports are never counted twice. A background worker samples
+bounded metadata and persists small facts; restart reuses unchanged facts without
+model downloads, proof replay or journal inspection. Damaged referenced metadata
+is reported as requiring repair and never treated as completion. The scoped ETA
+requires at least three new complete models over five minutes in the sampler's
+current session, assumes comparable remaining cost and steady export delivery,
+and excludes subsequent certification and rewards. Overall ETA remains separate.
+Authenticated reviewer-epoch probes use a separate bounded HTTP pool so long
+admission/review requests cannot consume their connections. Cached `rate_probe_*`
+fields report availability, numeric HTTP status, attempts, failures and timeouts;
+probe failures still withdraw the rate rather than borrowing an older epoch.
+
+Prepared-round delivery reuses the native owner's immutable canonical snapshot.
+Fresh history, authority, retained-row and requests-stage bindings remain required
+on every handoff. Mutable public readers receive isolated objects. A private
+`.prepared-publication` receipt preserves successful delivery across restart;
+unchanged output identities require no payload reread, serialization or schema
+replay. Older outputs acquire this additive receipt without changing their bytes.
+Missing or damaged receipts and changed output identities report counted
+`publication_repair` progress with a scoped planning ETA. Repairs compare the
+original verified bytes, restore missing delivery and retain conflicts for repair;
+they do not create a new round or repeat proof work. The receipt becomes visible
+only after the output is durable. Older consumers can ignore this private namespace;
+no signed history, cohort clock, miner startup schema or release selection changes.
+
+Intake logs `cohort_model_certification_progress` from the same current roster
+used to seal intake. `completed`, `total`, `remaining` and `percent` count model
+artifact certificates for the selected latest submissions, excluding superseded
+entries and other cohorts. These are diagnostics, not admission authority or a
+quality score. The full native certificate/seal verification still follows.
+
+The report includes elapsed time, the measured completion rate, ETA scope and
+assumptions. Rates restart when the process or selected roster changes. A known
+failed acceptance stage withdraws the estimate and appears in `blocked`; a
+missing previously observed certificate requires repair. `model_acceptance_stage`
+identifies payload, intent preparation, proposal publication and reviewer steps,
+with redacted failure frames. Missing samples and unresolved holds have no
+measured finish time. Certification ETA excludes preparation, challenges,
+scoring and reward activation; report those stages separately.
+When all selected submissions are certified and progression remains held, the
+cached public `/progress` route shows that hold as the current stage and retains
+the completed certificate count in `components.intake_certification`. Fresh
+acceptance work can take precedence; a replacement submission makes
+certification current again until its new roster completes.
+
 ## Timing and recovery
 
 Published cohort dates are operating targets. Liveness failures do not expire a
@@ -88,6 +284,11 @@ cohort or authorize its evidence to be discarded.
   `original_request_12h_with_completed_miner/1`: after the same 12 hours, closure
   may proceed once at least one original miner has completed all its selected
   work. If every original miner remains unfinished, requests stay open.
+  For C6 and later, the owner also waits for every selected public model's
+  execution and terminal certification before selecting this cutoff. Central
+  evaluation backlog cannot make an uploaded model lose its evaluation. Once
+  model work is complete, unfinished endpoint work follows the same signed
+  rule and original clock. Historical certified tails remain replayable.
   Benchmark and accepted paid-work miners count in one union; multiple entries,
   cases or retries cannot enlarge the denominator or make a miner complete while
   its other original work remains unfinished. Legacy plans retain the 10% rule
@@ -149,8 +350,12 @@ cohort or authorize its evidence to be discarded.
   upgrades preserve the original journals, cutoff file and directory bindings.
 - The previous certified reward row remains effective until a newer cohort is
   certified and activated.
-- A five-hour rest starts after request closure is certified. The next cohort
-  cannot start requests earlier.
+- The selected cutover-clock rule measures the five-hour minimum from cohort
+  cutover, recording that observation during intake. Time spent on intake review
+  and preparation counts toward it; restart does not start another interval.
+  The predecessor must still have certified request closure. Legacy installations
+  retain their certification-clock journals until their supported upgrade selects
+  the cutover clock; explicit historical cutovers bind their retained source.
 - Each designated validator must receive at least 24 hours of verified
   opportunity to submit the certified row. Offline time does not count toward
   that opportunity.
@@ -217,6 +422,46 @@ configuration. Complete these checks in order:
    when checking aggregate consumption; they may be outside the reviewer unit's
    cgroup. Test watchdogs may detect harness stalls;
    they must not define cohort expiry.
+
+   Shared model admission is selected through the optional private benchmark
+   `model_execution_admission` field. It binds a root-owned host policy and file
+   leases to the protocol policy and signed CPU image, leaving existing configs
+   and the legacy two-slot cache readable. All reviewers on a host must select
+   the same capacity namespace. Reserve the full per-invocation memory ceiling,
+   at least 4 GiB for owner services, and a separate preparation lane. Populated
+   rootless container cgroups remain charged at their full ceilings even if a
+   reviewer exits and releases its lease. Admission waits rather than exceeding
+   capacity; its diagnostics identify the wait without changing signed clocks.
+   Configure only the number of model slots qualified for the host's memory.
+
+   Admitted pairs share one reference materialization, pin active model bytes,
+   and project the complete resident working set before transfer. Resident reads
+   can continue while another pair downloads. A pair larger than the bounded
+   cache takes all model slots and uses the supported single-model path; it
+   does not raise the cache cap or evict another active consumer. Interruption
+   preserves completed challenge checkpoints and resumable transfers. Extra
+   candidate slots are bounded and reclaimed after their job completes; retain
+   unfinished model slots across cooperative updates so restart can reuse their
+   byte receipts. Rollback selects the
+   preserved source and config together, since older readers do not accept the
+   added private config field. No miner/client signed schema changes are needed.
+   Timing logs carry PID, work identity and job digest so concurrent samples
+   remain distinct; journal timings surround the original operations and do not
+   trigger extra verification. Public polling still reads diagnostic snapshots.
+
+   For an installed predecessor that evicts unfinished extra slots on stop,
+   hold its existing cache-allocation lease across the cooperative stop and source
+   selection, then release it before model workers resume. This prevents the old
+   cleanup path from discarding warm models without moving or copying files.
+   This migration is needed only while such predecessor hosts remain installed.
+   New releases preserve the bounded unfinished working set directly.
+
+   Transfer ETAs separate measured byte time from fixed per-file/request
+   completion overhead. Remaining large weight bytes and small metadata operations
+   must not be extrapolated as equally costly files. Restored work supplies no
+   native rate sample; a new transfer generation resets both rate histories.
+   Partial range-response bytes are a child diagnostic scope, not completed or
+   verified parent bytes. A stalled initial response withdraws its forecast.
 5. **Storage and publication:** Restore evidence and model artifacts from the
    private R2 copies, verify every digest, and publish bounded public discovery
    records without exposing private clips or credentials.

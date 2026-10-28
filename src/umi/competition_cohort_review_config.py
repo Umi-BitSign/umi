@@ -36,8 +36,13 @@ from .competition_cohort_review_budget import PhaseReviewBudget, checked_budget
 from .competition_cohort_review_origin import private_review_origin
 from .competition_cohort_service_budget import service_execution_budget
 from .competition_cohort_service_review import ServiceReviewConfig
+from .competition_cohort_suite_adoption_candidate import (
+    EvaluationSuiteAdoptionCandidates,
+    validate_suite_adoption_candidates,
+)
 from .competition_host_activation import _read_root_control_path
 from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
+from .competition_model_storage_leases import ModelStorageConsumerConfig
 from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_boot import _disjoint
 from .competition_reward_decisions import StandingRewardSeries
@@ -89,7 +94,9 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
     direct_model_review: DirectModelReviewSourceConfig | None = None
     model_delivery_adoptions: ModelDeliveryAdoptionSelections = ()
     legacy_model_storage: LegacyModelStorageSelections = ()
+    model_storage_consumer: ModelStorageConsumerConfig | None = None
     model_delivery_adoption_candidates: ModelDeliveryAdoptionCandidates = ()
+    evaluation_suite_adoption_candidates: EvaluationSuiteAdoptionCandidates = ()
 
     host_memory_admission: HostMemoryAdmissionSelection | None = None
 
@@ -120,8 +127,12 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
             value.pop("model_delivery_adoptions", None)
         if not self.legacy_model_storage:
             value.pop("legacy_model_storage", None)
+        if self.model_storage_consumer is None:
+            value.pop("model_storage_consumer", None)
         if not self.model_delivery_adoption_candidates:
             value.pop("model_delivery_adoption_candidates", None)
+        if not self.evaluation_suite_adoption_candidates:
+            value.pop("evaluation_suite_adoption_candidates", None)
         return value
 
     @property
@@ -150,17 +161,34 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                     if include_shared
                     else ()
                 ),
+                *(
+                    dict.fromkeys(
+                        p
+                        for c in self.evaluation_suite_adoption_candidates
+                        for p in c.stores()
+                        if self.benchmark is None or p != Path(self.benchmark.videos_directory)
+                    )
+                ),
                 self.chain.state_directory,
                 self.signing.directory,
                 self.inputs_directory,
                 self.promotion_directory,
                 self.proof_import_directory,
+                *((self.model_storage_consumer.directory,) if self.model_storage_consumer else ()),
                 *(source.directory for source in self.legacy_model_storage),
                 *(
                     dict.fromkeys(
                         path
                         for candidate in self.model_delivery_adoption_candidates
                         for path in candidate.stores(include_shared=False)
+                        # One credential may serve both the committed direct
+                        # reader and its legacy-adoption candidate. It is
+                        # already protected below with the direct reader's
+                        # secrets; do not misclassify that exact reuse as two
+                        # overlapping mutable stores. Other collisions remain.
+                        if self.direct_model_review is None
+                        or path != Path(candidate.r2_credentials_file)
+                        or path != Path(self.direct_model_review.r2_credentials_file)
                     )
                 ),
                 *(self.proof_stores.credential_paths() if self.proof_stores else ()),
@@ -204,8 +232,18 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def selected_adoption_candidates(self):
-        if self.model_delivery_adoption_candidates and self.phase_review_budget is None:
-            raise ValueError("model delivery adoption requires a selected full phase review budget")
+        validate_suite_adoption_candidates(
+            self.evaluation_suite_adoption_candidates, (digest(p) for p in self.series.cohorts)
+        )
+        if any(
+            identity(c.verification_owner_hotkey) != identity(self.signing.signer)
+            for c in self.evaluation_suite_adoption_candidates
+        ):
+            raise ValueError("suite verification must belong to the selected independent reviewer")
+        if (
+            self.model_delivery_adoption_candidates or self.evaluation_suite_adoption_candidates
+        ) and self.phase_review_budget is None:
+            raise ValueError("policy adoption requires a selected full phase review budget")
         validate_adoption_candidates(
             self.model_delivery_adoption_candidates,
             (digest(plan) for plan in self.series.cohorts if plan.sequence > 5),
@@ -214,6 +252,8 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def selection(self):
+        if self.model_storage_consumer is not None and not self.legacy_model_storage:
+            raise ValueError("model storage consumer requires authenticated remote model sources")
         if self.proof_stores is not None and self.proof_stores.exported is not None:
             raise ValueError("phase reviewer accepts only an imported proof transport")
         checked_budget(
@@ -374,11 +414,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                 self.signer_key_file,
                 self.owner_token_file,
                 self.vote_token_file,
-                *(
-                    (self.direct_model_review.r2_credentials_file,)
-                    if self.direct_model_review
-                    else ()
-                ),
+                *(self.direct_model_review.stores() if self.direct_model_review else ()),
             )
         )
         validate_shared_byte_stores(

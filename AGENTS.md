@@ -1,5 +1,34 @@
 # Maintenance
 
+- New C7+ evaluation suites use one or two cases per canonical dataset across
+  both tasks, with broad source, topic and signer variety. Splits, versions,
+  camera views and local directory aliases do not count as separate sources.
+  Public sources are allowed: private recording delivery and our miner's
+  training/development exposure are not mandatory launch prerequisites. Retain
+  truthful provenance and exposure labels, reference/media QA and prior-case
+  overlap controls; never label public material as verified unseen data. Apply
+  prospective suite rules through an authenticated successor, preserving old
+  signed suites and their historical verification semantics. Intake closure and
+  challenge start still require Sam's explicit instruction.
+
+- C7 and subsequent cohorts use 2.5-point reward bands, 0.85 multipliers between
+  and within occupied bands, and 1% relative baseline grace (score >= baseline
+  * 0.99, with exact fractions). Keep content and one-basis-point score duplicate
+  rules. Grace affects reward eligibility, not measured scores or promotion of
+  a weaker reference. Preserve finalized C6's 0.75 multipliers and strict cutoff.
+  Select the prospective defaults through signed authority/adoption and carry
+  them through replay, public results and supported miner/validator updates.
+
+- Carry each change through affected miner and validator implementations,
+  published release selections and supported automatic update paths. Verify
+  actual published/installed behavior before claiming rollout, including older
+  supported layouts. Source-only fixes do not establish update delivery.
+- Treat Bittensor runtime upgrades as routine. Discover the runtime from native
+  finalized code/metadata proofs; do not gate new operation on fixed runtime
+  versions or an expanding release allowlist. Preserve historical signed bytes
+  and their original bindings for recovery, and require explicit supported state
+  semantics and proofs rather than silently trusting RPC assertions.
+
 - For C6 and later cohorts, retain the entire finalized block range and complete
   native replay proofs throughout intake, work and certification. Verify
   independent blocks in bounded spawned workers, persist each completed result,
@@ -65,3 +94,11 @@
   process, service, configuration, symlink, and environment dependencies first.
   Preserve wallets, private data, model assets, and recovery state. Never delete
   by a broad home-directory glob. Report retained dependencies and cleanup results.
+
+- Check upcoming cohort stages against the actual selected downstream services
+  while current work is running: inspect live configured limits, remaining local
+  and remote capacity, retained completion records and the supported update path.
+  Use owner diagnostics and bounded metadata for this readiness work. Persist
+  successful results and reuse them; avoid repeated payload verification or
+  creating an extra manual release gate. Resolve identified capacity and reuse
+  defects before their consumer stage starts.

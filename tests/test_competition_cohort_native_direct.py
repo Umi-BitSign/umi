@@ -1,11 +1,12 @@
 """Synthetic successor direct object delivery through native certification.
 
 The provider, finality, inference and scratch filesystem are explicit fixture
-ports. Actual signed C6 remains on its original legacy delivery plan.
+ports. These cases do not select or rewrite any production cohort plan.
 """
 
 import asyncio
 import hashlib
+import inspect
 import json
 from collections import Counter
 from contextlib import suppress
@@ -36,7 +37,11 @@ from umi.competition_cohort_model_client import submit_cohort_model
 from umi.competition_cohort_model_review import ModelArtifactReviewer, ModelReviewConfig
 from umi.competition_cohort_model_review_http import ModelReviewPeer, model_review_routes
 from umi.competition_cohort_model_static_review import StandingModelReviewPolicy
+from umi.competition_cohort_model_transport import prepare_model_delivery_adoption
+from umi.competition_cohort_model_transport_selection import CommittedModelDeliveryHistory
+from umi.competition_cohort_model_upload import ModelUploadConfig
 from umi.competition_cohort_recovery import ModelDeliveryProfile
+from umi.competition_cohort_request_rule import prepare_request_tail_adoption
 from umi.competition_cohort_sandbox import DirectCohortCpuSandbox
 from umi.competition_cohort_service_host import DirectModelUploadHostConfig
 from umi.competition_cohort_settlement_delivery import SettlementEvidenceFiles
@@ -85,6 +90,7 @@ from .test_competition_cohort_native_pipeline import (
     scenario as single_scenario,  # noqa: F401
 )
 from .test_competition_cohort_recovery import signatures as quorum_signatures
+from .test_competition_cohort_recovery import signed_transition
 from .test_competition_cohort_standing_phases import standing
 from .test_open_competition import bundle_at, wallet
 
@@ -117,14 +123,18 @@ def policy(native_policy):  # noqa: F811
 
 
 @pytest.fixture
-def scenario(single_scenario, policy):  # noqa: F811
+def scenario(single_scenario, policy, request):  # noqa: F811
+    parameters = getattr(request, "param", {})
+    adopted = parameters.get("adopted", False)
+    model_only = parameters.get("model_only", False) or adopted
+    geometric = parameters.get("geometric", model_only)
     old = single_scenario["intake_history"]
     plan = old.plan.model_copy(
         update={
             "schema_": "umi-recoverable-cohort-plan/4",
-            "sequence": 7,
-            "eligible_tracks": ("endpoint", "model"),
-            "service_pool_bps": 5000,
+            "sequence": 6 if model_only else 7,
+            "eligible_tracks": ("model",) if model_only else ("endpoint", "model"),
+            "service_pool_bps": 0 if model_only else 5000,
             "request_tail_rule": "original_request_12h_with_completed_miner/1",
             "model_delivery": ModelDeliveryProfile(
                 schema="umi-model-delivery-profile/1",
@@ -135,12 +145,39 @@ def scenario(single_scenario, policy):  # noqa: F811
             ),
         }
     )
+    delivery = plan.model_delivery
+    if adopted:
+        plan = plan.model_copy(
+            update={
+                "schema_": "umi-recoverable-cohort-plan/2",
+                "sequence": 7,
+                "eligible_tracks": ("endpoint", "model"),
+                "service_pool_bps": 5000,
+                "model_delivery": None,
+                "request_tail_rule": None,
+            }
+        )
     authority, genesis, _ = standing(
         plan,
         policy,
         model_rewards=True,
-        model_rule="baseline_or_better_quality_bucket_best_score_first_complete/1",
-        model_quality_bucket_width_bps=500,
+        model_rule=(
+            "baseline_or_better_geometric_bands_first_complete/1"
+            if geometric
+            else "baseline_or_better_quality_bucket_best_score_first_complete/1"
+        ),
+        model_quality_bucket_width_bps=None if geometric else 500,
+        model_reward_parameters=(
+            {
+                "schema": "umi-geometric-reward-parameters/2",
+                "band_width_bps": 250,
+                "band_decay_bps": 7500,
+                "within_band_decay_bps": 7500,
+                "score_duplicate_tolerance_bps": 1,
+            }
+            if geometric
+            else None
+        ),
     )
     history = CohortRecoveryHistory(
         schema="umi-cohort-recovery-history/1",
@@ -150,6 +187,24 @@ def scenario(single_scenario, policy):  # noqa: F811
         genesis_signatures=quorum_signatures(genesis),
         transitions=(),
     )
+    if adopted:
+        from .test_competition_cohort_intake import capture_at
+
+        tail = prepare_request_tail_adoption(history, policy, execution_boundary(capture_at(210)))
+        history = history.model_copy(update={"transitions": (signed_transition(tail),)})
+        transition = prepare_model_delivery_adoption(
+            history,
+            policy,
+            expected_tip_sha256=digest(tail),
+            current_block=210,
+            delivery=delivery,
+            legacy_inventory_sha256="31" * 32,
+            preservation_inventory_sha256="32" * 32,
+            model_only=True,
+        )
+        history = history.model_copy(
+            update={"transitions": (*history.transitions, signed_transition(transition))}
+        )
     consent = single_scenario["consent"].consent.model_copy(
         update={
             "authority_sha256": digest(authority.authority),
@@ -207,9 +262,25 @@ class NativeDirect:
         )
 
     def owner_config(self, o):
+        history = o.h.intake.history(o.h.cohort)
+        self.selections = ()
+        if history.transitions:
+            self.selections = (
+                CommittedModelDeliveryHistory(
+                    schema="umi-committed-model-delivery-history/1",
+                    history=history,
+                    committed_tip_sha256=digest(history.transitions[-1].transition),
+                    observed_at_block=history.transitions[-1].transition.observed_at_block,
+                ),
+            )
         return dict(
             schema="umi-cohort-service-admission-host/9",
-            model_uploads=None,
+            model_uploads=ModelUploadConfig(
+                directory=str(self.root / "legacy-uploads"),
+                maximum_reserved_bytes=16 * 1024**2,
+            )
+            if self.selections
+            else None,
             direct_model_uploads=DirectModelUploadHostConfig(
                 schema="umi-direct-model-upload-host/1",
                 directory=str(self.root / "uploads"),
@@ -406,6 +477,8 @@ class NativeDirect:
                 # the native materialization path, even after evaluator restart.
                 assert archive == sandbox.cache / "archive"
                 request = sandbox.request(job)
+                if inspect.isawaitable(request):
+                    request = await request
                 assert request.direct_artifact is not None
                 payload = request.direct_artifact.reservation.payload
                 assert model == request.record.request.signed_submission.submission.model_bundle
@@ -455,6 +528,7 @@ class NativeDirect:
         return dict(
             direct_model_review=self.review_config(name + "-settlement"),
             request_export_directory=str(base / "request-export"),
+            model_delivery_adoptions=self.selections,
         )
 
     def settlement_baseline(self, promotion, base, policy):
@@ -483,6 +557,41 @@ async def test_native_direct_multipart_paid_work_and_certification_recover(
     monkeypatch,
     chain_config,
 ):
+    await _assert_native_direct_recovery(
+        host, scenario, runtime, tmp_path, monkeypatch, chain_config, mixed=True
+    )
+
+
+@pytest.mark.parametrize("scenario", [{"model_only": True}], indirect=True)
+async def test_native_direct_model_only_certification_and_rewards_recover(
+    host, scenario, runtime, tmp_path, monkeypatch, chain_config
+):
+    await _assert_native_direct_recovery(
+        host, scenario, runtime, tmp_path, monkeypatch, chain_config, mixed=False
+    )
+
+
+@pytest.mark.parametrize("scenario", [{"adopted": True}], indirect=True)
+async def test_native_mixed_plan_adoption_certification_and_rewards_recover(
+    host, scenario, runtime, tmp_path, monkeypatch, chain_config
+):
+    await _assert_native_direct_recovery(
+        host, scenario, runtime, tmp_path, monkeypatch, chain_config, mixed=False
+    )
+
+
+@pytest.mark.parametrize("scenario", [{"adopted": True, "geometric": False}], indirect=True)
+async def test_native_original_bucket_authority_model_only_adoption_and_rewards(
+    host, scenario, runtime, tmp_path, monkeypatch, chain_config
+):
+    await _assert_native_direct_recovery(
+        host, scenario, runtime, tmp_path, monkeypatch, chain_config, mixed=False
+    )
+
+
+async def _assert_native_direct_recovery(
+    host, scenario, runtime, tmp_path, monkeypatch, chain_config, *, mixed
+):
     direct = NativeDirect(tmp_path / "direct", host.h.intake.policy, monkeypatch)
     settled = await run_pipeline(
         host,
@@ -492,10 +601,29 @@ async def test_native_direct_multipart_paid_work_and_certification_recover(
         monkeypatch,
         chain_config,
         interrupt=True,
-        mixed=True,
+        mixed=mixed,
         direct=direct,
     )
     assert settled.package.inputs.history.plan == scenario["intake_history"].plan
+    if not mixed:
+        if scenario["intake_history"].transitions:
+            # The original mixed plan and service terms remain signed evidence;
+            # only the quorum intake amendment changes derived participation/pool.
+            assert settled.package.inputs.history.plan.eligible_tracks == ("endpoint", "model")
+            assert settled.package.inputs.history.plan.service_pool_bps == 5000
+        else:
+            assert settled.package.inputs.history.plan.eligible_tracks == ("model",)
+            assert settled.package.inputs.history.plan.service_pool_bps == 0
+        authority = settled.package.inputs.history.authority.authority
+        expected_allocation_schema = (
+            "umi-cohort-reward-allocation/5"
+            if authority.schema_ == "umi-cohort-recovery-authority/4"
+            else "umi-cohort-reward-allocation/4"
+        )
+        assert settled.package.allocation.schema_ == expected_allocation_schema
+        assert settled.package.allocation.recipients
+        assert settled.package.allocation.burn_weight == 0
+        assert sum(r.raw_weight for r in settled.package.allocation.recipients) == 65535
     assert set(direct.candidate_jobs) == {"Charlie", "Dave"}
     assert set(direct.candidate_invocations) == {"Charlie", "Dave"}
     for name, job in direct.candidate_jobs.items():
@@ -546,6 +674,8 @@ async def test_native_direct_multipart_paid_work_and_certification_recover(
         json.dumps(
             {
                 "cohort_sha256": host.h.cohort,
+                "eligible_tracks": settled.package.inputs.history.plan.eligible_tracks,
+                "service_pool_bps": settled.package.inputs.history.plan.service_pool_bps,
                 "package_sha256": digest(settled.package),
                 "reservations": [
                     r.model_dump(mode="json", by_alias=True) for r in direct.reservations

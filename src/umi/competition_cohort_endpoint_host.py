@@ -36,8 +36,10 @@ from .competition_cohort_request_signer import (
 )
 from .competition_cohort_request_worker import CohortEndpointRequestWorker
 from .competition_cohort_review_http import CohortReviewPeerConfig
+from .competition_cohort_sandbox import DirectCohortCpuSandbox
 from .competition_cohort_service_quality import ServiceTerms
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
+from .competition_evaluation_runtime import round_runtime_authorization
 from .competition_execution import execution_boundary, read_case_video
 from .competition_reward_boot import _disjoint
 from .competition_runner import verify_runtime
@@ -280,11 +282,16 @@ class EndpointHost:
         self.readiness_stamp = stamp
         return tuple(result)
 
-    def _ready_inputs(self, assignments):
+    def _ready_inputs(self, assignments, history):
         models, videos, runtimes = {}, {}, {}
         for value in assignments:
             order = value.certificate.order
-            runtimes[digest(order.runtime)] = order.runtime
+            authorization = round_runtime_authorization(order.round, self.policy, history)
+            runtime_sha256 = digest(order.runtime)
+            if runtime_sha256 != order.round.runtime_sha256:
+                raise ValueError("readiness runtime differs from its prepared round")
+            # Authenticate every order before sharing the identical host probe.
+            runtimes[runtime_sha256] = (order.runtime, authorization)
             models[digest(order.incumbent)] = order.incumbent
             if order.submission.submission.model_bundle is not None:
                 bundle = order.submission.submission.model_bundle
@@ -295,8 +302,9 @@ class EndpointHost:
                     order.runtime.maximum_video_bytes,
                 )
         sandbox = self.benchmark.sandbox
-        for model in models.values():
-            preserved_bundle_available(model, sandbox.archive, self.policy)
+        if not isinstance(sandbox, DirectCohortCpuSandbox):
+            for model in models.values():
+                preserved_bundle_available(model, sandbox.archive, self.policy)
         for key, maximum in videos.items():
             read_case_video(sandbox.videos, key, maximum)
         return tuple(runtimes.values()), tuple(sorted(videos))
@@ -336,9 +344,14 @@ class EndpointHost:
             if view.state.phase != "requests":
                 raise ValueError("request readiness requires an active request phase")
             assignments = await run_owned_thread(self._ready_assignments, probe)
-            runtimes, videos = await run_owned_thread(self._ready_inputs, assignments)
-            for runtime in runtimes:
-                await verify_runtime(runtime, self.policy)
+            runtimes, videos = await run_owned_thread(
+                self._ready_inputs, assignments, source.history
+            )
+            if isinstance(b.sandbox, DirectCohortCpuSandbox):
+                await b.sandbox.models_available(tuple(v.certificate.order for v in assignments))
+            for runtime, authorization in runtimes:
+                options = {} if authorization is None else {"runtime_authorization": authorization}
+                await verify_runtime(runtime, self.policy, **options)
             for video in videos:
                 await self.clips(video)
             latest = await b.history(probe.cohort_sha256)

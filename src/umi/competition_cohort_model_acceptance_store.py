@@ -110,7 +110,9 @@ def _read(db, table, cohort, submission):
 def read_publication(db, cohort, submission):
     raw = _read(db, "cohort_model_acceptances", cohort, submission)
     if raw is None:
-        raise PendingModelArtifacts("selected model artifact acceptance is pending")
+        error = PendingModelArtifacts("selected model artifact acceptance is pending")
+        error.submission_sha256 = submission
+        raise error
     publication = ModelAcceptancePublication.model_validate_json(raw)
     if canonical_json_bytes(publication) != raw:
         raise ValueError("retained model acceptance changed its canonical bytes")
@@ -131,11 +133,39 @@ def _transport_transaction(db):
         raise
 
 
-def model_acceptances_for_seal(db, seal, history, policy, records):
+def model_acceptances_for_seal(db, seal, history, policy, records, *, report=None):
     """A missing or changed acceptance cannot close an opted-in cohort."""
     if not isinstance(history.authority.authority, ModelRewardCohortAuthority):
         return ()
     acceptance_tables(db)
+    selected_models = tuple(s for s in seal.selected if s.track == "model")
+    keys = tuple(s.submission_sha256 for s in selected_models)
+    available = set()
+    if keys:
+        available = {
+            row[0]
+            for row in db.execute(
+                "SELECT submission FROM cohort_model_acceptances WHERE cohort=? AND submission IN ("
+                + ",".join("?" for _ in keys)
+                + ")",
+                (seal.cohort_sha256, *keys),
+            )
+        }
+    pending = tuple(key for key in keys if key not in available)
+    inventory = dict(
+        cohort_sha256=seal.cohort_sha256,
+        roster_sha256=digest([s.model_dump(mode="json") for s in selected_models]),
+        completed=len(available),
+        total=len(keys),
+        pending_submission_sha256s=pending,
+    )
+    if report is not None:
+        report(inventory)
+    if pending:
+        error = PendingModelArtifacts("selected model artifact acceptance is pending")
+        error.submission_sha256 = pending[0]
+        error.inventory = inventory
+        raise error
     certificates = []
     for selected in seal.selected:
         if selected.track != "model":
@@ -398,6 +428,96 @@ class CohortModelAcceptances:
                 result.append((key, record.request.signed_submission.submission))
             return tuple(result)
 
+    def certification_inventory(self, cohort):
+        """Cheap diagnostic count during intake, without replay or payload reads.
+
+        These are latest accepted submissions, before the native seal applies
+        its finalized-registration filter. They never grant roster authority.
+        """
+        self.intake._allowed(cohort)
+        with self.intake._connection() as (db, _):
+            rows = tuple(
+                db.execute(
+                    "SELECT c.hotkey,c.sequence,"
+                    "json_extract(CAST(c.body AS TEXT),"
+                    "'$.request.consent.consent.submission_sha256'),"
+                    "EXISTS (SELECT 1 FROM cohort_model_acceptances a WHERE a.cohort=c.cohort "
+                    "AND a.submission=json_extract(CAST(c.body AS TEXT),"
+                    "'$.request.consent.consent.submission_sha256')) "
+                    "FROM cohort_consents c WHERE c.cohort=? AND c.track='model' "
+                    "AND NOT EXISTS (SELECT 1 FROM cohort_consents newer "
+                    "WHERE newer.cohort=c.cohort AND newer.hotkey=c.hotkey "
+                    "AND newer.track=c.track AND newer.sequence>c.sequence) "
+                    "ORDER BY c.hotkey,c.consent LIMIT ?",
+                    (cohort, self.intake.capacity.maximum_records + 1),
+                )
+            )
+        if len(rows) > self.intake.capacity.maximum_records:
+            raise ValueError("diagnostic inventory exceeds intake capacity")
+        return dict(
+            cohort_sha256=cohort,
+            roster_sha256=digest([list(row[:3]) for row in rows]),
+            selection_scope="latest_model_submissions",
+            completed=sum(row[3] for row in rows),
+            total=len(rows),
+            pending_submission_sha256s=tuple(row[2] for row in rows if not row[3]),
+        )
+
+    def pending_latest_entries(self, cohort, *, limit=16, offset=0):
+        """Prioritize likely seal blockers without granting roster authority.
+
+        Current native sealing still verifies the complete inventory and live
+        registration. The ordinary fair scan retains superseded/recovery work.
+        """
+        self.intake._allowed(cohort)
+        if type(limit) is not int or not 1 <= limit <= 16:
+            raise ValueError("model acceptance priority scan exceeds its page bound")
+        if type(offset) is not int or not 0 <= offset <= self.intake.capacity.maximum_records:
+            raise ValueError("model acceptance priority offset exceeds intake capacity")
+        with self.intake._connection() as (db, store):
+            state, _ = store.status(cohort)
+            if state.phase != "intake":
+                return ()
+            history = store.published_history(cohort)
+            rows = db.execute(
+                "SELECT c.consent,c.hotkey,c.sequence,substr(c.body,1,4194305) "
+                "FROM cohort_consents c WHERE c.cohort=? AND c.track='model' "
+                "AND NOT EXISTS (SELECT 1 FROM cohort_consents newer "
+                "WHERE newer.cohort=c.cohort AND newer.hotkey=c.hotkey "
+                "AND newer.track=c.track AND newer.sequence>c.sequence) "
+                "AND NOT EXISTS (SELECT 1 FROM cohort_model_acceptances a "
+                "WHERE a.cohort=c.cohort AND a.submission="
+                "json_extract(CAST(c.body AS TEXT),'$.request.consent.consent.submission_sha256')) "
+                "ORDER BY c.hotkey,c.consent LIMIT ? OFFSET ?",
+                (cohort, limit, offset),
+            )
+            result = []
+            for key, hotkey, sequence, raw in rows:
+                record = read_participation(raw)
+                sub = record.request.signed_submission.submission
+                replay_participation(record, history, self.intake.policy)
+                if (
+                    digest(record.request.consent.consent) != key
+                    or identity(sub.hotkey) != hotkey
+                    or sub.sequence != sequence
+                    or sub.track != "model"
+                ):
+                    raise ValueError("model priority index differs from original consent")
+                result.append((key, sub))
+            return tuple(result)
+
+    def has_intent(self, cohort, submission):
+        """Availability hint only; native intent/transport validation stays separate."""
+        self.intake._allowed(cohort)
+        with self.intake._connection() as (db, _):
+            return (
+                db.execute(
+                    "SELECT 1 FROM cohort_model_acceptance_intents WHERE cohort=? AND submission=?",
+                    (cohort, submission),
+                ).fetchone()
+                is not None
+            )
+
     def intent(self, cohort, submission):
         self.intake._allowed(cohort)
         with self.intake._connection() as (db, store):
@@ -409,6 +529,24 @@ class CohortModelAcceptances:
                 raise ValueError("retained model proposal changed canonical bytes")
             self._qualify_transport(db, store, value.acceptance)
             return value
+
+    def has_retained_selection(self, cohort, submission):
+        """Discovery only; a selected continuation still needs full native reads.
+
+        A damaged intent must not fall back to an earlier preserved-upload
+        delivery path while its independent publication remains retained.
+        """
+        self.intake._allowed(cohort)
+        with self.intake._connection() as (db, _):
+            return (
+                db.execute(
+                    "SELECT 1 FROM cohort_model_acceptance_intents WHERE cohort=? AND submission=? "
+                    "UNION ALL SELECT 1 FROM cohort_model_acceptances "
+                    "WHERE cohort=? AND submission=? LIMIT 1",
+                    (cohort, submission, cohort, submission),
+                ).fetchone()
+                is not None
+            )
 
     def retained(self, cohort, submission):
         self.intake._allowed(cohort)

@@ -65,7 +65,12 @@ def consumer(case, tmp_path, auth=None):
     )
     bundle = request.record.request.signed_submission.submission.model_bundle
     local = case.owner.archive / digest(bundle) / "model"
-    objects = {"chunks/sha256/" + r.sha256: (local / r.path).read_bytes() for r in bundle.files}
+    prefix = next(
+        m.object_key_prefix for m in auth.preservation.models if m.model_sha256 == digest(bundle)
+    )
+    objects = {
+        prefix + "chunks/sha256/" + r.sha256: (local / r.path).read_bytes() for r in bundle.files
+    }
     remote = Remote(objects)
     readers = LegacyModelStorageReaders(
         {case.cohort: auth},
@@ -153,6 +158,95 @@ async def test_independent_full_bytes_then_fresh_consumers_reuse_without_local_a
     assert c.certificate.acceptance.direct_artifact is None
 
 
+@pytest.mark.parametrize("prefix", ["", "preservation/v1/"])
+async def test_prefixed_completions_survive_restart_and_reward_coverage_without_byte_reads(
+    case, tmp_path, monkeypatch, prefix
+):
+    preservation = case.preservation.model_copy(
+        update={
+            "models": tuple(
+                m.model_copy(update={"object_key_prefix": prefix}) for m in case.preservation.models
+            )
+        }
+    )
+    c = consumer(case, tmp_path, authenticated(case, preservation=preservation))
+    await c.verifier.ensure(c.participant, c.certificate)
+    assert c.remote.reads and all(
+        key.startswith(prefix + "chunks/sha256/") for key in c.remote.reads
+    )
+    receipt = c.legacy.verify_candidate(c.participant, c.certificate, c.verifier.receipts)
+    paths = (
+        legacy_snapshot_path(c.verifier.receipts, receipt),
+        legacy_seal_path(c.verifier.receipts, receipt),
+        c.verifier._path(c.certificate),
+    )
+    retained = {p: p.read_bytes() for p in paths}
+    signed = canonical_json_bytes(c.certificate)
+    shutil.rmtree(case.owner.archive)
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("completed settlement must never fetch model payload bytes")
+
+    monkeypatch.setattr(c.remote, "read_range", forbidden)
+    restarted = DirectModelSettlementVerifier(
+        c.artifacts,
+        c.verifier.archive,
+        c.verifier.receipts,
+        legacy_storage=LegacyModelSettlementStorage(c.readers, c.case.cohort),
+    )
+    await restarted.ensure(c.participant, c.certificate)
+    restarted.verify_candidate(c.certificate, c.participant)
+    c.preparation.model_artifacts = restarted
+    coverage = await capture_coverage_model_dependencies(c.preparation, c.package, c.prepared)
+    assert await restore_coverage_model_dependencies(c.preparation, coverage)
+    check_coverage_model_metadata(
+        CoverageModelDependencies.model_validate_json(canonical_json_bytes(coverage))
+    )
+    assert all(p.read_bytes() == raw for p, raw in retained.items())
+    assert canonical_json_bytes(c.certificate) == signed
+    assert c.certificate.acceptance.direct_artifact is None
+
+
+@pytest.mark.parametrize("fault", ["prefix", "generation"])
+async def test_prefixed_completed_snapshot_still_rejects_namespace_or_generation_changes(
+    case, tmp_path, monkeypatch, fault
+):
+    preservation = case.preservation.model_copy(
+        update={
+            "models": tuple(
+                m.model_copy(update={"object_key_prefix": "preservation/v1/"})
+                for m in case.preservation.models
+            )
+        }
+    )
+    c = consumer(case, tmp_path, authenticated(case, preservation=preservation))
+    await c.verifier.ensure(c.participant, c.certificate)
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("namespace repair cannot silently reread model bytes")
+
+    monkeypatch.setattr(c.remote, "read_range", forbidden)
+    if fault == "prefix":
+        original = c.readers.reader
+
+        def substituted(resolution):
+            reader = original(resolution)
+            reader.selection = reader.selection.model_copy(
+                update={
+                    "binding": reader.selection.binding.model_copy(
+                        update={"object_key_prefix": "other/v1/"}
+                    )
+                }
+            )
+            return reader
+
+        monkeypatch.setattr(c.readers, "reader", substituted)
+    else:
+        c.remote.etags[next(iter(c.remote.objects))] = "changed-generation"
+    with pytest.raises(LegacyModelStorageRepairRequired):
+        await c.verifier.ensure(c.participant, c.certificate)
+
+
 async def test_settlement_preparation_uses_selected_legacy_r2(remote_case, tmp_path):
     c = remote_case
     root = tmp_path / "promotion"
@@ -173,12 +267,35 @@ async def test_settlement_preparation_uses_selected_legacy_r2(remote_case, tmp_p
     )
     result = await worker.poll_once(asyncio.Event())
     assert result["entries_ready"] == 1 and result["entries_pending"] == 0
-    reads = tuple(c.remote.reads)
+    reads, heads = tuple(c.remote.reads), tuple(c.remote.heads)
     restarted = SettlementArtifactPreparation(
         config, SimpleNamespace(directory=root), {c.case.cohort: c.verifier}
     )
     assert (await restarted.poll_once(asyncio.Event()))["entries_ready"] == 1
-    assert tuple(c.remote.reads) == reads
+    assert tuple(c.remote.reads) == reads and tuple(c.remote.heads) == heads
+    receipt_path = c.verifier._path(c.certificate)
+    original_receipt = receipt_path.read_bytes()
+    receipt_path.unlink()
+    assert (await restarted.poll_once(asyncio.Event()))["entries_ready"] == 1
+    assert receipt_path.read_bytes() == original_receipt and tuple(c.remote.reads) == reads
+    heads = tuple(c.remote.heads)
+    # Background readiness confers no freshness or settlement authority. The
+    # final native consumer must still detect a changed remote generation.
+    key = next(iter(c.remote.etags))
+    c.remote.etags[key] = "changed-generation"
+    result = await restarted.poll_once(asyncio.Event())
+    assert result["entries_ready"] == 1 and result["entries_pending"] == 0
+    assert result["scoring_authorized"] is result["chain_submission_authorized"] is False
+    assert tuple(c.remote.reads) == reads and tuple(c.remote.heads) == heads
+    with pytest.raises(LegacyModelStorageRepairRequired):
+        await c.verifier.ensure_all((c.participant,), (c.certificate,))
+    # Damaged completion metadata remains pending; advisory polling must not
+    # silently rebuild or fetch payloads to make that record ready.
+    c.verifier._path(c.certificate).write_bytes(b"{broken")
+    heads = tuple(c.remote.heads)
+    result = await restarted.poll_once(asyncio.Event())
+    assert result["entries_ready"] == 0 and result["entries_pending"] == 1
+    assert tuple(c.remote.reads) == reads and tuple(c.remote.heads) == heads
 
 
 async def test_compact_coverage_replays_original_legacy_acceptance_without_payload_reads(

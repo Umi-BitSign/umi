@@ -41,6 +41,60 @@ def test_standalone_client_never_discovers_or_upgrades_endpoint(
     assert calls == [(manifest, tmp_path)]
 
 
+def test_model_client_reexecs_supported_homebrew_python_before_manifest(monkeypatch):
+    examined = []
+    monkeypatch.setattr(upgrade.shutil, "which", lambda name: name)
+
+    def probe(arguments, **kwargs):
+        examined.append((arguments[0], kwargs["timeout"]))
+        return subprocess.CompletedProcess(arguments, 0 if "3.12" in arguments[0] else 1)
+
+    monkeypatch.setattr(upgrade.subprocess, "run", probe)
+
+    class Reexecuted(Exception):
+        pass
+
+    def reexec(path, arguments):
+        assert path == "/opt/homebrew/bin/python3.12"
+        assert arguments[:3] == [path, "-I", "-B"]
+        raise Reexecuted
+
+    monkeypatch.setattr(upgrade.os, "execv", reexec)
+    with pytest.raises(Reexecuted):
+        upgrade.ensure_model_client_python(
+            running_version=(3, 9),
+            candidate_paths=("/usr/bin/python3", "/opt/homebrew/bin/python3.12"),
+        )
+    assert examined == [("/usr/bin/python3", 5), ("/opt/homebrew/bin/python3.12", 5)]
+
+
+def test_model_client_supported_python_skips_discovery(monkeypatch):
+    monkeypatch.setattr(
+        upgrade.shutil, "which", lambda *_: pytest.fail("supported Python was probed")
+    )
+    upgrade.ensure_model_client_python(running_version=(3, 12))
+
+
+def test_model_client_without_supported_interpreter_gives_actionable_error(monkeypatch):
+    monkeypatch.setattr(upgrade.shutil, "which", lambda *_: None)
+    with pytest.raises(ValueError, match="UMI_MODEL_CLIENT_PYTHON"):
+        upgrade.ensure_model_client_python(running_version=(3, 9), candidate_paths=("python3.12",))
+
+
+def test_model_client_python_handoff_precedes_manifest_read(monkeypatch):
+    class Reexecuted(Exception):
+        pass
+
+    def handoff():
+        raise Reexecuted
+
+    monkeypatch.setattr(upgrade, "ensure_model_client_python", handoff)
+    monkeypatch.setattr(upgrade, "fetch", lambda *_: pytest.fail("manifest fetched twice"))
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--install-model-client"])
+    with pytest.raises(Reexecuted):
+        upgrade._main()
+
+
 def test_client_dry_run_leaves_files_and_services_untouched(tmp_path, monkeypatch, capsys):
     manifest = _manifest()
     responses = iter((upgrade.canonical(manifest), upgrade.canonical(_status(manifest))))
@@ -61,7 +115,10 @@ def test_client_dry_run_leaves_files_and_services_untouched(tmp_path, monkeypatc
         ],
     )
     upgrade.main()
-    assert json.loads(capsys.readouterr().out)["endpoint_service_unchanged"]
+    report = json.loads(capsys.readouterr().out)
+    assert report["endpoint_service_unchanged"]
+    assert report["installer_python"] == sys.executable
+    assert report["installer_python_version"]
     assert not (tmp_path / "client").exists()
 
 

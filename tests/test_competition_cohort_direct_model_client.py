@@ -128,6 +128,8 @@ async def test_part_upload_stops_at_response_byte_bound(delivery):
     "first_fault",
     [
         "expired_generation",
+        "expired_at_completion",
+        "completion_response_lost",
         "read_timeout",
         "write_timeout",
         "rate_limit",
@@ -189,6 +191,26 @@ async def test_direct_upload_bypasses_coordinator_payload_disk_and_enrolls(
         policy=h.intake.policy,
         new_attempt_id=lambda: next(attempt_ids),
     )
+    original_complete = multipart.complete
+    completion_failed = False
+
+    async def complete_with_failure(*args, **kwargs):
+        nonlocal completion_failed
+        if not completion_failed and first_fault in {
+            "expired_at_completion",
+            "completion_response_lost",
+        }:
+            completion_failed = True
+            if first_fault == "completion_response_lost":
+                await original_complete(*args, **kwargs)
+                raise OSError("private provider completion response lost")
+            multipart.uploads.clear()
+            multipart.parts.clear()
+            current_time[0] += 31_000
+            raise OSError("provider generation expired before completion")
+        return await original_complete(*args, **kwargs)
+
+    monkeypatch.setattr(multipart, "complete", complete_with_failure)
     app = FastAPI()
     app.include_router(
         cohort_routes(h.intake, h.capture, maximum_body_bytes=4 * 1024**2, models=owner)
@@ -231,7 +253,10 @@ async def test_direct_upload_bypasses_coordinator_payload_disk_and_enrolls(
                 # The provider accepted a part, but the process lost its response.
                 multipart.parts[int(request.url.params["partNumber"])] = await request.aread()
                 raise asyncio.CancelledError
-            return httpx.Response({"rate_limit": 429, "busy": 503, "expired_url": 403}[first_fault])
+            if first_fault not in {"expired_at_completion", "completion_response_lost"}:
+                return httpx.Response(
+                    {"rate_limit": 429, "busy": 503, "expired_url": 403}[first_fault]
+                )
         number = int(request.url.params["partNumber"])
         data = await request.aread()
         multipart.parts[number] = data
@@ -296,12 +321,19 @@ async def test_direct_upload_bypasses_coordinator_payload_disk_and_enrolls(
 
     assert receipt.status == "pending_attestation"
     assert retry_receipt == receipt
-    assert multipart.creates == (2 if first_fault == "expired_generation" else 1)
+    assert multipart.creates == (
+        2 if first_fault in {"expired_generation", "expired_at_completion"} else 1
+    )
     assert discovered == [h.cohort] * (3 if first_fault == "cancel" else 2)
     assert put_requests == uploaded_parts
     assert "private capability must not be logged" not in str(events)
     assert "X-Amz-Signature" not in str(events)
-    if first_fault not in {"expired_generation", "cancel"}:
+    if first_fault not in {
+        "expired_generation",
+        "expired_at_completion",
+        "completion_response_lost",
+        "cancel",
+    }:
         assert any(event.get("status") == "model_delivery_retry" for event in events)
     assert multipart.complete_bytes == b"".join(
         (h.source / record.path).read_bytes()

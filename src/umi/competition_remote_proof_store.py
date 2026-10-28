@@ -11,14 +11,15 @@ import json
 from collections import OrderedDict
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 from threading import Condition, Event, RLock
 from typing import Annotated, Literal
 
 from pydantic import Field, model_serializer, model_validator
 
-from .competition_evidence_codec import MAX_EVIDENCE_BYTES, checked_digest
+from .competition_evidence_codec import MAX_PROOF_OBJECT_BYTES, checked_digest
+from .competition_remote_proof_generation import install_generation, validate_generation
 from .competition_round_journal import RoundJournal
 from .competition_transport_verification import TransferProgress
 from .open_competition import digest
@@ -27,8 +28,8 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .r2_evidence import EvidenceObjectHead, R2EvidenceClient, r2_evidence_connection_scope
 from .r2_sigv4 import R2SigV4, load_r2_credentials
 
-MAX_PROOF_OBJECT_BYTES = 2 * MAX_EVIDENCE_BYTES + 1024
-PROOF_PUBLICATION_WORKERS = 4
+PROOF_PUBLICATION_WORKERS = 8
+MAX_ACTIVE_PROOF_PUBLICATION_BYTES = 2 * MAX_PROOF_OBJECT_BYTES
 
 
 class ProofArchiveR2Config(StrictProtocolModel):
@@ -41,11 +42,25 @@ class ProofArchiveR2Config(StrictProtocolModel):
     maximum_index_bytes: Annotated[int, Field(ge=1024**2, le=16 * 1024**3)]
     timeout_seconds: Annotated[int, Field(ge=1, le=300)] = 60
     legacy_read_through: bool = False
+    source_release_batch_records: Annotated[int, Field(ge=0, le=4096)] = 0
+    archive_backfill_batch_frames: Annotated[int, Field(ge=0, le=256)] = 0
+    archive_release_batch_files: Annotated[int, Field(ge=0, le=4096)] = 0
+    archive_release_consumer_abi: Literal["umi-proof-read-release-lease/1"] | None = None
 
     @model_validator(mode="after")
     def legacy_selection(self):
         if self.legacy_read_through and self.schema_ != "umi-r2-proof-archive/2":
             raise ValueError("retained local proof reads require explicit archive/2 selection")
+        if self.source_release_batch_records and (not self.legacy_read_through or self.read_only):
+            raise ValueError("source release requires writable retained-local archive/2 selection")
+        if (self.archive_backfill_batch_frames or self.archive_release_batch_files) and (
+            not self.legacy_read_through or self.read_only
+        ):
+            raise ValueError("online archive migration requires writable retained-local archive/2")
+        if self.archive_release_batch_files and not self.archive_backfill_batch_frames:
+            raise ValueError("online archive release requires its bounded backfill cursor")
+        if self.archive_release_batch_files and self.archive_release_consumer_abi is None:
+            raise ValueError("online release requires explicit selected-consumer lease ABI")
         return self
 
     @model_serializer(mode="wrap")
@@ -53,6 +68,15 @@ class ProofArchiveR2Config(StrictProtocolModel):
         value = handler(self)
         if not self.legacy_read_through:
             value.pop("legacy_read_through", None)
+        if not self.source_release_batch_records:
+            value.pop("source_release_batch_records", None)
+        for name in (
+            "archive_backfill_batch_frames",
+            "archive_release_batch_files",
+            "archive_release_consumer_abi",
+        ):
+            if not getattr(self, name):
+                value.pop(name, None)
         return value
 
 
@@ -167,6 +191,7 @@ class _ProofIndex(RoundJournal):
             (1, "umi-r2-proof-completion/1", digest(json.loads(binding[0][0])), completed)
         ]:
             raise ValueError("remote proof completion owner damaged; restore original metadata")
+        validate_generation(db, digest(json.loads(binding[0][0])))
         # This private capability does not enable reservation-generation semantics.
         return 0
 
@@ -277,6 +302,7 @@ class RemoteProofStore:
             maximum_record_bytes=64 * 1024,
         )
         self.journal.migrate_completions(self.namespace_sha256)
+        install_generation(self.journal, self.namespace_sha256)
         self.receipt_source = None
         if receipt_source_directory is not None:
             self.receipt_source = _ProofIndex(
@@ -331,29 +357,33 @@ class RemoteProofStore:
     def _retained(self, key: str) -> RemoteProofReference | None:
         journal = self.receipt_source or self.journal
         with journal.read_transaction() as db:
-            completed = self._completion(key, db)
-            try:
-                raw = self.journal.get_raw(
-                    "remote_proof_object", hashlib.sha256(key.encode()).hexdigest(), db=db
-                )
-                reference = None if raw is None else RemoteProofReference.model_validate_json(raw)
-            except (TypeError, ValueError) as error:
+            return self._retained_snapshot(key, db)
+
+    def _retained_snapshot(self, key: str, db) -> RemoteProofReference | None:
+        """Read completion and original receipt from one caller-owned snapshot."""
+        completed = self._completion(key, db)
+        try:
+            raw = self.journal.get_raw(
+                "remote_proof_object", hashlib.sha256(key.encode()).hexdigest(), db=db
+            )
+            reference = None if raw is None else RemoteProofReference.model_validate_json(raw)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "remote proof replication receipt damaged; "
+                "explicit original-generation repair required"
+            ) from error
+        if completed is None:
+            if reference is not None:
                 raise ValueError(
-                    "remote proof replication receipt damaged; "
-                    "explicit original-generation repair required"
-                ) from error
-            if completed is None:
-                if reference is not None:
-                    raise ValueError(
-                        "remote proof completion ledger missing; restore original metadata"
-                    )
-                return None
-            if reference != completed:
-                raise ValueError(
-                    "remote proof replication receipt is missing or damaged; "
-                    "explicit original-generation repair required"
+                    "remote proof completion ledger missing; restore original metadata"
                 )
-            return completed
+            return None
+        if reference != completed:
+            raise ValueError(
+                "remote proof replication receipt is missing or damaged; "
+                "explicit original-generation repair required"
+            )
+        return completed
 
     def _remember(self, reference: RemoteProofReference) -> None:
         if self.receipt_source is not None:
@@ -386,20 +416,55 @@ class RemoteProofStore:
         This attests completed replication, not a new remote availability probe. Any
         fetch still checks the observed object generation and authenticates its bytes.
         """
-        reference = RemoteProofReference.model_validate(value)
-        if reference.namespace_sha256 != self.namespace_sha256 or not reference.key.startswith(
-            self.config.prefix + "/"
+        with self.reference_snapshot() as validate:
+            return validate(value)
+
+    @contextmanager
+    def reference_snapshot(self):
+        """Check at most 256 references in fresh, bounded receipt snapshots.
+
+        Callers already holding source metadata open these afterward, and close
+        them before any finality check. Every later batch reopens both owners;
+        receipt/schema/hold facts never become cross-batch cached verdicts.
+        """
+        owner = self.receipt_source or self.journal
+        with (
+            owner.read_transaction() as db,
+            (
+                self.journal.read_transaction()
+                if self.receipt_source is not None
+                else nullcontext(db)
+            ) as damage_db,
         ):
-            raise ValueError("remote proof reference selects another authenticated namespace")
-        if self._retained(reference.key) != reference:
-            raise ValueError("remote proof replication receipt is missing or damaged")
-        for journal in (self.journal, self.receipt_source):
-            if (
-                journal is not None
-                and journal.get("remote_proof_damage", self._damage_key(reference)) is not None
-            ):
-                raise ValueError("remote proof requires explicit original-generation repair")
-        return reference
+            active, remaining = True, 256
+
+            def validate(value):
+                nonlocal remaining
+                if not active or remaining == 0:
+                    raise ValueError("remote proof receipt snapshot is closed or exhausted")
+                remaining -= 1
+                reference = RemoteProofReference.model_validate(value)
+                if (
+                    reference.namespace_sha256 != self.namespace_sha256
+                    or not reference.key.startswith(self.config.prefix + "/")
+                ):
+                    raise ValueError(
+                        "remote proof reference selects another authenticated namespace"
+                    )
+                if self._retained_snapshot(reference.key, db) != reference:
+                    raise ValueError("remote proof replication receipt is missing or damaged")
+                key = self._damage_key(reference)
+                if owner.get("remote_proof_damage", key, db=db) is not None or (
+                    self.receipt_source is not None
+                    and self.journal.get("remote_proof_damage", key, db=damage_db) is not None
+                ):
+                    raise ValueError("remote proof requires explicit original-generation repair")
+                return reference
+
+            try:
+                yield validate
+            finally:
+                active = False
 
     def repair_reference(self, value: dict) -> None:
         """Requalify the exact original generation; never adopt changed bytes.
@@ -501,16 +566,20 @@ class RemoteProofStore:
 
     @contextmanager
     def _publication_slot(self, key, size, progress):
-        # The existing maximum object size also bounds aggregate active bytes.
-        # One maximum supported object always fits; admission waits, never drops it.
+        # Two maximum supported objects or eight ordinary smaller objects can
+        # share the bounded active-byte window. Admission waits, never drops.
         waited = False
         with self._publication_condition:
-            while (
-                key in self._publishing_keys
-                or len(self._publishing_keys) >= PROOF_PUBLICATION_WORKERS
-                or self._publishing_bytes + size > MAX_PROOF_OBJECT_BYTES
-            ):
-                progress.emit("waiting", reason="bounded_proof_publication_admission")
+            while True:
+                if key in self._publishing_keys:
+                    reason = "proof_publication_same_key_wait"
+                elif len(self._publishing_keys) >= PROOF_PUBLICATION_WORKERS:
+                    reason = "proof_publication_worker_limit_wait"
+                elif self._publishing_bytes + size > MAX_ACTIVE_PROOF_PUBLICATION_BYTES:
+                    reason = "proof_publication_byte_budget_wait"
+                else:
+                    break
+                progress.emit("waiting", reason=reason)
                 waited = True
                 self._publication_condition.wait(timeout=1)
             self._publishing_keys.add(key)
@@ -554,12 +623,15 @@ class RemoteProofStore:
                                 "encoded proof object differs from its content identity"
                             )
                         progress.advance(len(raw), restored=restored)
+                        progress.advance_operations(1, restored=restored)
             except BaseException:
                 stop.set()
                 raise
 
         with TransferProgress(
-            "proof_graph_replication", sum(len(raw) for raw in objects.values())
+            "proof_graph_replication",
+            sum(len(raw) for raw in objects.values()),
+            total_operations=len(objects),
         ) as progress:
             if len(lanes) == 1:
                 publish_lane(lanes[0])

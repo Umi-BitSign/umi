@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import logging
 import os
 import shutil
 import subprocess
@@ -19,6 +20,7 @@ from umi.competition_cohort_model_acceptance import ModelArtifactReviewInputs
 from umi.competition_cohort_model_reservations import (
     ModelAllocationRepairRequired,
     repair_model_allocation_index,
+    repair_model_allocation_verification,
 )
 from umi.competition_cohort_model_static_review import StandingModelReviewPolicy
 from umi.competition_cohort_model_upload import (
@@ -28,6 +30,7 @@ from umi.competition_cohort_model_upload import (
     PendingModelReview,
 )
 from umi.competition_cohort_model_upload_http import model_upload_routes
+from umi.competition_upload_record_versions import UploadRecordRepairRequired
 from umi.open_competition import digest, sign_object
 from umi.private_files import lock_private_file, publish_private_model
 from umi.protocol import canonical_json_bytes
@@ -103,6 +106,35 @@ def signed_chunk(key, index, data, offset=0, signer="Alice"):
     )
     signature = sign_object(chunk, wallet(signer))
     return chunk, signature
+
+
+def request_with_bundle(request, model):
+    sub = request.signed_submission.submission.model_copy(
+        update={"model_bundle": model, "model_revision": digest(model)}
+    )
+    signed = type(request.signed_submission)(
+        submission=sub, signature=sign_object(sub, wallet("Alice"))
+    )
+    body = request.consent.consent.model_copy(update={"submission_sha256": digest(sub)})
+    consent = type(request.consent)(consent=body, signature=sign_object(body, wallet("Alice")))
+    return type(request)(signed_submission=signed, consent=consent)
+
+
+def test_new_reservation_rejects_unsupported_interface_before_finality_or_bytes(delivery):
+    sub = delivery.request.signed_submission.submission
+    model = sub.model_bundle.model_copy(
+        update={
+            "files": tuple(
+                f.model_copy(update={"path": "inference.sh"}) if f.role == "inference" else f
+                for f in sub.model_bundle.files
+            )
+        }
+    )
+    request = request_with_bundle(delivery.request, model)
+    with pytest.raises(ValueError, match="declared Python inference entrypoint"):
+        # No usable finality is supplied: new reservation must reject the
+        # interface before opening intake state or retaining an allocation.
+        delivery.owner.reserve(request, None)
 
 
 def chunk_headers(key, index, data, offset=0):
@@ -395,6 +427,99 @@ def test_capacity_reservation_can_be_increased_without_state_reset(delivery):
     assert h.owner.retained(key) == h.request
 
 
+def test_allocation_bundle_facts_reused_for_polls_and_restart(delivery, monkeypatch):
+    from umi import competition_cohort_model_reservations as allocations
+
+    h = delivery
+    h.owner.reserve(h.request, capture_at(210))
+    expected = h.owner.allocations.snapshot()
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("completed reservation bundle validation repeated")
+
+    monkeypatch.setattr(allocations.ModelBundle, "model_validate_json", forbidden)
+    for _ in range(3):
+        assert h.owner.allocations.snapshot() == expected
+    resumed = CohortModelUploads(h.owner.config, h.intake, h.owner.archive)
+    assert resumed.allocations.snapshot() == expected
+    assert resumed.reserve(h.request, capture_at(210)) == digest(h.request)
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+def test_completed_allocation_verification_damage_requires_repair(
+    delivery, monkeypatch, caplog, damage
+):
+    from umi import competition_cohort_model_reservations as allocations
+
+    h = delivery
+    h.owner.reserve(h.request, capture_at(210))
+    reuse = h.owner.allocations.versions._reuse["umi-model-allocation-bundle-facts/1"]
+    (receipt,) = reuse.directory.glob("*.json")
+    if damage == "missing":
+        receipt.unlink()
+    else:
+        receipt.write_bytes(b"{}")
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("damaged completed verification was silently discarded")
+
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
+    with monkeypatch.context() as guarded:
+        guarded.setattr(allocations.ModelBundle, "model_validate_json", forbidden)
+        with pytest.raises(ModelAllocationRepairRequired, match="requires repair"):
+            h.owner.allocations.snapshot()
+    assert "repair_required" in caplog.text
+    reports = []
+    repaired = repair_model_allocation_verification(h.owner.journal, report=reports.append)
+    assert repaired == {"status": "completed", "verification_receipts_repaired": 1}
+    assert any(
+        r["stage"] == "upload_record_verification_repair" and r["status"] == "completed"
+        for r in reports
+    )
+    monkeypatch.setattr(allocations.ModelBundle, "model_validate_json", forbidden)
+    assert h.owner.allocations.snapshot()["models"] == 1
+
+
+def test_changed_current_bundle_cannot_reuse_old_allocation_facts(delivery):
+    h = delivery
+    h.owner.reserve(h.request, capture_at(210))
+    model = h.request.signed_submission.submission.model_revision
+    bundle = h.request.signed_submission.submission.model_bundle.model_copy(
+        update={"license_id": "changed"}
+    )
+    with h.owner.journal.transaction() as db:
+        db.execute(
+            "UPDATE records SET body=? WHERE kind='bundle' AND id=?",
+            (canonical_json_bytes(bundle), model),
+        )
+    with pytest.raises(ModelAllocationRepairRequired, match="original bundle changed"):
+        h.owner.allocations.snapshot()
+
+
+def test_completed_allocation_check_survives_lost_acknowledgement(delivery, monkeypatch):
+    from umi import competition_cohort_model_reservations as allocations
+
+    h = delivery
+    verifier = h.owner.allocations._bundle_verification
+    original = verifier.remember
+
+    def lost_ack(*args):
+        original(*args)
+        raise OSError("completion acknowledgement lost")
+
+    monkeypatch.setattr(verifier, "remember", lost_ack)
+    with pytest.raises(OSError, match="acknowledgement lost"):
+        h.owner.reserve(h.request, capture_at(210))
+    monkeypatch.setattr(verifier, "remember", original)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("completed static check repeated after lost acknowledgement")
+
+    monkeypatch.setattr(allocations.ModelBundle, "model_validate_json", forbidden)
+    h.owner.reserve(h.request, capture_at(210))
+    assert h.owner.allocations.snapshot()["models"] == 1
+
+
 def test_links_and_concurrent_writers_cannot_replace_originals(delivery, tmp_path):
     h = delivery
     key = h.owner.reserve(h.request, capture_at(210))
@@ -646,7 +771,7 @@ def test_retained_upload_decode_reads_current_journal_fence(retained_decode, cha
             ).fetchone()[0]
             db.execute("UPDATE records SET body=? WHERE kind='upload' AND id=?", (raw + b" ", key))
     for _ in range(2):
-        with pytest.raises((ValueError, FileNotFoundError)):
+        with pytest.raises((ValueError, FileNotFoundError, UploadRecordRepairRequired)):
             h.owner.retained(key)
     # Replacement schema failures/identity failures never enter reuse.
     assert len(calls) == (3 if change == "replace" else 1)
@@ -953,3 +1078,56 @@ def test_distinct_signed_requests_share_one_charge_and_cannot_inherit_a_refund(d
     with pytest.raises(OSError, match="fenced"):
         owner.reserve(request_at(212), capture_at(212))
     assert owner.journal.keys("upload") == sorted([original_key, second_key])
+
+
+@pytest.mark.parametrize("empty_license", [False, True])
+def test_legacy_empty_document_hold_is_repaired_without_changing_original_hold(
+    delivery, tmp_path, empty_license
+):
+    from umi.competition_artifacts import preserve_bundle
+    from umi.open_competition import BundleFile
+
+    h = delivery
+    bundle = h.request.signed_submission.submission.model_bundle
+    empty = BundleFile(
+        path="zz-empty.txt", role="provenance", size_bytes=0, sha256=hashlib.sha256(b"").hexdigest()
+    )
+    (h.source / empty.path).write_bytes(b"")
+    bundle = bundle.model_copy(update={"files": (*bundle.files, empty)})
+    if empty_license:
+        files = []
+        for record in bundle.files:
+            if record.role == "license":
+                (h.source / record.path).write_bytes(b"")
+                record = record.model_copy(
+                    update={"size_bytes": 0, "sha256": hashlib.sha256(b"").hexdigest()}
+                )
+            files.append(record)
+        bundle = bundle.model_copy(update={"files": tuple(files)})
+    preserve_bundle(bundle, h.source, h.owner.archive, h.intake.policy)
+    standing = standing_review_policy(h)
+    owner = CohortModelUploads(
+        h.owner.config.model_copy(
+            update={
+                "directory": str(tmp_path / "empty-hold-owner"),
+                "admission_reviews_directory": str(tmp_path / "empty-hold-reviews"),
+                "standing_review_policy": standing,
+            }
+        ),
+        h.intake,
+        h.owner.archive,
+    )
+    key = digest(bundle) + "-" + digest(standing)
+    hold = {
+        "schema": "umi-standing-model-artifact-review-hold/1",
+        "model_sha256": digest(bundle),
+        "review_policy_sha256": digest(standing),
+        "reason_code": "review_document_size_outside_policy",
+    }
+    owner.journal.put_many((("review_hold", key, hold),))
+    expected = ("held", "declared_license_document_missing") if empty_license else ("ready", "")
+    assert owner._ensure_review(bundle) == expected
+    assert owner.journal.get("review_hold", key) == hold
+    reopened = CohortModelUploads(owner.config, h.intake, owner.archive)
+    assert reopened._ensure_review(bundle, allow_local=empty_license) == expected
+    assert len(owner.journal.keys("review_hold")) == (2 if empty_license else 1)

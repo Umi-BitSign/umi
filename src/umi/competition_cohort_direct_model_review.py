@@ -73,6 +73,7 @@ class DirectModelReviewSourceConfig(StrictProtocolModel):
     r2_bucket: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")]
     standing_review_policy: StandingModelReviewPolicy
     r2_timeout_seconds: Annotated[int, Field(ge=1, le=300)] = 60
+    verification_directory: Directory | None = None
     maximum_materialized_bytes: Annotated[int, Field(ge=1024**2, le=R2_MAXIMUM_MULTIPART_BYTES)] = (
         64 * 1024**3
     )
@@ -93,6 +94,8 @@ class DirectModelReviewSourceConfig(StrictProtocolModel):
         value = handler(self)
         if self.materialization_boot_disk_cache is None:
             value.pop("materialization_boot_disk_cache", None)
+        if self.verification_directory is None:
+            value.pop("verification_directory", None)
         return value
 
     @model_validator(mode="after")
@@ -112,10 +115,19 @@ class DirectModelReviewSourceConfig(StrictProtocolModel):
             for path in self.materialization_protected_roots
         ):
             raise ValueError("boot-disk model cache overlaps a protected root")
+        if self.verification_directory is not None:
+            root = Path(self.verification_directory)
+            if not disjoint(root, Path(self.r2_credentials_file)) or (
+                boot is not None and not disjoint(root, Path(boot.directory))
+            ):
+                raise ValueError("direct model verification state overlaps credentials or cache")
         return self
 
     def stores(self) -> tuple[Path, ...]:
-        return (Path(self.r2_credentials_file),)
+        return (
+            Path(self.r2_credentials_file),
+            *((Path(self.verification_directory),) if self.verification_directory else ()),
+        )
 
 
 class DirectModelMaterialization(StrictProtocolModel):
@@ -179,6 +191,8 @@ class DirectModelArtifactReviewer:
                 timeout_seconds=self.config.r2_timeout_seconds,
             )
         self.multipart = multipart
+        if self.config.verification_directory is not None:
+            verification_root = Path(self.config.verification_directory)
         if verification_root is not None:
             private_path(str(verification_root))
         self.verification_root = verification_root
@@ -245,7 +259,7 @@ class DirectModelArtifactReviewer:
         )
         for record in bundle.files:
             if record.path in documents and not (
-                1 <= record.size_bytes <= standing.maximum_document_bytes
+                0 <= record.size_bytes <= standing.maximum_document_bytes
             ):
                 raise StaticModelReviewHeld("review_document_size_outside_policy")
         if (
@@ -289,6 +303,14 @@ class DirectModelArtifactReviewer:
         inputs, _ = await self.verify(request)
         return inputs
 
+    async def available(self, request: ModelReviewRequest) -> None:
+        """Availability for an authenticated source; execution still verifies its bytes."""
+        _, payload, key = self._source(request, preserved=True)
+        async with r2_connection_scope(self.multipart):
+            head = await self.multipart.head(key)
+        if head is None or head.size_bytes != payload.total_bytes:
+            raise OSError("direct model materialization object is unavailable")
+
     def verify_materialization_filesystem(self, root: Path):
         """Select legacy filesystem isolation or an explicit bounded shared cache."""
 
@@ -321,7 +343,7 @@ class DirectModelArtifactReviewer:
 
     async def materialize(self, request: ModelReviewRequest, archive: Path) -> Path:
         """Transfer into one bounded cache and preserve remote results on eviction."""
-        _, payload, _ = self._source(request, preserved=True)
+        bundle, payload, _ = self._source(request, preserved=True)
         async with self.materialization_serial, r2_connection_scope(self.multipart):
             boot = self.config.materialization_boot_disk_cache
             cache = (
@@ -334,7 +356,11 @@ class DirectModelArtifactReviewer:
             if cache is not None:
                 self.verify_materialization_filesystem(Path(archive).parent)
             with (
-                TransferProgress("model_materialization", payload.total_bytes) as progress,
+                TransferProgress(
+                    "model_materialization",
+                    payload.total_bytes,
+                    total_operations=len(bundle.files) + 1,
+                ) as progress,
                 cache.allocation_lease() if cache is not None else nullcontext(),
             ):
                 return await self._materialize(request, archive, progress, cache=cache)
@@ -361,7 +387,7 @@ class DirectModelArtifactReviewer:
         self.verify_materialization_filesystem(archive.parent)
         if cache is not None:
             with TransferProgress("model_cache_space_preparation", 1, unit="objects") as space:
-                cache.prepare(bundle)
+                cache.prepare(bundle, archive=archive)
                 space.advance(1)
         source = remote_identity(self.multipart, object_key, head)
         document_paths = tuple(
@@ -382,6 +408,7 @@ class DirectModelArtifactReviewer:
         if archive.exists():
             if await self._materialized(request, archive):
                 progress.advance(payload.total_bytes, restored=True)
+                progress.advance_operations(len(bundle.files) + 1, restored=True)
                 return archive / digest(bundle)
             if not await self.resumable(request, archive):
                 raise ValueError("direct model scratch archive differs")
@@ -404,6 +431,7 @@ class DirectModelArtifactReviewer:
                 ),
                 reserve_bytes=self.config.materialization_free_space_reserve_bytes,
                 check_write=None if cache is None else cache.check_write,
+                check_file_write=None if cache is None else cache.check_file_write,
             )
             if await self.multipart.head(object_key) != head:
                 raise ValueError("direct model object changed during materialization")
@@ -437,6 +465,7 @@ class DirectModelArtifactReviewer:
             )
             await run_owned_thread(publish_private_model, archive / "materialization.json", marker)
             (archive / "materialization-pending.json").unlink(missing_ok=True)
+            progress.advance_operations(1)
             return target
         except (OSError, asyncio.CancelledError):
             progress.emit("retrying", reason="materialization_retains_completed_files")
@@ -446,9 +475,28 @@ class DirectModelArtifactReviewer:
             raise
 
     async def resumable(self, request, archive):
+        """Locate interrupted or completed slots without rereading model bytes.
+
+        Completion removes the pending marker. The completed receipt must still
+        identify a reusable slot; the ordinary materialized reader subsequently
+        authenticates its retained file identities before invocation.
+        """
         try:
-            return await run_owned_thread(
+            if await run_owned_thread(
                 pending_materialization, archive, self.cache_identity(request)
+            ):
+                return True
+        except FileNotFoundError:
+            pass
+        expected = self._materialization_record(request)
+        try:
+            return (
+                await run_owned_thread(
+                    read_private_model,
+                    Path(archive) / "materialization.json",
+                    DirectModelMaterialization,
+                )
+                == expected
             )
         except FileNotFoundError:
             return False
@@ -476,10 +524,9 @@ class DirectModelArtifactReviewer:
                 progress.emit("repair_required", reason="model_cache_missing_or_damaged")
             return retained
 
-    async def _materialized(self, request, archive):
-        request = ModelReviewRequest.model_validate_json(canonical_json_bytes(request))
+    def _materialization_record(self, request):
         bundle, payload, object_key = self._source(request, preserved=True)
-        expected = DirectModelMaterialization(
+        return DirectModelMaterialization(
             schema="umi-direct-model-materialization/2",
             review_request_sha256=digest(request),
             source_object_key_sha256=sha256_hex(object_key.encode()),
@@ -487,6 +534,11 @@ class DirectModelArtifactReviewer:
             payload_sha256=payload.payload_sha256,
             total_bytes=payload.total_bytes,
         )
+
+    async def _materialized(self, request, archive):
+        request = ModelReviewRequest.model_validate_json(canonical_json_bytes(request))
+        bundle = request.record.request.signed_submission.submission.model_bundle
+        expected = self._materialization_record(request)
         try:
             retained = await run_owned_thread(
                 read_private_model,

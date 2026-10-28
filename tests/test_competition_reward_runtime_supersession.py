@@ -35,6 +35,10 @@ def profile(config, version):
             "48225f3199bf317966d0214588bc45fb49c28c3e7bd510293bb4da7d6aea224b",
             "6a972693ae9580541225bd37696ac2fee26b8ae9",
         ),
+        483: (
+            "1016a0f8c23aa1cfb88a37c723fd0440bfe7b8141490b77ae793dfd7be7540eb",
+            "b335b5ef339ceb4366e5452d24c22978821c595f",
+        ),
     }[version]
     return RewardEligibilityRuntime(
         schema="umi-reward-eligibility-runtime/2",
@@ -49,8 +53,8 @@ def signed(body):
     return SignedRewardRuntimeAdoption(adoption=body, signatures=signatures(body))
 
 
-@pytest.fixture
-def superseded(inputs):
+@pytest.fixture(params=[(479, 481), (481, 483)])
+def superseded(inputs, request):
     config = inputs.value
     first = config.series.recovery.authority.issued_at_block + 10
     old = RewardRuntimeAdoption(
@@ -60,7 +64,7 @@ def superseded(inputs):
         policy_sha256=digest(config.policy),
         authority_sha256=digest(config.series.recovery.authority),
         original_runtime_profile_sha256=digest(config.eligibility),
-        effective_profile=profile(config, 479),
+        effective_profile=profile(config, request.param[0]),
         first_block=first,
         last_block=first + 1000,
         issued_at_block=first,
@@ -73,7 +77,7 @@ def superseded(inputs):
             old.model_copy(
                 update={
                     "schema_": "umi-standing-reward-runtime-adoption/2",
-                    "effective_profile": profile(config, 481),
+                    "effective_profile": profile(config, request.param[1]),
                     "first_block": first + 100,
                     "issued_at_block": first + 200,
                     "revision": 2,
@@ -271,3 +275,54 @@ def test_successor_predecessor_upgrade_preserves_each_signed_series_and_clocks(i
         update={"predecessor_runtime_adoptions": successor.predecessor_runtime_adoptions}
     )
     assert canonical_json_bytes(restored) == canonical_json_bytes(successor)
+
+
+def test_discovery_supersedes_current_scope_then_continues_without_rewriting_old_proofs(superseded):
+    config, old, target, selection = superseded
+    from .test_competition_reward_runtime_discovery import discovered_profile
+
+    automatic = target.model_copy(
+        update={
+            "effective_profile": discovered_profile(),
+            "first_block": target.first_block,
+            "revision": target.revision + 1,
+            "issued_at_block": target.issued_at_block + 1,
+            "predecessor_adoption_sha256": digest(target),
+            "supersedes_adoption_sha256": digest(target),
+        }
+    )
+    continuation = automatic.model_copy(
+        update={
+            "schema_": "umi-standing-reward-runtime-adoption/1",
+            "first_block": target.last_block + 1,
+            "last_block": 2**53 - 1,
+            "revision": automatic.revision + 1,
+            "predecessor_adoption_sha256": digest(automatic),
+            "supersedes_adoption_sha256": None,
+        }
+    )
+    combined = selection.model_copy(
+        update={
+            "adoptions": (*selection.adoptions, signed(automatic), signed(continuation)),
+        }
+    )
+    original = selected_config(config, selection)
+    candidate = extend_boot_runtime_adoptions(original, combined)
+    native = select_boot_runtime(candidate)
+    assert native.selected(target.first_block) == (automatic.effective_profile, digest(automatic))
+    assert native.selected(2**53 - 1) == (continuation.effective_profile, digest(continuation))
+    for body in (old, target):
+        assert (
+            native.check(
+                block=target.first_block,
+                profile_sha256=digest(body.effective_profile),
+                adoption_sha256=digest(body),
+            )
+            == body.effective_profile
+        )
+    assert tuple(canonical_json_bytes(s) for s in candidate.runtime_adoptions.adoptions[:2]) == (
+        tuple(canonical_json_bytes(s) for s in selection.adoptions)
+    )
+    assert canonical_json_bytes(candidate.model_copy(update={"runtime_adoptions": selection})) == (
+        canonical_json_bytes(original)
+    )

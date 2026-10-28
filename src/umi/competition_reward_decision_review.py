@@ -13,7 +13,6 @@ from typing import Literal
 from pydantic import Field
 
 from .competition_cohort_model_award import ModelArtifactVerifier
-from .competition_cohort_reward_allocation import derive_effective_reward_allocation
 from .competition_cohort_reward_package import (
     DEFAULT_PACKAGE_BYTES,
     CohortRewardPackage,
@@ -33,6 +32,7 @@ from .competition_reward_decisions import (
     SignedRewardControlDecision,
     StandingRewardControlReader,
     effective_activation_decision,
+    original_activation_decision,
     verify_reward_decision_proposal,
     verify_reward_decisions,
 )
@@ -51,6 +51,7 @@ from .competition_reward_opportunity import (
     VerifiedRewardOpportunity,
     check_opportunity_claim,
     validate_opportunity,
+    verify_signed_early_release,
 )
 from .competition_reward_revision import validate_live_lock, validate_revision_clearance
 from .competition_reward_series_handoff import (
@@ -198,22 +199,39 @@ def review_reward_decision(
                     block=decision.observed_at_block,
                 )
         else:
-            certificate = validate_opportunity(previous_opportunity)
+            original = original_activation_decision(prefix, activation.cohort_sha256)
             prior = effective_activation_decision(
-                prefix, digest(series.cohorts[index - 1])
-            ).activation
-            assert prior is not None
-            check_opportunity_claim(
-                certificate, manifest=manifest, series=series, policy=policy, activation=prior
+                prefix,
+                digest(series.cohorts[index - 1]),
+                through_sequence=None if original is None else original.sequence - 1,
             )
-            if (
-                digest(certificate) != activation.prior_opportunity_sha256
-                or max(c.through_block for c in certificate.contributions)
-                > decision.observed_at_block
+            if prior is None:
+                raise ValueError("reward proposal lacks its signed predecessor")
+            if not verify_signed_early_release(
+                reader.reward_adoptions,
+                series=series,
+                policy=policy,
+                manifest=manifest,
+                predecessor=prior,
+                successor=activation,
+                current_block=decision.observed_at_block,
             ):
-                raise ValueError(
-                    "reward proposal changes prior opportunity or backdates its cutoff"
+                certificate = validate_opportunity(previous_opportunity)
+                check_opportunity_claim(
+                    certificate,
+                    manifest=manifest,
+                    series=series,
+                    policy=policy,
+                    activation=prior.activation,
                 )
+                if (
+                    digest(certificate) != activation.prior_opportunity_sha256
+                    or max(c.through_block for c in certificate.contributions)
+                    > decision.observed_at_block
+                ):
+                    raise ValueError(
+                        "reward proposal changes prior opportunity or backdates its cutoff"
+                    )
         if package is None or promotion_store is None:
             raise ValueError("reward activation requires native package and model replay")
         requirement = manifest.requirement(activation.cohort_sha256)
@@ -237,7 +255,7 @@ def review_reward_decision(
         if digest(allocation) != activation.allocation_sha256:
             raise ValueError("reward proposal allocation differs from native package replay")
         if activation.reward_adoption_sha256 is not None:
-            adoption = verify_reward_adoption(
+            verify_reward_adoption(
                 reader.reward_adoptions,
                 activation.reward_adoption_sha256,
                 series=series,
@@ -246,9 +264,6 @@ def review_reward_decision(
                 package=package,
                 current_block=decision.observed_at_block,
             )
-            effective = derive_effective_reward_allocation(package, adoption.parameters)
-            if digest(effective) != activation.effective_allocation_sha256:
-                raise ValueError("reward proposal differs from native effective allocation")
     intent = RewardDecisionIntent(
         schema="umi-reward-decision-intent/1",
         decision=decision,

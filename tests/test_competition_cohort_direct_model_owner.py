@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from types import SimpleNamespace
 
@@ -11,6 +12,7 @@ from umi.competition_cohort_direct_model_owner import (
     DirectModelUploadOwner,
     DirectModelUploadOwnerConfig,
     DirectModelUploadPending,
+    _copy_promotion_parts,
 )
 from umi.competition_cohort_direct_model_upload import (
     DirectModelPayload,
@@ -37,6 +39,7 @@ from umi.competition_cohort_model_acceptance import (
 from umi.competition_cohort_recovery import ModelDeliveryProfile
 from umi.competition_cohort_service_host import CohortModelPayloadRouter
 from umi.open_competition import digest, model_content_digest, sign_object
+from umi.private_files import publish_private_model
 from umi.protocol import canonical_json_bytes
 from umi.r2_sigv4 import R2Credentials, R2SigV4
 
@@ -552,6 +555,90 @@ async def test_poll_retains_terminal_verification_hold_without_rereading(direct)
 
 
 @pytest.mark.asyncio
+async def test_poll_reuses_review_file_after_restart_without_blocking_event_loop(
+    direct, tmp_path, monkeypatch, policy
+):
+    import threading
+
+    from umi import competition_model_review_file as review_file
+    from umi.competition_cohort_model_static_review import StandingModelReviewPolicy
+
+    standing = StandingModelReviewPolicy(
+        schema="umi-standing-model-artifact-review-policy/1",
+        competition_policy_sha256=digest(policy),
+        contribution_terms_sha256=policy.contribution_terms_sha256,
+        standing_approval_record_sha256="cd" * 32,
+        approved_by="fixture operator",
+        approved_at_utc="2026-10-23T00:00:00Z",
+        complete_declared_bundle_rights_approved=True,
+        licenses_and_notices_reviewed=True,
+        public_redistribution_and_evaluation_approved=True,
+    )
+
+    config = direct.owner.config.model_copy(
+        update={
+            "admission_reviews_directory": str(tmp_path / "reviews"),
+            "directory": str(tmp_path / "reviewed-direct"),
+            "standing_review_policy": standing,
+        }
+    )
+    direct.owner = DirectModelUploadOwner(
+        config,
+        direct.multipart,
+        authorize=direct.owner.authorize,
+        sign=direct.owner.sign,
+        policy=policy,
+    )
+    reservation = await direct.owner.reserve(
+        direct.request,
+        direct.payload,
+        now_unix_ms=1_800_000_000_000,
+    )
+    completed = await direct.owner.complete(
+        signed_completion(reservation, direct.payload.payload),
+        now_unix_ms=1_800_000_010_000,
+    )
+    await direct.owner.verify(completed.reservation_sha256, now_unix_ms=1_800_000_011_000)
+    model = direct.payload.payload.model_sha256
+    path = tmp_path / "reviews" / (model + ".json")
+    publish_private_model(
+        path,
+        ModelArtifactReviewInputs(
+            model_sha256=model,
+            rights_evidence={"license": "MIT"},
+            reconstruction_evidence={"complete": True},
+        ),
+    )
+    loop_thread = threading.get_ident()
+    original = review_file.read_private_model
+
+    def owned_read(*args, **kwargs):
+        assert threading.get_ident() != loop_thread
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(review_file, "read_private_model", owned_read)
+    assert (await direct.owner.poll_once(now_unix_ms=1_800_000_012_000))["reviews_ready"] == 1
+    reads = direct.multipart.read_calls
+    resumed = DirectModelUploadOwner(
+        config,
+        direct.multipart,
+        authorize=direct.owner.authorize,
+        sign=direct.owner.sign,
+        policy=policy,
+    )
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("completed review must not be reread after restart")
+
+    monkeypatch.setattr(review_file, "read_private_model", fail)
+    assert (await resumed.poll_once(now_unix_ms=1_800_000_013_000))["reviews_ready"] == 1
+    assert direct.multipart.read_calls == reads
+    path.unlink()
+    damaged = await resumed.poll_once(now_unix_ms=1_800_000_014_000)
+    assert damaged["objects_failed"] == 1 and damaged["reviews_ready"] == 0
+
+
+@pytest.mark.asyncio
 async def test_terminal_rejection_cleanup_retries_and_preserves_evidence(direct):
     reservation = await direct.owner.reserve(
         direct.request, direct.payload, now_unix_ms=1_800_000_000_000
@@ -675,6 +762,117 @@ async def test_promotion_verifies_canonical_copy_before_resumable_staging_cleanu
     direct.multipart.objects[preserved_key] = (payload.total_bytes, "replacement-etag")
     with pytest.raises(ValueError, match="changed after promotion"):
         await direct.owner.promote(publication, now_unix_ms=1_800_000_015_000)
+
+
+@pytest.mark.asyncio
+async def test_promotion_copy_bounds_parallel_parts_and_preserves_completion_order(
+    receipt_scenario,
+):
+    class MultipartCopy:
+        active = peak = 0
+
+        async def copy_part(self, _, *, part_number, size_bytes, **kwargs):
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            try:
+                await asyncio.sleep(0.002 * (5 - (part_number % 4)))
+                return DirectModelUploadPart(
+                    part_number=part_number,
+                    size_bytes=size_bytes,
+                    etag=f"{part_number:032x}",
+                )
+            finally:
+                self.active -= 1
+
+    class Progress:
+        completed = 0
+
+        def advance(self):
+            self.completed += 1
+
+    size = 5 * 1024**2
+    multipart, progress = MultipartCopy(), Progress()
+    payload = SimpleNamespace(total_parts=9, part_size_bytes=size, total_bytes=9 * size)
+    parts = await _copy_promotion_parts(
+        multipart, "preserved", "staging", "upload", payload, 4, progress
+    )
+
+    assert multipart.peak == 4 and multipart.active == 0
+    assert [part.part_number for part in parts] == list(range(1, 10))
+    assert progress.completed == len(parts) == 9
+
+
+@pytest.mark.asyncio
+async def test_promotion_copy_drains_failed_wave_before_aborting(receipt_scenario):
+    class MultipartCopy:
+        def __init__(self):
+            self.active = 0
+            self.started = []
+
+        async def copy_part(self, _, *, part_number, size_bytes, **kwargs):
+            self.active += 1
+            self.started.append(part_number)
+            try:
+                await asyncio.sleep(0.01 if part_number != 2 else 0.001)
+                if part_number == 2:
+                    raise OSError("copy failed")
+                return DirectModelUploadPart(
+                    part_number=part_number,
+                    size_bytes=size_bytes,
+                    etag=f"{part_number:032x}",
+                )
+            finally:
+                self.active -= 1
+
+    class Progress:
+        completed = 0
+
+        def advance(self):
+            self.completed += 1
+
+    size = 5 * 1024**2
+    multipart, progress = MultipartCopy(), Progress()
+    payload = SimpleNamespace(total_parts=8, part_size_bytes=size, total_bytes=8 * size)
+    with pytest.raises(OSError, match="copy failed"):
+        await _copy_promotion_parts(
+            multipart, "preserved", "staging", "upload", payload, 4, progress
+        )
+    assert multipart.active == 0
+    assert multipart.started == [1, 2, 3, 4]
+    assert progress.completed == 3
+
+
+@pytest.mark.asyncio
+async def test_promotion_copy_failure_aborts_and_retries_original_source(direct, monkeypatch):
+    reservation = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    completed = await direct.owner.complete(
+        signed_completion(reservation, direct.payload.payload),
+        now_unix_ms=1_800_000_010_000,
+    )
+    await direct.owner.verify(completed.reservation_sha256, now_unix_ms=1_800_000_011_000)
+    publication = promotion_publication(direct, reservation)
+    source_key = direct.owner.journal.get("direct-intent", reservation.reservation.attempt_id)[
+        "object_key"
+    ]
+    original = direct.multipart.copy_part
+    completed_uploads = len(direct.multipart.complete_calls)
+
+    async def failed_copy(*args, **kwargs):
+        raise OSError("part copy unavailable")
+
+    monkeypatch.setattr(direct.multipart, "copy_part", failed_copy)
+    with pytest.raises(OSError, match="part copy unavailable"):
+        await direct.owner.promote(publication, now_unix_ms=1_800_000_012_000)
+    assert len(direct.multipart.abort_calls) == 1
+    assert len(direct.multipart.complete_calls) == completed_uploads
+    assert source_key in direct.multipart.objects
+
+    monkeypatch.setattr(direct.multipart, "copy_part", original)
+    receipt = await direct.owner.promote(publication, now_unix_ms=1_800_000_013_000)
+    assert receipt.model_sha256 == direct.payload.payload.model_sha256
+    assert len(direct.multipart.abort_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -967,6 +1165,7 @@ async def test_remote_completed_verification_repairs_are_visible(direct, damage)
 async def test_remote_incomplete_stream_keeps_completed_file_checkpoints(direct, monkeypatch):
     from pathlib import Path
 
+    from umi import competition_remote_model_verification as remote
     from umi.competition_remote_model_verification import verify_remote_model
     from umi.competition_transport_verification import ByteCheckpoints
 
@@ -978,6 +1177,9 @@ async def test_remote_incomplete_stream_keeps_completed_file_checkpoints(direct,
     root = Path(direct.owner.config.directory) / "remote-test"
     original_read = direct.multipart.read_range
     boundary = bundle.files[0].size_bytes
+    # Inject interruption at an actual range boundary, independently of the
+    # production read geometry, which now spans adjacent small files.
+    monkeypatch.setattr(remote, "MAXIMUM_RANGE_BYTES", boundary)
     remembered = []
     original_remember = ByteCheckpoints.remember
 
@@ -1032,3 +1234,445 @@ async def test_remote_verification_rechecks_only_changed_context(direct, monkeyp
         direct.multipart, key, bundle, payload, root=root, context=context
     )
     assert direct.multipart.read_calls > reads
+
+
+@pytest.mark.parametrize("range_bytes", [1, 17, 64, 4096])
+async def test_remote_ranges_span_files_and_reuse_completed_verification(
+    direct, monkeypatch, tmp_path, range_bytes
+):
+    from umi import competition_remote_model_verification as remote
+
+    bundle = direct.request.signed_submission.submission.model_bundle
+    payload = direct.payload.payload
+    key = "preservation/coalesced-object"
+    direct.multipart.objects[key] = (payload.total_bytes, "version-one")
+    reads = []
+    original = direct.multipart.read_range
+
+    async def read(key, *, offset, size_bytes):
+        reads.append((offset, size_bytes))
+        return await original(key, offset=offset, size_bytes=size_bytes)
+
+    monkeypatch.setattr(remote, "MAXIMUM_RANGE_BYTES", range_bytes)
+    monkeypatch.setattr(direct.multipart, "read_range", read)
+    docs = (bundle.files[0].path, bundle.files[-1].path)
+    arguments = dict(root=tmp_path / "ranges", context={"authority": "a" * 64}, document_paths=docs)
+    documents, _ = await remote.verify_remote_model(
+        direct.multipart, key, bundle, payload, **arguments
+    )
+    assert reads == [
+        (offset, min(range_bytes, payload.total_bytes - offset))
+        for offset in range(0, payload.total_bytes, range_bytes)
+    ]
+    offset = 0
+    for record in bundle.files:
+        if record.path in docs:
+            assert (
+                documents[record.path]
+                == direct.multipart.payload_bytes[offset : offset + record.size_bytes]
+            )
+        offset += record.size_bytes
+    # Read geometry changes do not change native byte semantics or require a
+    # second payload pass after a completed immutable-object verification.
+    reads.clear()
+    monkeypatch.setattr(remote, "MAXIMUM_RANGE_BYTES", range_bytes + 1)
+    restored, _ = await remote.verify_remote_model(
+        direct.multipart, key, bundle, payload, **arguments
+    )
+    assert restored == documents and not reads
+
+
+@pytest.mark.parametrize("damage", ["short_range", "changed_second_file"])
+async def test_coalesced_remote_ranges_preserve_integrity_failures(
+    direct, monkeypatch, tmp_path, damage
+):
+    from umi.competition_remote_model_verification import verify_remote_model
+
+    bundle = direct.request.signed_submission.submission.model_bundle
+    payload = direct.payload.payload
+    key = "preservation/damaged-coalesced-object"
+    direct.multipart.objects[key] = (payload.total_bytes, "version-one")
+    original = direct.multipart.read_range
+    boundary = bundle.files[0].size_bytes
+
+    async def read(key, *, offset, size_bytes):
+        raw = await original(key, offset=offset, size_bytes=size_bytes)
+        if damage == "short_range":
+            return raw[:-1]
+        if offset <= boundary < offset + len(raw):
+            position = boundary - offset
+            raw = raw[:position] + bytes([raw[position] ^ 1]) + raw[position + 1 :]
+        return raw
+
+    monkeypatch.setattr(direct.multipart, "read_range", read)
+    with pytest.raises(ValueError, match=r"range differs|file differs"):
+        await verify_remote_model(
+            direct.multipart, key, bundle, payload, root=tmp_path / "damaged", context={}
+        )
+
+
+@pytest.mark.asyncio
+async def test_more_than_legacy_generation_limit_resumes_original_signed_upload(direct):
+    import itertools
+
+    counter = itertools.count(1)
+    direct.owner.new_attempt_id = lambda: f"{next(counter):064x}"
+    direct.multipart.fail_creates = 70
+    original_request = canonical_json_bytes(direct.request)
+    original_payload = canonical_json_bytes(direct.payload)
+    epoch = 1_800_000_000_000
+    for generation in range(70):
+        with pytest.raises(OSError, match="provider offline"):
+            await direct.owner.reserve(
+                direct.request, direct.payload, now_unix_ms=epoch + generation * 121_000
+            )
+    signed = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=epoch + 70 * 121_000
+    )
+    assert signed.reservation.generation == 71
+    assert len(direct.authorizations) == 1
+    assert canonical_json_bytes(direct.request) == original_request
+    assert canonical_json_bytes(direct.payload) == original_payload
+    reopened = DirectModelUploadOwner(
+        direct.owner.config,
+        direct.multipart,
+        authorize=direct.owner.authorize,
+        sign=direct.owner.sign,
+    )
+    retry = await reopened.reserve(direct.request, direct.payload, now_unix_ms=epoch + 71 * 121_000)
+    assert retry == signed
+    assert len(direct.multipart.create_calls) == 71
+    await reopened.complete(
+        signed_completion(signed, direct.payload.payload), now_unix_ms=epoch + 72 * 121_000
+    )
+    verified = await reopened.verify(digest(signed.reservation), now_unix_ms=epoch + 73 * 121_000)
+    assert verified.reservation_sha256 == digest(signed.reservation)
+    reads = direct.multipart.read_calls
+    assert (
+        await reopened.verify(digest(signed.reservation), now_unix_ms=epoch + 73 * 121_000)
+        == verified
+    )
+    assert direct.multipart.read_calls == reads
+    snapshot = reopened.journal.metadata_snapshot()
+    assert snapshot["retained_uploads"] == 1
+    assert snapshot["retained_attempts"] == 71
+    assert snapshot["highest_generation"] == 71
+    assert snapshot["metadata_bytes"] < snapshot["maximum_metadata_bytes"]
+
+
+@pytest.mark.asyncio
+async def test_http_metadata_damage_is_retryable_and_repair_preserves_reservation(direct):
+    signed = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    with direct.owner.journal.transaction() as db:
+        db.execute("DELETE FROM direct_upload_attempt_heads")
+    app = FastAPI()
+    app.include_router(
+        direct_model_upload_routes(direct.owner, now_unix_ms=lambda: 1_800_000_200_000)
+    )
+    request = DirectModelUploadReservationRequest(
+        schema="umi-direct-model-upload-reservation-request/1",
+        request=direct.request,
+        payload=direct.payload,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://intake.test"
+    ) as client:
+        response = await client.post(
+            f"/v1/competition/cohorts/{direct.owner.config.cohort_sha256}/direct-model-uploads",
+            content=canonical_json_bytes(request),
+            headers={"Content-Type": "application/json"},
+        )
+    assert response.status_code == 503
+    assert response.headers["X-UMI-Reason-Code"] == "model_upload_metadata_repair_required"
+    fixed = DirectModelUploadOwner(
+        direct.owner.config,
+        direct.multipart,
+        authorize=direct.owner.authorize,
+        sign=direct.owner.sign,
+        repair_attempt_index=True,
+    )
+    assert (
+        await fixed.reserve(direct.request, direct.payload, now_unix_ms=1_800_000_200_000) == signed
+    )
+    assert len(direct.authorizations) == 1
+    assert len(direct.multipart.create_calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_replacement", [False, True])
+async def test_expired_provider_after_retained_completion_intent_resumes_same_upload(
+    direct, monkeypatch, fail_replacement
+):
+    first = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    completion = signed_completion(first, direct.payload.payload)
+
+    async def provider_unavailable(*args, **kwargs):
+        raise OSError("completion failed before provider commit")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(direct.multipart, "complete", provider_unavailable)
+        with pytest.raises(OSError, match="before provider commit"):
+            await direct.owner.complete(completion, now_unix_ms=1_800_000_010_000)
+    first_sha = digest(first.reservation)
+    original = direct.owner.journal.get("direct-completion", first_sha)
+    assert original is not None
+    attempt = direct.owner.journal.get("direct-intent", first.reservation.attempt_id)
+    provider = direct.owner.journal.get("direct-provider", first.reservation.attempt_id)
+    direct.multipart.multipart_uploads.remove(
+        (attempt["object_key"], provider["provider_upload_id"])
+    )
+    restart = DirectModelUploadRestartRequest(
+        schema="umi-direct-model-upload-restart-request/1",
+        reservation_sha256=first_sha,
+        generation=first.reservation.generation,
+        reason_code="provider_upload_unavailable",
+    )
+    signed_restart = SignedDirectModelUploadRestartRequest(
+        schema="umi-signed-direct-model-upload-restart-request/1",
+        request=restart,
+        signature=sign_object(restart, wallet("Alice")),
+    )
+    now = 1_800_000_121_000
+    if fail_replacement:
+        direct.multipart.fail_creates = 1
+        with pytest.raises(OSError, match="provider offline"):
+            await direct.owner.restart(signed_restart, now_unix_ms=now)
+        assert direct.owner.journal.get("direct-completion", first_sha) == original
+        with pytest.raises(DirectModelUploadPending):
+            await direct.owner.restart(signed_restart, now_unix_ms=now + 1)
+        now += 121_000
+    second = await direct.owner.restart(signed_restart, now_unix_ms=now)
+    assert second.reservation.generation == (3 if fail_replacement else 2)
+    assert second.reservation.payload == first.reservation.payload
+    assert direct.owner.journal.get("direct-completion", first_sha) == original
+    assert await direct.owner.restart(signed_restart, now_unix_ms=now + 1) == second
+    assert len(direct.authorizations) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remote_object", [False, True])
+async def test_completion_intent_recovery_requires_absent_provider_and_object(
+    direct, remote_object
+):
+    first = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    first_sha = digest(first.reservation)
+    direct.owner.journal.put(
+        "direct-completion", first_sha, signed_completion(first, direct.payload.payload)
+    )
+    attempt = direct.owner.journal.get("direct-intent", first.reservation.attempt_id)
+    if remote_object:
+        direct.multipart.multipart_uploads.clear()
+        direct.multipart.objects[attempt["object_key"]] = (
+            direct.multipart.total_bytes,
+            "committed",
+        )
+    request = DirectModelUploadRestartRequest(
+        schema="umi-direct-model-upload-restart-request/1",
+        reservation_sha256=first_sha,
+        generation=first.reservation.generation,
+        reason_code="provider_upload_unavailable",
+    )
+    wrong = SignedDirectModelUploadRestartRequest(
+        schema="umi-signed-direct-model-upload-restart-request/1",
+        request=request,
+        signature=sign_object(request, wallet("Bob")),
+    )
+    with pytest.raises(ValueError, match="signer"):
+        await direct.owner.restart(wrong, now_unix_ms=1_800_000_121_000)
+    signed = wrong.model_copy(update={"signature": sign_object(request, wallet("Alice"))})
+    if remote_object:
+        with pytest.raises(ValueError, match="completed"):
+            await direct.owner.restart(signed, now_unix_ms=1_800_000_121_000)
+    else:
+        with pytest.raises(DirectModelUploadPending, match="remains available"):
+            await direct.owner.restart(signed, now_unix_ms=1_800_000_121_000)
+    assert direct.owner.journal.get("direct-superseded", first_sha) is None
+    assert len(direct.multipart.create_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_completion_expiry_http_reports_signed_restart_reason(direct, monkeypatch):
+    first = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    completion = signed_completion(first, direct.payload.payload)
+    direct.multipart.multipart_uploads.clear()
+
+    async def expired(*args, **kwargs):
+        raise OSError("NoSuchUpload")
+
+    monkeypatch.setattr(direct.multipart, "complete", expired)
+    app = FastAPI()
+    app.include_router(
+        direct_model_upload_routes(direct.owner, now_unix_ms=lambda: 1_800_000_121_000)
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app), base_url="https://intake.example"
+    ) as client:
+        response = await client.post(
+            f"/v1/competition/cohorts/{direct.owner.config.cohort_sha256}/direct-model-uploads/{digest(first.reservation)}/complete",
+            content=canonical_json_bytes(completion),
+            headers={"Content-Type": "application/json"},
+        )
+    assert response.status_code == 503
+    assert response.headers["X-UMI-Reason-Code"] == "model_upload_provider_generation_unavailable"
+    assert direct.owner.journal.get(
+        "direct-completion", digest(first.reservation)
+    ) == completion.model_dump(mode="json", by_alias=True)
+
+
+async def test_direct_empty_supporting_file_repairs_retained_hold_without_zero_byte_R2_read(
+    direct, tmp_path, policy
+):
+    from umi.competition_cohort_model_static_review import StandingModelReviewPolicy
+    from umi.open_competition import BundleFile
+
+    old_sub = direct.request.signed_submission.submission
+    empty = BundleFile(
+        path="zz-empty.txt", role="provenance", size_bytes=0, sha256=hashlib.sha256(b"").hexdigest()
+    )
+    bundle = old_sub.model_bundle.model_copy(update={"files": (*old_sub.model_bundle.files, empty)})
+    sub = old_sub.model_copy(update={"model_bundle": bundle, "model_revision": digest(bundle)})
+    signed = direct.request.signed_submission.model_copy(
+        update={
+            "submission": sub,
+            "signature": sign_object(sub, wallet("Alice")),
+        }
+    )
+    consent = direct.request.consent.consent.model_copy(update={"submission_sha256": digest(sub)})
+    request = direct.request.model_copy(
+        update={
+            "signed_submission": signed,
+            "consent": direct.request.consent.model_copy(
+                update={
+                    "consent": consent,
+                    "signature": sign_object(consent, wallet("Alice")),
+                }
+            ),
+        }
+    )
+    payload = direct.payload.payload.model_copy(
+        update={
+            "upload_sha256": digest(request),
+            "model_sha256": digest(bundle),
+            "file_count": len(bundle.files),
+        }
+    )
+    signed_payload = direct.payload.model_copy(
+        update={
+            "payload": payload,
+            "signature": sign_object(payload, wallet("Alice")),
+        }
+    )
+    standing = StandingModelReviewPolicy(
+        schema="umi-standing-model-artifact-review-policy/1",
+        competition_policy_sha256=digest(policy),
+        contribution_terms_sha256=policy.contribution_terms_sha256,
+        standing_approval_record_sha256="ab" * 32,
+        approved_by="fixture operator",
+        approved_at_utc="2026-10-01T00:00:00Z",
+        complete_declared_bundle_rights_approved=True,
+        licenses_and_notices_reviewed=True,
+        public_redistribution_and_evaluation_approved=True,
+    )
+    owner = DirectModelUploadOwner(
+        direct.owner.config.model_copy(
+            update={
+                "directory": str(tmp_path / "empty-direct"),
+                "admission_reviews_directory": str(tmp_path / "empty-reviews"),
+                "standing_review_policy": standing,
+            }
+        ),
+        direct.multipart,
+        authorize=direct.owner.authorize,
+        sign=direct.owner.sign,
+        policy=policy,
+    )
+    reservation = await owner.reserve(request, signed_payload, now_unix_ms=1_800_000_000_000)
+    completed = await owner.complete(
+        signed_completion(reservation, payload), now_unix_ms=1_800_000_010_000
+    )
+    await owner.verify(completed.reservation_sha256, now_unix_ms=1_800_000_011_000)
+    hold = {
+        "reason_code": "review_document_size_outside_policy",
+        "review_policy_sha256": digest(standing),
+    }
+    owner.journal.put("direct-review-hold", digest(bundle), hold)
+    assert owner.status(completed.reservation_sha256).hold_reason_code is None
+    old_read = direct.multipart.read_range
+
+    async def bounded(*args, **kwargs):
+        assert kwargs["size_bytes"] > 0
+        return await old_read(*args, **kwargs)
+
+    direct.multipart.read_range = bounded
+    result = await owner.poll_once(now_unix_ms=1_800_000_012_000)
+    assert result["reviews_held"] == result["objects_failed"] == 0
+    assert owner.journal.get("direct-review-hold", digest(bundle)) == hold
+    assert (tmp_path / "empty-reviews" / (digest(bundle) + ".json")).exists()
+
+
+async def test_poll_input_uses_one_transaction_and_rechecks_conflict_holds(direct, monkeypatch):
+    from contextlib import contextmanager
+
+    reservation = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    key = digest(reservation.reservation)
+    original = direct.owner.journal.read_transaction
+    calls = []
+
+    @contextmanager
+    def counted(*args, **kwargs):
+        calls.append(1)
+        with original(*args, **kwargs) as db:
+            yield db
+
+    monkeypatch.setattr(direct.owner.journal, "read_transaction", counted)
+    verified, retained, hold = direct.owner._poll_input(key)
+    assert not verified and retained == reservation and hold is None
+    assert len(calls) == 1
+    # This is the native fixture's conflict fence, not a production database.
+    with direct.owner.journal.transaction() as db:
+        db.execute("INSERT INTO holds VALUES (?)", (key,))
+    with pytest.raises(ValueError, match="conflict held"):
+        direct.owner._poll_input(key)
+    assert len(calls) == 2, "each poll must open a fresh fenced snapshot"
+
+
+async def test_completed_poll_journal_reads_are_off_event_loop(direct, monkeypatch):
+    import threading
+
+    reservation = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    completed = await direct.owner.complete(
+        signed_completion(reservation, direct.payload.payload),
+        now_unix_ms=1_800_000_010_000,
+    )
+    await direct.owner.verify(completed.reservation_sha256, now_unix_ms=1_800_000_011_000)
+    event_loop_thread = threading.get_ident()
+    original = direct.owner.journal.read_transaction
+    from contextlib import contextmanager
+
+    threads = []
+
+    @contextmanager
+    def off_loop(*args, **kwargs):
+        current = threading.get_ident()
+        assert current != event_loop_thread, "completed upload polling must not block async traffic"
+        threads.append(current)
+        with original(*args, **kwargs) as db:
+            yield db
+
+    monkeypatch.setattr(direct.owner.journal, "read_transaction", off_loop)
+    reads_before = direct.multipart.read_calls
+    result = await direct.owner.poll_once(now_unix_ms=1_800_000_012_000)
+    assert result["objects_verified"] == 1
+    assert threads and direct.multipart.read_calls == reads_before

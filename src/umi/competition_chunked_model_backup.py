@@ -21,8 +21,11 @@ import hashlib
 import json
 import os
 import stat
+from collections import deque
 from collections.abc import Callable, Sequence
+from contextlib import AsyncExitStack, asynccontextmanager
 from functools import partial
+from itertools import islice
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -46,15 +49,18 @@ from .competition_transport_verification import (
     ByteCheckpoints,
     ProgressReader,
     TransferProgress,
+    owned_byte_checkpoint,
     verifier_semantics,
 )
 from .concurrency import run_owned_thread
 from .open_competition import CompetitionPolicy, ModelBundle, digest, validate_bundle_policy
 from .private_files import ensure_private_directory, private_path, publish_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes, sha256_hex
-from .r2_multipart import R2MultipartClient
+from .r2_metadata_batch import R2MetadataBatchUnavailable
+from .r2_multipart import R2MultipartClient, pooled_r2_reads
 
 CHUNK_BYTES = 8 * 1024**2
+MATERIALIZATION_PREFETCH_CHUNKS = 4
 METADATA_BYTES = 64 * 1024**2
 BYTE_ABI = "umi-chunked-model-backup-bytes/1"
 ObjectKeyPrefix = Annotated[
@@ -321,6 +327,7 @@ class ChunkedModelBackupReader:
             "namespace": self._namespace(),
         }
 
+    @pooled_r2_reads
     async def _heads(self, report, chunks=None, *, expected=None, operation_progress=None):
         chunks = self.chunks if chunks is None else chunks
         values = {}
@@ -332,26 +339,73 @@ class ChunkedModelBackupReader:
         with TransferProgress(stage, len(chunks), report, unit="objects") as progress:
             pending = iter(sorted(chunks.items()))
 
+            def consume(key, chunk, head):
+                if head is None:
+                    raise OSError("retained model chunk is unavailable")
+                if head.size_bytes != chunk.size_bytes or not head.etag or len(head.etag) > 256:
+                    progress.emit("repair_required", reason="chunked_model_generation_changed")
+                    raise ValueError("retained model chunk metadata differs")
+                value = ChunkedObjectGeneration(
+                    key=self._key(chunk), sha256=key, size_bytes=chunk.size_bytes, etag=head.etag
+                )
+                if expected is not None and value != expected[key]:
+                    progress.emit("repair_required", reason="chunked_model_generation_changed")
+                    raise ValueError("retained model chunk generation changed")
+                values[key] = value
+                progress.advance(1)
+                if operation_progress is not None:
+                    operation_progress.advance_operations(1)
+
+            limit = getattr(self.multipart, "head_batch_limit", 0)
+            if limit:
+                if type(limit) is not int or not 1 <= limit <= 32:
+                    raise ValueError("chunked model metadata batch limit differs")
+                size = min(limit, self.metadata_workers)
+                batch_enabled = True
+                while True:
+                    group = tuple(islice(pending, size))
+                    if not group:
+                        break
+                    self._namespace()
+                    heads = None
+                    if batch_enabled:
+                        try:
+                            heads = await self.multipart.head_batch(
+                                tuple(self._key(c) for _, c in group)
+                            )
+                        except R2MetadataBatchUnavailable as error:
+                            # One failed proxy exchange per operation, rather than
+                            # repeating an auth/quota failure for every batch.
+                            batch_enabled = False
+                            progress.emit("retrying", reason=error.reason_code + "_fallback_s3")
+
+                    if heads is not None and any(value == 503 for value in heads.values()):
+                        batch_enabled = False
+
+                    async def one(key, chunk, batch_heads=heads):
+                        object_key = self._key(chunk)
+                        head = None if batch_heads is None else batch_heads[object_key]
+                        if batch_heads is None or head == 503:
+                            if head == 503:
+                                progress.emit("retrying", reason="r2_batch_item_fallback_s3")
+                            head = await self.multipart.head(object_key)
+                        consume(key, chunk, head)
+
+                    tasks = [asyncio.create_task(one(k, c)) for k, c in group]
+                    try:
+                        await asyncio.gather(*tasks)
+                    finally:
+                        for task in tasks:
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                return values
+
             async def worker():
                 for key, chunk in pending:
                     self._namespace()
-                    object_key = self._key(chunk)
-                    head = await self.multipart.head(object_key)
-                    if head is None:
-                        raise OSError("retained model chunk is unavailable")
-                    if head.size_bytes != chunk.size_bytes or not head.etag or len(head.etag) > 256:
-                        progress.emit("repair_required", reason="chunked_model_generation_changed")
-                        raise ValueError("retained model chunk metadata differs")
-                    value = ChunkedObjectGeneration(
-                        key=object_key, sha256=key, size_bytes=chunk.size_bytes, etag=head.etag
-                    )
-                    if expected is not None and value != expected[key]:
-                        progress.emit("repair_required", reason="chunked_model_generation_changed")
-                        raise ValueError("retained model chunk generation changed")
-                    values[key] = value
-                    progress.advance(1)
-                    if operation_progress is not None:
-                        operation_progress.advance_operations(1)
+                    head = await self.multipart.head(self._key(chunk))
+                    consume(key, chunk, head)
 
             tasks = [
                 asyncio.create_task(worker())
@@ -381,6 +435,42 @@ class ChunkedModelBackupReader:
         if head is None or (head.size_bytes, head.etag) != (expected.size_bytes, expected.etag):
             raise ValueError("retained model chunk changed during transfer")
         return raw
+
+    @asynccontextmanager
+    async def _materialization_chunks(self, retained, heads):
+        """Overlap at most four missing chunks; consume in signed file order.
+
+        Completed local files enqueue no requests. All pending reads are drained
+        on interruption before the owner's cache/capacity lease can be released.
+        The caller releases each returned buffer before requesting another.
+        """
+        chunks = iter(
+            chunk
+            for record, item in zip(
+                self.selection.bundle.files, self.selection.package.files, strict=True
+            )
+            if record.path not in retained
+            for chunk in item.chunks
+        )
+        pending = deque()
+
+        async def read(expected):
+            while len(pending) < MATERIALIZATION_PREFETCH_CHUNKS:
+                chunk = next(chunks, None)
+                if chunk is None:
+                    break
+                pending.append((chunk, asyncio.create_task(self._chunk(chunk, heads))))
+            if not pending or pending[0][0] != expected:
+                raise ValueError("model prefetch differs from signed chunk order")
+            _, task = pending.popleft()
+            return await task
+
+        try:
+            yield read
+        finally:
+            for _, task in pending:
+                task.cancel()
+            await asyncio.gather(*(task for _, task in pending), return_exceptions=True)
 
     async def _unchanged(self, heads, report, *, operation_progress=None):
         await self._heads(
@@ -484,6 +574,7 @@ class ChunkedModelBackupReader:
             progress.advance(len(raw))
             return raw
 
+    @pooled_r2_reads
     async def verify(
         self,
         *,
@@ -508,27 +599,41 @@ class ChunkedModelBackupReader:
             self._context()  # Refuse an unqualified verifier before remote I/O.
             heads = await self._heads(report)
             documents = {}
-            with (
-                TransferProgress(
-                    "chunked_model_verification",
-                    sum(r.size_bytes for r in bundle.files),
-                    report,
-                    total_operations=2 * sum(len(f.chunks) for f in self.selection.package.files)
-                    + len(heads),
-                ) as progress,
-                self._store(progress) as saved,
-            ):
-                self._migrate_remote_receipts(saved, heads, report=report)
-                import_completed_byte_facts(
-                    self,
-                    saved,
-                    heads,
-                    self.byte_store_imports,
-                    document_paths=document_paths,
-                    report=report,
+            async with AsyncExitStack() as stack:
+                progress = stack.enter_context(
+                    TransferProgress(
+                        "chunked_model_verification",
+                        sum(r.size_bytes for r in bundle.files),
+                        report,
+                        total_operations=2
+                        * sum(len(f.chunks) for f in self.selection.package.files)
+                        + len(heads),
+                    )
+                )
+                saved = await stack.enter_async_context(
+                    owned_byte_checkpoint(self._store(progress), progress)
+                )
+                # These bounded metadata passes can restore thousands of files
+                # without a network await. Keep the existing byte lease until
+                # their owned worker drains, including on cancellation.
+                await run_owned_thread(
+                    partial(self._migrate_remote_receipts, saved, heads, report=report)
+                )
+                await run_owned_thread(
+                    partial(
+                        import_completed_byte_facts,
+                        self,
+                        saved,
+                        heads,
+                        self.byte_store_imports,
+                        document_paths=document_paths,
+                        report=report,
+                    )
                 )
                 for record, item in zip(bundle.files, self.selection.package.files, strict=True):
-                    with SharedRemoteFileBytes(self, record, item, heads, progress) as shared:
+                    async with owned_byte_checkpoint(
+                        SharedRemoteFileBytes(self, record, item, heads, progress), progress
+                    ) as shared:
                         document = await self._verify_file(
                             saved,
                             shared,
@@ -627,6 +732,12 @@ class ChunkedModelBackupReader:
         shared.remember_verified(document)
         return document
 
+    async def available(self):
+        """Check selected remote objects; this is no byte-integrity certificate."""
+        self._namespace()
+        await self._heads(None)
+
+    @pooled_r2_reads
     async def export_completed(self, *, report=None):
         """Export complete native results without fetching or repairing model bytes.
 
@@ -636,12 +747,22 @@ class ChunkedModelBackupReader:
         """
         async with self.serial:
             self._context()
-            heads = await self._heads(report)
-            value = await run_owned_thread(
-                partial(export_completed_byte_facts, self, heads, report=report)
-            )
-            await self._unchanged(heads, report)
-            return await run_owned_thread(publish_byte_export, self, value)
+            with TransferProgress("chunked_model_export", 1, report, unit="models") as progress:
+                async with owned_byte_checkpoint(self._store(progress), progress) as saved:
+                    heads = await self._heads(report)
+                    value = await run_owned_thread(
+                        partial(
+                            export_completed_byte_facts,
+                            self,
+                            heads,
+                            report=report,
+                            checkpoint=saved,
+                        )
+                    )
+                    await self._unchanged(heads, report)
+                    result = await run_owned_thread(publish_byte_export, self, value)
+                    progress.advance(1)
+                    return result
 
     def require_verified(self, snapshot: ChunkedModelVerification):
         """Consume owned byte checkpoints, never a supplied digest as byte proof.
@@ -677,6 +798,7 @@ class ChunkedModelBackupReader:
                     raise OSError("owned model byte verification requires repair")
                 progress.advance(1, restored=True)
 
+    @pooled_r2_reads
     async def read_verified_range(
         self,
         snapshot: ChunkedModelVerification,
@@ -730,6 +852,7 @@ class ChunkedModelBackupReader:
                 raise ValueError("model retry range coverage differs")
             return bytes(content)
 
+    @pooled_r2_reads
     async def materialize(
         self,
         archive: Path,
@@ -739,6 +862,7 @@ class ChunkedModelBackupReader:
         reserve_bytes: int,
         check_write: Callable[[int], None],
         report: Callable[[dict], None] | None = None,
+        check_file_write: Callable[[Path, int], None] | None = None,
     ) -> Path:
         """Restore a native archive under the caller's held cache/capacity lease.
 
@@ -779,11 +903,23 @@ class ChunkedModelBackupReader:
                 / sha256_hex(os.fsencode(archive))
             )
             written = []
-            with (
-                TransferProgress("chunked_model_materialization", total, report) as progress,
-                ByteCheckpoints(state_root, context, progress) as local,
-                self._store(progress) as remote,
-            ):
+            async with AsyncExitStack() as stack:
+                progress = stack.enter_context(
+                    TransferProgress(
+                        "chunked_model_materialization",
+                        total,
+                        report,
+                        total_operations=(
+                            sum(len(item.chunks) + 1 for item in self.selection.package.files) + 1
+                        ),
+                    )
+                )
+                local = await stack.enter_async_context(
+                    owned_byte_checkpoint(ByteCheckpoints(state_root, context, progress), progress)
+                )
+                remote = await stack.enter_async_context(
+                    owned_byte_checkpoint(self._store(progress), progress)
+                )
                 retained, reusable, needed = {}, set(), {}
                 with TransferProgress(
                     "chunked_model_local_cache_inventory", len(bundle.files), report, unit="files"
@@ -819,73 +955,92 @@ class ChunkedModelBackupReader:
                 # file identities, not current remote availability. Only missing
                 # files require an R2 generation snapshot and subsequent checks.
                 heads = await self._heads(report, needed) if needed else {}
-                for record, item in zip(bundle.files, self.selection.package.files, strict=True):
-                    destination = model / record.path
-                    stamp = retained.get(record.path)
-                    if record.path in reusable:
-                        if _local_identity(destination, root) != stamp:
-                            raise ValueError("chunked model cache changed during reuse")
-                        progress.advance(record.size_bytes, restored=True)
-                    elif stamp is not None:
-                        progress.emit(
-                            "repair_required", reason="chunked_model_local_verification_required"
-                        )
-                        with (
-                            _directory(model) as descriptor,
-                            _artifact(descriptor, record) as (stream, _),
-                        ):
-                            await run_owned_thread(
-                                _copy_verified, ProgressReader(stream, progress), record, None
+                async with self._materialization_chunks(retained, heads) as read_chunk:
+                    for record, item in zip(
+                        bundle.files, self.selection.package.files, strict=True
+                    ):
+                        destination = model / record.path
+                        stamp = retained.get(record.path)
+                        if record.path in reusable:
+                            if _local_identity(destination, root) != stamp:
+                                raise ValueError("chunked model cache changed during reuse")
+                            progress.advance(record.size_bytes, restored=True)
+                            progress.advance_operations(len(item.chunks) + 1, restored=True)
+                        elif stamp is not None:
+                            progress.emit(
+                                "repair_required",
+                                reason="chunked_model_local_verification_required",
                             )
+                            with (
+                                _directory(model) as descriptor,
+                                _artifact(descriptor, record) as (stream, _),
+                            ):
+                                await run_owned_thread(
+                                    _copy_verified, ProgressReader(stream, progress), record, None
+                                )
+                                if _local_identity(destination, root) != stamp:
+                                    raise ValueError(
+                                        "chunked model cache changed during local repair"
+                                    )
+                                os.fchmod(stream.fileno(), 0o400)
+                                await run_owned_thread(os.fsync, stream.fileno())
+                                stamp = {
+                                    "archive": [str(root.st_dev), str(root.st_ino)],
+                                    "file": _file_identity(os.fstat(stream.fileno())),
+                                }
                             if _local_identity(destination, root) != stamp:
                                 raise ValueError("chunked model cache changed during local repair")
-                            os.fchmod(stream.fileno(), 0o400)
-                            await run_owned_thread(os.fsync, stream.fileno())
-                            stamp = {
-                                "archive": [str(root.st_dev), str(root.st_ino)],
-                                "file": _file_identity(os.fstat(stream.fileno())),
-                            }
-                        if _local_identity(destination, root) != stamp:
-                            raise ValueError("chunked model cache changed during local repair")
-                        local.remember(record.path, stamp, record.sha256)
-                    else:
-                        if available_bytes() < record.size_bytes + reserve_bytes:
-                            raise OSError("chunked model cache capacity is unavailable")
-                        ensure_private_directory(destination.parent)
-                        descriptor = os.open(
-                            destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
-                        )
-                        hasher = hashlib.sha256()
-                        with os.fdopen(descriptor, "wb", buffering=0) as output:
-                            for chunk in item.chunks:
-                                raw = await self._chunk(chunk, heads)
-                                await run_owned_thread(check_write, len(raw))
-                                if await run_owned_thread(output.write, raw) != len(raw):
-                                    raise OSError("chunked model cache write was incomplete")
-                                hasher.update(raw)
-                                progress.advance(len(raw))
-                            if hasher.hexdigest() != record.sha256:
-                                raise ValueError(
-                                    "restored model file differs from its signed manifest"
-                                )
-                            os.fchmod(output.fileno(), 0o400)
-                            await run_owned_thread(os.fsync, output.fileno())
-                            stamp = {
-                                "archive": [str(root.st_dev), str(root.st_ino)],
-                                "file": _file_identity(os.fstat(output.fileno())),
-                            }
-                        if _local_identity(destination, root) != stamp:
-                            raise ValueError("restored model cache identity changed")
-                        with _directory(destination.parent) as descriptor:
-                            os.fsync(descriptor)
-                        local.remember(record.path, stamp, record.sha256)
-                        remote.remember(record.path, self._source(item, heads), record.sha256)
-                    written.append([record.path, stamp["file"]])
+                            local.remember(record.path, stamp, record.sha256)
+                            progress.advance_operations(len(item.chunks) + 1)
+                        else:
+                            if available_bytes() < record.size_bytes + reserve_bytes:
+                                raise OSError("chunked model cache capacity is unavailable")
+                            ensure_private_directory(destination.parent)
+                            descriptor = os.open(
+                                destination,
+                                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                0o600,
+                            )
+                            hasher = hashlib.sha256()
+                            with os.fdopen(descriptor, "wb", buffering=0) as output:
+                                for chunk in item.chunks:
+                                    raw = await read_chunk(chunk)
+                                    if check_file_write is None:
+                                        await run_owned_thread(check_write, len(raw))
+                                    else:
+                                        await run_owned_thread(
+                                            check_file_write, destination, len(raw)
+                                        )
+                                    if await run_owned_thread(output.write, raw) != len(raw):
+                                        raise OSError("chunked model cache write was incomplete")
+                                    hasher.update(raw)
+                                    progress.advance(len(raw))
+                                    progress.advance_operations(1)
+                                    del raw
+                                if hasher.hexdigest() != record.sha256:
+                                    raise ValueError(
+                                        "restored model file differs from its signed manifest"
+                                    )
+                                os.fchmod(output.fileno(), 0o400)
+                                await run_owned_thread(os.fsync, output.fileno())
+                                stamp = {
+                                    "archive": [str(root.st_dev), str(root.st_ino)],
+                                    "file": _file_identity(os.fstat(output.fileno())),
+                                }
+                            if _local_identity(destination, root) != stamp:
+                                raise ValueError("restored model cache identity changed")
+                            with _directory(destination.parent) as descriptor:
+                                os.fsync(descriptor)
+                            local.remember(record.path, stamp, record.sha256)
+                            remote.remember(record.path, self._source(item, heads), record.sha256)
+                            progress.advance_operations(1)
+                        written.append([record.path, stamp["file"]])
                 if heads:
-                    await self._unchanged(heads, report)
+                    await self._unchanged(heads, progress.child_report())
                 await run_owned_thread(publish_private_model, target / "manifest.json", bundle)
                 expected = await run_owned_thread(_preserved_verification_record, bundle, archive)
                 if json.loads(expected)["files"] != written:
                     raise ValueError("restored model changed before native receipt publication")
                 await run_owned_thread(_remember_preserved_verification, bundle, archive, expected)
+                progress.advance_operations(1)
             return target

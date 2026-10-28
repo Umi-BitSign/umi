@@ -4,6 +4,7 @@ import hashlib
 import sqlite3
 import subprocess
 import sys
+from contextlib import contextmanager
 
 import pytest
 
@@ -29,13 +30,17 @@ def test_observer_reads_original_metadata_and_new_receipts_without_network_or_co
     server.calls.clear()
     observer = consumer(tmp_path / "observer", producer, server)
     assert observer.receipt_source.read_only and observer.receipt_source.existing_only
-    assert observer.validate_reference(reference).content_sha256 == hashlib.sha256(
-        b"original source"
-    ).hexdigest()
+    assert (
+        observer.validate_reference(reference).content_sha256
+        == hashlib.sha256(b"original source").hexdigest()
+    )
     assert producer.journal.path.read_bytes() == before
     assert server.calls == []
     with observer.journal.read_transaction() as db:
-        assert db.execute("SELECT COUNT(*) FROM records").fetchone() == (0,)
+        assert db.execute(
+            "SELECT COUNT(*) FROM records WHERE kind IN "
+            "('remote_proof_object','remote_proof_completion')"
+        ).fetchone() == (0,)
     second = producer.put_bytes(b"newly completed source")
     server.calls.clear()
     assert observer.validate_reference(second).key == second["key"]
@@ -45,6 +50,58 @@ def test_observer_reads_original_metadata_and_new_receipts_without_network_or_co
     server.calls.clear()
     restarted = consumer(tmp_path / "observer", producer, server)
     assert restarted.validate_reference(reference).key == reference["key"]
+    assert server.calls == []
+
+
+@pytest.mark.parametrize("independent_consumer", [False, True])
+def test_validation_shares_only_its_current_receipt_owner_snapshot(
+    tmp_path, monkeypatch, independent_consumer
+):
+    server = EvidenceServer()
+    producer = store(tmp_path / "producer", server)
+    reference = producer.put_bytes(b"source")
+    observer = (
+        consumer(tmp_path / "observer", producer, server) if independent_consumer else producer
+    )
+    snapshots = []
+    journals = [observer.journal]
+    if observer.receipt_source is not None:
+        journals.append(observer.receipt_source)
+    for journal in journals:
+        read = journal.read_transaction
+
+        @contextmanager
+        def counted(read=read, journal=journal):
+            with read() as db:
+                assert db.in_transaction
+                assert db.execute("PRAGMA query_only").fetchone() == (1,)
+                snapshots.append((journal, db))
+                yield db
+
+        monkeypatch.setattr(journal, "read_transaction", counted)
+    server.calls.clear()
+    for _ in range(2):
+        assert observer.validate_reference(reference).key == reference["key"]
+    assert len(snapshots) == 2 * len(journals)
+    assert len({id(db) for _, db in snapshots}) == len(snapshots)
+    assert server.calls == []
+
+
+@pytest.mark.parametrize("held_owner", ["producer", "consumer"])
+def test_repeated_validation_observes_new_independent_damage_holds(tmp_path, held_owner):
+    server = EvidenceServer()
+    producer = store(tmp_path / "producer", server)
+    reference = producer.put_bytes(b"source")
+    observer = consumer(tmp_path / "observer", producer, server)
+    parsed = observer.validate_reference(reference)
+    owner = producer if held_owner == "producer" else observer
+    owner._hold(parsed)
+    server.calls.clear()
+    with pytest.raises(ValueError, match="explicit original-generation repair"):
+        observer.validate_reference(reference)
+    restarted = consumer(tmp_path / "observer", producer, server)
+    with pytest.raises(ValueError, match="explicit original-generation repair"):
+        restarted.validate_reference(reference)
     assert server.calls == []
 
 
@@ -138,21 +195,21 @@ def test_observer_can_open_while_original_producer_has_an_uncommitted_write(tmp_
     reference = producer.put_bytes(b"source")
     original = producer.journal.path.read_bytes()
     with producer.journal.transaction() as db:
-        db.execute("INSERT INTO records VALUES ('test_pending','new',?)", (b'{}',))
-        assert producer.journal.path.with_name('rounds.sqlite3-journal').exists()
+        db.execute("INSERT INTO records VALUES ('test_pending','new',?)", (b"{}",))
+        assert producer.journal.path.with_name("rounds.sqlite3-journal").exists()
         observer = consumer(tmp_path / "observer", producer, server)
-        assert observer.validate_reference(reference).key == reference['key']
+        assert observer.validate_reference(reference).key == reference["key"]
         assert producer.journal.path.read_bytes() == original
         # Roll back only this task fixture's uncommitted writer.
         db.execute("DELETE FROM records WHERE kind='test_pending'")
-    assert observer.validate_reference(reference).key == reference['key']
+    assert observer.validate_reference(reference).key == reference["key"]
 
 
 def test_observer_never_recovers_a_crashed_producer_hot_journal(tmp_path):
     server = EvidenceServer()
     producer = store(tmp_path / "producer", server)
     reference = producer.put_bytes(b"source")
-    child = '''
+    child = """
 import os,sqlite3,sys
 db=sqlite3.connect(sys.argv[1],isolation_level=None)
 db.create_function('umi_round_writer_generation',0,lambda:2)
@@ -163,12 +220,12 @@ db.execute('BEGIN IMMEDIATE')
 for index in range(64):
  db.execute("INSERT INTO records VALUES ('test_pending',?,?)",(str(index),b'x'*8192))
 os._exit(0)
-'''
-    subprocess.run([sys.executable, '-c', child, str(producer.journal.path)], check=True)
-    rollback = producer.journal.path.with_name('rounds.sqlite3-journal')
+"""
+    subprocess.run([sys.executable, "-c", child, str(producer.journal.path)], check=True)
+    rollback = producer.journal.path.with_name("rounds.sqlite3-journal")
     assert rollback.exists() and rollback.read_bytes()[:8] != bytes(8)
     database_before, journal_before = producer.journal.path.read_bytes(), rollback.read_bytes()
-    with pytest.raises(sqlite3.OperationalError, match=r'readonly|read-only|locked'):
+    with pytest.raises(sqlite3.OperationalError, match=r"readonly|read-only|locked"):
         consumer(tmp_path / "observer", producer, server).validate_reference(reference)
     assert producer.journal.path.read_bytes() == database_before
     assert rollback.read_bytes() == journal_before

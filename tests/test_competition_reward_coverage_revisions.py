@@ -47,6 +47,7 @@ async def test_current_revision_gets_independent_work_and_preserves_old_progress
     owner.history = SimpleNamespace(first_block=1)
     owner._completed = {c.activation.cohort_sha256: object()}
     owner._active, owner._collector = None, None
+    owner._verified_transitions = ()
 
     async def selection(height):
         assert height in {200, 202}
@@ -68,7 +69,12 @@ async def test_current_revision_gets_independent_work_and_preserves_old_progress
         async def step(self):
             return SimpleNamespace(credited_ms=(), errors=(), certificate=None)
 
-    owner._selection, owner._source = selection, source
+    async def selection_detail(height):
+        return SimpleNamespace(
+            effective_selection=await selection(height), activation_transitions=()
+        )
+
+    owner._selection, owner._selection_detail, owner._source = selection, selection_detail, source
     monkeypatch.setattr(module, "RewardCoverageCollector", Collector)
     await owner._discover()
     key = coverage_work_key(revised)
@@ -85,3 +91,68 @@ async def test_current_revision_gets_independent_work_and_preserves_old_progress
     owner._target = 202
     await owner._discover()
     assert journal.journal.get("coverage_work", key) == retained
+
+
+async def test_predecessor_uses_first_native_successor_boundary_even_if_only_revision_has_work(
+    opportunity_case, tmp_path, monkeypatch
+):
+    c = opportunity_case
+    rule = module.opportunity_rule(c.manifest, c.series, c.policy)
+    journal = RewardCoverageJournal(
+        tmp_path / "successor-boundary", rule, expected_rule_sha256=digest(rule)
+    )
+    predecessor = CoverageWork(
+        schema="umi-reward-coverage-work/1",
+        activation=c.activation,
+        observed_block=100,
+        first_block=99,
+    )
+    successor = c.activation.model_copy(
+        update={"cohort_sha256": digest(c.series.cohorts[1]), "package_sha256": "ab" * 32}
+    )
+    revised = successor.model_copy(
+        update={"reward_adoption_sha256": "cd" * 32, "effective_allocation_sha256": "ef" * 32}
+    )
+    journal.journal.put("coverage_work", coverage_work_key(c.activation), predecessor)
+    journal.journal.put(
+        "coverage_work",
+        coverage_work_key(revised),
+        CoverageWork(
+            schema="umi-reward-coverage-work/1",
+            activation=revised,
+            observed_block=220,
+            first_block=199,
+        ),
+    )
+    owner = object.__new__(StandingRewardCoverageService)
+    owner.preparation = SimpleNamespace(reader=c.reader, manifest=c.manifest)
+    owner.journal = journal
+    owner.files = SimpleNamespace(maximum_witness_bytes=1024**2)
+    owner._completed = {coverage_work_key(revised): object()}
+    owner._active, owner._collector = None, None
+    owner._verified_transitions = (
+        SimpleNamespace(activation=c.activation, effective_at_block=99),
+        SimpleNamespace(activation=successor, effective_at_block=156),
+        SimpleNamespace(activation=revised, effective_at_block=199),
+    )
+
+    async def selection(height):
+        assert height == 100
+        return SimpleNamespace(activation=c.activation, effective_at_block=99)
+
+    async def source(activation):
+        assert activation == c.activation
+        return object()
+
+    class Collector:
+        def __init__(self, actual_journal, actual_source, **kwargs):
+            assert actual_journal is journal and actual_source is not None
+            assert kwargs["last_block"] == 155
+
+        async def step(self):
+            return SimpleNamespace(credited_ms=(), errors=(), certificate=None)
+
+    owner._selection, owner._source = selection, source
+    monkeypatch.setattr(module, "RewardCoverageCollector", Collector)
+    await owner._collect()
+    assert owner._active == coverage_work_key(c.activation)

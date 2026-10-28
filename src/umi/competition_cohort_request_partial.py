@@ -270,6 +270,11 @@ def collect_partial_request(
     owner: CohortExecutionJournal, slot: str, collected: _PartialObjectCollector
 ) -> PartialRequestManifest:
     """Owning-service reads of immutable originals; no journal writes or RPC."""
+    return collect_partial_request_with_inputs(owner, slot, collected)[0]
+
+
+def collect_partial_request_with_inputs(owner, slot, collected):
+    """Return the same collection and its already-read native assignment/job."""
     assignment, job = owner.assignment_and_job(slot)
     evidence = owner.evidence(slot)
     if evidence is not None:
@@ -379,7 +384,7 @@ def collect_partial_request(
                     )
                 break
     collected.retain(assignment.certificate)
-    return PartialRequestManifest(
+    manifest = PartialRequestManifest(
         schema="umi-cohort-partial-request/1",
         assignment_sha256=collected.retain(assignment),
         steps=tuple(
@@ -389,3 +394,4 @@ def collect_partial_request(
         cases=tuple(sorted(cases, key=lambda value: value.case_id)),
         responses=tuple(sorted(responses, key=lambda value: value.case_id)),
     )
+    return manifest, assignment, job

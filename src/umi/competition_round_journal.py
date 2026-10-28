@@ -19,6 +19,7 @@ from pydantic import JsonValue
 
 from .competition_journal_physical_budget import JournalPhysicalBudget
 from .competition_round_plan import RoundPlan, RoundProposal
+from .competition_round_reservation_reuse import decoded_reservation
 from .competition_round_rpc_migration import has_transport_history, validate_rpc_binding
 from .host_memory_request_bounds import charge_stage_declaration, check_stage_json, stage_limit
 from .open_competition import digest
@@ -691,7 +692,9 @@ class RoundJournal:
         kind, key, raw, maximum, sha, valid_columns = row
         if raw is None:
             raise ValueError("round reservation retained blob exceeds bound")
-        doc = cls._spec_document(cls._canonical_document(raw))
+        doc = decoded_reservation(
+            raw, lambda body: cls._spec_document(cls._canonical_document(body))
+        )
         if not valid_columns:
             raise ValueError("round reservation allowance columns changed")
         if (doc["kind"], doc["key"], doc["maximum_bytes"], doc["value_sha256"]) != (
@@ -907,7 +910,7 @@ class RoundJournal:
             columns = [
                 self._identifier(row[1]) for row in db.execute(f"PRAGMA table_info({table})")
             ]
-            sizes = "+".join(f"COALESCE(LENGTH(CAST({col} AS BLOB)),0)" for col in columns)
+            sizes = "+".join(self._stored_byte_length(col) for col in columns)
             rows, size = db.execute(
                 f"SELECT COUNT(*),COALESCE(SUM({sizes}),0) FROM {table}"
             ).fetchone()
@@ -917,6 +920,16 @@ class RoundJournal:
             count += rows
             used += size
         return count, used, kinds
+
+    @staticmethod
+    def _stored_byte_length(column):
+        # SQLite can read a BLOB's length from its record header without loading
+        # overflow pages. CAST disables that optimization. Retain the original
+        # UTF-8 byte accounting for TEXT and SQLite's numeric conversions.
+        return (
+            f"COALESCE(CASE WHEN TYPEOF({column})='blob' THEN LENGTH({column}) "
+            f"ELSE LENGTH(CAST({column} AS BLOB)) END,0)"
+        )
 
     def _check_capacity(self, db):
         count, used, kinds = self._capacity(db)
@@ -981,6 +994,25 @@ class RoundJournal:
             raise ValueError("round reservation manifest capacity exhausted")
         if db is not None:
             return self._reserve_records(db, batch_id, documents, manifest)
+        if self.read_only:
+            raise ValueError("existing source journal is read-only")
+        # Exact retained reservations acquire no new allowance or record. Read
+        # the current batch, obligations, holds and capacity in one committed
+        # snapshot instead of reserving SQLite's writer for a retry. A missing
+        # batch still takes the writer below and rechecks any concurrent insert.
+        with self.read_transaction() as owned:
+            if self._version(owned) == 2:
+                old = self._bounded_blob(
+                    owned,
+                    "record_reservation_batches",
+                    "body",
+                    where="WHERE id=?",
+                    arguments=(batch_id,),
+                )
+                if old is not None:
+                    if old != manifest:
+                        raise ValueError("round reservation batch changed")
+                    return self._reservation(owned, batch_id)
         with self.transaction() as owned:
             return self._reserve_records(owned, batch_id, documents, manifest)
 

@@ -341,6 +341,7 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
             )
             assert self.history.journal.maximum_bytes == config.maximum_history_bytes
             assert self.history.verification_profile == history_profile
+            assert self.history.shutdown_event is stop
             assert self.history.progress.forecast is not None
             assert self.history.progress.forecast.identity["series_sha256"] == digest(
                 selected_series
@@ -438,24 +439,197 @@ def test_real_module_entrypoint_keeps_configuration_check_separate_from_run():
     )
     assert (
         result.returncode == 0
-        and "{check,run,repair-history}" in result.stdout
+        and "{check,run,repair-history,repair-credit}" in result.stdout
         and "--config" in result.stdout
         and "--through-block" in result.stdout
     )
 
 
 @pytest.mark.parametrize("role", ["coordinator", "reviewer"])
-@pytest.mark.parametrize("legacy_read_through", [False, True])
+@pytest.mark.parametrize(
+    "legacy_read_through,source_release_batch_records", [(False, 0), (True, 0), (True, 1)]
+)
 async def test_r2_reward_owner_boot_retains_selection_on_restart(
-    config_case, tmp_path, monkeypatch, role, legacy_read_through
+    config_case, tmp_path, monkeypatch, role, legacy_read_through, source_release_batch_records
 ):
     from .test_competition_remote_proof_store import select_remote_proofs
 
     config_case.config, opened, _ = select_remote_proofs(
-        config_case.config, tmp_path, monkeypatch, legacy_read_through=legacy_read_through
+        config_case.config,
+        tmp_path,
+        monkeypatch,
+        legacy_read_through=legacy_read_through,
+        source_release_batch_records=source_release_batch_records,
     )
     for _ in range(2):
         await test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
             config_case, monkeypatch, role, None, True, successor=False
         )
     assert len(opened) == 4
+    assert [s.config.source_release_batch_records for s in opened] == [
+        0,
+        source_release_batch_records,
+        0,
+        source_release_batch_records,
+    ]
+
+
+@pytest.mark.parametrize("extra", [[], ["--through-block", "0"]])
+def test_credit_repair_validates_scope_before_loading_mutable_owner(monkeypatch, extra):
+    def forbidden(_):
+        pytest.fail("invalid repair must not load or open an owner")
+
+    monkeypatch.setattr(cli, "load_reward_coordinator_config", forbidden)
+    interval = "not-a-digest" if not extra else "a" * 64
+    with pytest.raises(SystemExit) as error:
+        cli.main(
+            [
+                "repair-credit",
+                "--config",
+                "/unused",
+                "--interval",
+                interval,
+                "--reason",
+                "restore original metadata",
+                *extra,
+            ]
+        )
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("kind", ["owner_busy", "repair_required"])
+def test_credit_repair_cli_reports_owned_failure_without_secrets(monkeypatch, capsys, kind):
+    from umi.competition_reward_coverage_credits import CoverageCreditRepairRequired
+
+    monkeypatch.setattr(cli, "load_reward_coordinator_config", lambda _: object())
+
+    async def repair(*args, **kwargs):
+        if kind == "owner_busy":
+            raise PrivateStateBusyError("repair-credit", "b" * 64, 11)
+        raise CoverageCreditRepairRequired("private endpoint and credentials must not leak")
+
+    monkeypatch.setattr(cli, "_run", repair)
+    with pytest.raises(SystemExit) as error:
+        cli.main(
+            [
+                "repair-credit",
+                "--config",
+                "/unused",
+                "--interval",
+                "a" * 64,
+                "--reason",
+                "original endpoint requalified",
+            ]
+        )
+    assert error.value.code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == kind
+    assert "private endpoint" not in str(report)
+
+
+@pytest.mark.parametrize("history", ["current", "predecessor"])
+async def test_credit_repair_boot_owns_original_state_without_signing_or_collecting(
+    config_case, monkeypatch, history
+):
+    config = (
+        config_case.config if history == "current" else successor_configuration(config_case.config)
+    )
+    events = []
+
+    class Provider:
+        def __init__(self, chain, policy, **kwargs):
+            self.config, self.policy = chain, policy
+
+        async def start(self):
+            events.append("provider_started")
+
+        async def aclose(self):
+            events.append("provider_closed")
+
+    async def repair(self, *, key, reason, stop):
+        assert events == ["provider_started"]
+        assert key == "a" * 64 and reason == "original endpoint restored"
+        assert self.preparation.reader.series == (
+            config.series if history == "current" else config.predecessor_series
+        )
+        with pytest.raises(PrivateStateBusyError), boot.owned_reward_state(config):
+            pass
+        events.append("repair")
+        return {"status": "coverage_credit_repaired"}
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("credit metadata repair must not load a key or start normal work")
+
+    monkeypatch.setattr(boot, "HistoricalRewardControlProvider", Provider)
+    monkeypatch.setattr(boot.StandingRewardCoverageService, "repair_credit", repair)
+    for name in ("load_named_hotkey", "StandingControlPublisher", "StandingRewardCoordinator"):
+        monkeypatch.setattr(boot, name, forbidden)
+    result = await boot.run_reward_coordinator(
+        config,
+        asyncio.Event(),
+        credit_repair=dict(key="a" * 64, reason="original endpoint restored", history=history),
+    )
+    assert result == {"status": "coverage_credit_repaired"}
+    assert events == ["provider_started", "repair", "provider_closed"]
+
+
+async def test_baseline_restore_boot_owns_existing_state_without_signing_or_collecting(
+    config_case, monkeypatch
+):
+    from umi.competition_reward_baseline_restore import CompletedCoverageBaselineRequest
+    from umi.competition_reward_decisions import RewardActivation
+    from umi.competition_settlement import PromotionHeadBinding
+
+    config, events = config_case.config, []
+    request = CompletedCoverageBaselineRequest(
+        endpoint_key="a" * 64,
+        activation=RewardActivation(
+            cohort_sha256=digest(config.series.cohorts[0]),
+            allocation_sha256="b" * 64,
+            package_sha256="c" * 64,
+            recovery_tip_sha256="d" * 64,
+            prior_opportunity_sha256="e" * 64,
+        ),
+        target_cohort_sha256="f" * 64,
+        previous=PromotionHeadBinding(
+            sequence=0,
+            promotion_sha256="1" * 64,
+            model_sha256="2" * 64,
+            contributor_hotkey=None,
+        ),
+        not_before_block=100,
+        valid_through_block=200,
+    )
+
+    class Provider:
+        def __init__(self, chain, policy, **kwargs):
+            self.config, self.policy = chain, policy
+
+        async def start(self):
+            events.append("provider_started")
+
+        async def aclose(self):
+            events.append("provider_closed")
+
+    async def review(coverage, selected):
+        assert selected == request
+        assert coverage.preparation.reader.series == config.series
+        with pytest.raises(PrivateStateBusyError), boot.owned_reward_state(config):
+            pass
+        events.append("unsigned_review")
+        return "unsigned_review"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unsigned baseline restore must not read keys or start autonomous services")
+
+    monkeypatch.setattr(boot, "HistoricalRewardControlProvider", Provider)
+    monkeypatch.setattr(boot, "prepare_completed_coverage_baseline", review)
+    for name in ("load_named_hotkey", "StandingControlPublisher", "StandingRewardCoordinator"):
+        monkeypatch.setattr(boot, name, forbidden)
+    result = await boot.run_reward_coordinator(config, asyncio.Event(), baseline_review=request)
+    assert result == "unsigned_review"
+    assert events == ["provider_started", "unsigned_review", "provider_closed"]
+    with pytest.raises(ValueError, match="separate owner operations"):
+        await boot.run_reward_coordinator(
+            config, asyncio.Event(), baseline_review=request, credit_repair={}
+        )

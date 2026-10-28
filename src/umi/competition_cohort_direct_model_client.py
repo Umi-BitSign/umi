@@ -44,6 +44,7 @@ from .competition_cohort_participation import (
     CohortParticipationRequest,
 )
 from .competition_cohort_recovery import ModelDeliveryProfile
+from .competition_model_interface import model_python_entrypoint
 from .competition_model_source_verification import model_payload_digest
 from .competition_transport_verification import TransferProgress
 from .concurrency import run_owned_thread
@@ -53,6 +54,10 @@ from .protocol import canonical_json_bytes
 
 _READ_BYTES = 8 * 1024**2
 _Report = Callable[[dict], None]
+
+
+class _ProviderGenerationUnavailable(Exception):
+    """Typed completion response requiring an authenticated generation restart."""
 
 
 def _payload_digest(source, bundle, fingerprints, policy, report=None):
@@ -135,6 +140,14 @@ async def _json_exchange(
             headers={"Content-Type": "application/json"} if body else None,
         ) as response:
             if response.status_code != 200:
+                if (
+                    response.status_code == 503
+                    and method == "POST"
+                    and path.endswith("/complete")
+                    and response.headers.get("X-UMI-Reason-Code")
+                    == "model_upload_provider_generation_unavailable"
+                ):
+                    raise _ProviderGenerationUnavailable
                 raise CompetitionSubmissionError(
                     "model_upload_rejected", status_code=response.status_code
                 )
@@ -242,6 +255,7 @@ async def submit_direct_cohort_model(
     ):
         raise ValueError("direct model upload requires its signed cohort profile and hotkey")
     bundle = submission.model_bundle
+    model_python_entrypoint(bundle)
     source = Path(os.path.abspath(source))
     if fingerprints is None:
         fingerprints = await _verify_source_owned(source, bundle, policy, report, retry_seconds)
@@ -437,153 +451,162 @@ async def submit_direct_cohort_model(
                 report=report,
             )
 
-        with TransferProgress("direct_model_upload", payload.total_bytes, report) as progress:
-            completed: dict[int, DirectModelUploadPart] = {}
-            pending = list(range(1, payload.total_parts + 1))
-            wait = retry_seconds
-            while pending:
-                batch = tuple(pending[: delivery.maximum_concurrent_parts])
-                part_request = DirectModelUploadPartRequest(
-                    schema="umi-direct-model-upload-part-request/1",
-                    reservation_sha256=reservation_sha256,
-                    generation=body.generation,
-                    part_numbers=batch,
-                )
-                signed_part_request = SignedDirectModelUploadPartRequest(
-                    schema="umi-signed-direct-model-upload-part-request/1",
-                    request=part_request,
-                    signature=sign_object(part_request, wallet),
-                )
-                request_bytes = canonical_json_bytes(signed_part_request)
-                raw = await _retry(
-                    lambda request_bytes=request_bytes: _json_exchange(
-                        intake,
-                        "POST",
-                        f"/v1/competition/cohorts/{cohort}/direct-model-uploads/"
-                        f"{reservation_sha256}/parts",
-                        body=request_bytes,
-                    ),
-                    retry_seconds,
-                    report,
-                )
-                try:
-                    capabilities = DirectModelUploadPartCapabilities.model_validate_json(raw)
-                    if (
-                        capabilities.reservation_sha256 != reservation_sha256
-                        or capabilities.generation != body.generation
-                        or tuple(value.part_number for value in capabilities.capabilities) != batch
-                        or any(
-                            value.reservation_sha256 != reservation_sha256
-                            or value.generation != body.generation
-                            or value.size_bytes
-                            != min(
-                                payload.part_size_bytes,
-                                payload.total_bytes
-                                - (value.part_number - 1) * payload.part_size_bytes,
+        while True:
+            with TransferProgress("direct_model_upload", payload.total_bytes, report) as progress:
+                completed: dict[int, DirectModelUploadPart] = {}
+                pending = list(range(1, payload.total_parts + 1))
+                wait = retry_seconds
+                while pending:
+                    batch = tuple(pending[: delivery.maximum_concurrent_parts])
+                    part_request = DirectModelUploadPartRequest(
+                        schema="umi-direct-model-upload-part-request/1",
+                        reservation_sha256=reservation_sha256,
+                        generation=body.generation,
+                        part_numbers=batch,
+                    )
+                    signed_part_request = SignedDirectModelUploadPartRequest(
+                        schema="umi-signed-direct-model-upload-part-request/1",
+                        request=part_request,
+                        signature=sign_object(part_request, wallet),
+                    )
+                    request_bytes = canonical_json_bytes(signed_part_request)
+                    raw = await _retry(
+                        lambda request_bytes=request_bytes: _json_exchange(
+                            intake,
+                            "POST",
+                            f"/v1/competition/cohorts/{cohort}/direct-model-uploads/"
+                            f"{reservation_sha256}/parts",
+                            body=request_bytes,
+                        ),
+                        retry_seconds,
+                        report,
+                    )
+                    try:
+                        capabilities = DirectModelUploadPartCapabilities.model_validate_json(raw)
+                        if (
+                            capabilities.reservation_sha256 != reservation_sha256
+                            or capabilities.generation != body.generation
+                            or tuple(value.part_number for value in capabilities.capabilities)
+                            != batch
+                            or any(
+                                value.reservation_sha256 != reservation_sha256
+                                or value.generation != body.generation
+                                or value.size_bytes
+                                != min(
+                                    payload.part_size_bytes,
+                                    payload.total_bytes
+                                    - (value.part_number - 1) * payload.part_size_bytes,
+                                )
+                                for value in capabilities.capabilities
                             )
-                            for value in capabilities.capabilities
-                        )
-                    ):
-                        raise CompetitionSubmissionError("invalid_model_upload_status")
-                except ValueError:
-                    # Validation errors may embed the bearer capability URL.
-                    raise CompetitionSubmissionError("invalid_model_upload_status") from None
-                results = await asyncio.gather(
-                    *(
-                        _upload_part(
-                            objects,
-                            capability,
-                            source,
-                            bundle,
-                            fingerprints,
-                            offsets,
-                            payload,
-                        )
-                        for capability in capabilities.capabilities
-                    ),
-                    return_exceptions=True,
-                )
-                retry = False
-                restart = False
-                for result in results:
-                    if isinstance(result, DirectModelUploadPart):
-                        completed[result.part_number] = result
-                    elif (
-                        isinstance(result, CompetitionSubmissionError) and result.status_code == 404
-                    ):
-                        restart = True
-                    elif isinstance(result, CompetitionSubmissionError) and (
-                        result.reason_code == "model_upload_transport_unavailable"
-                        or result.status_code in {403, 408, 429, 500, 502, 503, 504}
-                    ):
-                        retry = True
-                    elif isinstance(result, BaseException):
-                        raise result
-                    else:
-                        raise RuntimeError("direct upload part returned an invalid result")
-                if restart:
-                    await restart_expired_generation()
-                    completed.clear()
-                    progress.set_completed(0)
-                    pending = list(range(1, payload.total_parts + 1))
-                    wait = retry_seconds
-                    continue
-                pending = [number for number in pending if number not in completed]
-                progress.set_completed(sum(part.size_bytes for part in completed.values()))
-                report(
-                    {
-                        "status": "model_upload_progress",
-                        "upload_sha256": payload.upload_sha256,
-                        "uploaded_bytes": sum(part.size_bytes for part in completed.values()),
-                        "total_bytes": payload.total_bytes,
-                    }
-                )
-                if retry:
-                    progress.emit("retrying", reason="model_upload_transport_unavailable")
+                        ):
+                            raise CompetitionSubmissionError("invalid_model_upload_status")
+                    except ValueError:
+                        # Validation errors may embed the bearer capability URL.
+                        raise CompetitionSubmissionError("invalid_model_upload_status") from None
+                    results = await asyncio.gather(
+                        *(
+                            _upload_part(
+                                objects,
+                                capability,
+                                source,
+                                bundle,
+                                fingerprints,
+                                offsets,
+                                payload,
+                            )
+                            for capability in capabilities.capabilities
+                        ),
+                        return_exceptions=True,
+                    )
+                    retry = False
+                    restart = False
+                    for result in results:
+                        if isinstance(result, DirectModelUploadPart):
+                            completed[result.part_number] = result
+                        elif (
+                            isinstance(result, CompetitionSubmissionError)
+                            and result.status_code == 404
+                        ):
+                            restart = True
+                        elif isinstance(result, CompetitionSubmissionError) and (
+                            result.reason_code == "model_upload_transport_unavailable"
+                            or result.status_code in {403, 408, 429, 500, 502, 503, 504}
+                        ):
+                            retry = True
+                        elif isinstance(result, BaseException):
+                            raise result
+                        else:
+                            raise RuntimeError("direct upload part returned an invalid result")
+                    if restart:
+                        await restart_expired_generation()
+                        completed.clear()
+                        progress.set_completed(0)
+                        pending = list(range(1, payload.total_parts + 1))
+                        wait = retry_seconds
+                        continue
+                    pending = [number for number in pending if number not in completed]
+                    progress.set_completed(sum(part.size_bytes for part in completed.values()))
                     report(
                         {
-                            "status": "model_delivery_retry",
-                            "reason_code": "model_upload_transport_unavailable",
-                            "http_status": None,
-                            "retry_seconds": wait,
+                            "status": "model_upload_progress",
+                            "upload_sha256": payload.upload_sha256,
+                            "uploaded_bytes": sum(part.size_bytes for part in completed.values()),
+                            "total_bytes": payload.total_bytes,
                         }
                     )
-                    await asyncio.sleep(wait)
-                    wait = min(60, wait * 2)
-                else:
-                    wait = retry_seconds
+                    if retry:
+                        progress.emit("retrying", reason="model_upload_transport_unavailable")
+                        report(
+                            {
+                                "status": "model_delivery_retry",
+                                "reason_code": "model_upload_transport_unavailable",
+                                "http_status": None,
+                                "retry_seconds": wait,
+                            }
+                        )
+                        await asyncio.sleep(wait)
+                        wait = min(60, wait * 2)
+                    else:
+                        wait = retry_seconds
 
-        if fingerprints != await run_owned_thread(_snapshot, source, bundle):
-            raise ValueError("model source changed during direct upload")
-        completion = DirectModelUploadCompletion(
-            schema="umi-direct-model-upload-completion/1",
-            reservation_sha256=reservation_sha256,
-            generation=body.generation,
-            parts=tuple(completed[number] for number in range(1, payload.total_parts + 1)),
-        )
-        signed_completion = SignedDirectModelUploadCompletion(
-            schema="umi-signed-direct-model-upload-completion/1",
-            completion=completion,
-            signature=sign_object(completion, wallet),
-        )
-        with TransferProgress(
-            "direct_model_object_completion", 1, report, unit="objects"
-        ) as progress:
-            raw = await _retry(
-                lambda: _json_exchange(
-                    intake,
-                    "POST",
-                    f"/v1/competition/cohorts/{cohort}/direct-model-uploads/"
-                    f"{reservation_sha256}/complete",
-                    body=canonical_json_bytes(signed_completion),
-                ),
-                retry_seconds,
-                report,
+            if fingerprints != await run_owned_thread(_snapshot, source, bundle):
+                raise ValueError("model source changed during direct upload")
+            completion = DirectModelUploadCompletion(
+                schema="umi-direct-model-upload-completion/1",
+                reservation_sha256=reservation_sha256,
+                generation=body.generation,
+                parts=tuple(completed[number] for number in range(1, payload.total_parts + 1)),
             )
-            completed_object = DirectModelUploadObject.model_validate_json(raw)
-            if completed_object.reservation_sha256 != reservation_sha256:
-                raise CompetitionSubmissionError("invalid_model_upload_status")
-            progress.advance(1)
+            signed_completion = SignedDirectModelUploadCompletion(
+                schema="umi-signed-direct-model-upload-completion/1",
+                completion=completion,
+                signature=sign_object(completion, wallet),
+            )
+            with TransferProgress(
+                "direct_model_object_completion", 1, report, unit="objects"
+            ) as progress:
+                try:
+                    raw = await _retry(
+                        lambda signed_completion=signed_completion: _json_exchange(
+                            intake,
+                            "POST",
+                            f"/v1/competition/cohorts/{cohort}/direct-model-uploads/"
+                            f"{reservation_sha256}/complete",
+                            body=canonical_json_bytes(signed_completion),
+                        ),
+                        retry_seconds,
+                        report,
+                    )
+                except _ProviderGenerationUnavailable:
+                    progress.emit("retrying", reason="model_upload_provider_generation_unavailable")
+                    await restart_expired_generation()
+                    continue
+                completed_object = DirectModelUploadObject.model_validate_json(raw)
+                if completed_object.reservation_sha256 != reservation_sha256:
+                    raise CompetitionSubmissionError("invalid_model_upload_status")
+                progress.advance(1)
+            break
         with TransferProgress("model_payload_preservation", 1, report, unit="payloads") as progress:
             while True:
                 status = await current_status()

@@ -9,14 +9,14 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import Field, TypeAdapter
+from pydantic import Field, TypeAdapter, model_serializer, model_validator
 
 from .competition_chain import RegistrationCapture
 from .competition_cohort_admission_queue import CohortAdmissionQueue
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
 from .competition_cohort_intake_records import read_participation, replay_participation
 from .competition_cohort_participation import CohortAdmissionStatus
-from .competition_cohort_recovery import Block, Phase
+from .competition_cohort_recovery import Block, Phase, cohort_tracks
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .open_competition import Hotkey, Track, digest, identity
 from .protocol import Hex32, StrictProtocolModel
@@ -35,7 +35,9 @@ class RetainedParticipationStatus(StrictProtocolModel):
 
 
 class CohortParticipationStatus(StrictProtocolModel):
-    schema_: Literal["umi-cohort-participation-status/1"] = Field(alias="schema")
+    schema_: Literal["umi-cohort-participation-status/1", "umi-cohort-participation-status/2"] = (
+        Field(alias="schema")
+    )
     nonce: Nonce
     policy_sha256: Hex32
     cohort_sha256: Hex32
@@ -46,7 +48,9 @@ class CohortParticipationStatus(StrictProtocolModel):
     track: Track
     phase: Phase | Literal["complete", "revoked"]
     intake_fenced: bool
-    pending_policy_adoption: Literal["adopt_model_delivery", "adopt_request_tail_rule"] | None
+    pending_policy_adoption: (
+        Literal["adopt_model_delivery", "adopt_request_tail_rule", "adopt_evaluation_suite"] | None
+    )
     latest: RetainedParticipationStatus | None
     requested_consent_sha256: Hex32 | None
     requested_consent_status: Literal["not_requested", "not_retained", "latest", "superseded"]
@@ -59,6 +63,32 @@ class CohortParticipationStatus(StrictProtocolModel):
     sealed_selection_verified: Literal[False] = False
     runtime_migration_authorized: Literal[False] = False
     chain_submission_authorized: Literal[False] = False
+    profile_tracks: tuple[Literal["model"]] | None = None
+    profile_service_pool_bps: Literal[0] | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_status(self, handler):
+        value = handler(self)
+        if self.profile_tracks is None:
+            value.pop("profile_tracks", None)
+        if self.profile_service_pool_bps is None:
+            value.pop("profile_service_pool_bps", None)
+        return value
+
+    @model_validator(mode="after")
+    def explicit_profile(self):
+        amended = self.schema_ == "umi-cohort-participation-status/2"
+        if amended != (self.profile_tracks is not None) or amended != (
+            self.profile_service_pool_bps is not None
+        ):
+            raise ValueError("participation profile status requires its explicit schema")
+        if (
+            amended
+            and self.track not in self.profile_tracks
+            and (not self.intake_fenced or self.minimum_next_sequence is not None)
+        ):
+            raise ValueError("disabled track cannot advertise a new enrollment sequence")
+        return self
 
 
 def participation_status(
@@ -165,8 +195,14 @@ def participation_status(
                     raise ValueError("requested participation contradicts latest retained sequence")
                 relation = "not_retained" if requested is None else "superseded"
         next_sequence = 1 if latest is None else latest.sequence + 1
+        profile = state.model_delivery_adoption
+        model_only = profile is not None and profile.eligible_tracks == ("model",)
+        tracks = cohort_tracks(history.plan, ("endpoint", "model"), adoption=profile)
+        enabled = track in tracks and track in intake.tracks
         return CohortParticipationStatus(
-            schema="umi-cohort-participation-status/1",
+            schema="umi-cohort-participation-status/2"
+            if model_only
+            else "umi-cohort-participation-status/1",
             nonce=nonce,
             policy_sha256=digest(intake.policy),
             cohort_sha256=cohort,
@@ -176,13 +212,15 @@ def participation_status(
             hotkey=hotkey,
             track=track,
             phase=state.phase,
-            intake_fenced=fenced,
+            intake_fenced=fenced or not enabled,
             pending_policy_adoption=adoption,
             latest=latest,
             requested_consent_sha256=consent,
             requested_consent_status=relation,
             requested=requested,
-            minimum_next_sequence=next_sequence if next_sequence < 2**32 else None,
+            minimum_next_sequence=next_sequence if enabled and next_sequence < 2**32 else None,
+            profile_tracks=("model",) if model_only else None,
+            profile_service_pool_bps=0 if model_only else None,
             submission_not_before_block=max(
                 state.not_before_block,
                 0

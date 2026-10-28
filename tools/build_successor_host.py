@@ -9,7 +9,11 @@ repeat builds require a fresh output root and never replace a completed artifact
 from __future__ import annotations
 
 import argparse
+import base64
+import csv
+import email.parser
 import hashlib
+import io
 import json
 import os
 import re
@@ -17,7 +21,9 @@ import shutil
 import stat
 import time
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
+from zipfile import ZipFile
 
 try:
     import tomllib
@@ -40,6 +46,178 @@ from umi.protocol import canonical_json_bytes
 from umi.validator_supervisor import ValidatorSupervisorConfig
 
 HOSTS_ROOT = Path("/opt/umi-validator-supervisor-hosts")
+
+
+def _wheel_path(value: str) -> str:
+    path = PurePosixPath(value)
+    if (
+        not value
+        or path.is_absolute()
+        or ".." in path.parts
+        or "\\" in value
+        or path.as_posix() != value
+        or path.suffix == ".pth"
+        or any(part.endswith(".data") for part in path.parts)
+    ):
+        raise ValueError("dependency wheel has an unsupported path")
+    return value
+
+
+def locked_wheel_migration(
+    previous: Path,
+    source: Path,
+    wheels: tuple[Path, ...],
+    signed_files: dict[str, HostArtifactFile],
+) -> list[dict]:
+    """Plan explicit pure-Python wheel replacements against both complete locks.
+
+    Dependency edges, registry and all unrelated lock semantics stay identical.
+    Installation scripts, namespace/shared roots and binary wheels need a separate
+    supported builder; never run package installation code in the selected host.
+    """
+    old_raw, new_raw = ((root / "uv.lock").read_bytes() for root in (previous, source))
+    if hashlib.sha256(old_raw).hexdigest() != signed_files["uv.lock"].sha256:
+        raise ValueError("selected signed dependency lock differs")
+    if old_raw == new_raw:
+        if wheels:
+            raise ValueError("dependency wheels supplied without a lock transition")
+        return []
+    if not wheels:
+        raise ValueError("candidate dependency lock changed: supply exact locked dependency wheels")
+    old, new = (tomllib.loads(raw.decode()) for raw in (old_raw, new_raw))
+    old_packages, new_packages = (value.pop("package") for value in (old, new))
+    old_by_name, new_by_name = (
+        {p["name"]: p for p in rows} for rows in (old_packages, new_packages)
+    )
+    if (
+        old != new
+        or len(old_by_name) != len(old_packages)
+        or len(new_by_name) != len(new_packages)
+        or old_by_name.keys() != new_by_name.keys()
+    ):
+        raise ValueError("dependency lock graph or resolution semantics changed")
+    changed = [name for name in old_by_name if old_by_name[name] != new_by_name[name]]
+    if len(changed) != len(wheels):
+        raise ValueError("supply exactly one locked wheel for every changed dependency")
+    sites = list(previous.glob(".venv/lib/python*/site-packages"))
+    if len(sites) != 1:
+        raise ValueError("unsupported dependency installation layout")
+    site = sites[0]
+    plans = []
+    remaining = set(wheels)
+    for name in changed:
+        old_package, new_package = old_by_name[name], new_by_name[name]
+
+        def keep(package):
+            return {k: v for k, v in package.items() if k not in {"version", "wheels", "sdist"}}
+
+        if (
+            keep(old_package) != keep(new_package)
+            or old_package["version"] == new_package["version"]
+            or set(new_package.get("source", {})) != {"registry"}
+        ):
+            raise ValueError("dependency migration changes edges or source semantics")
+        candidates = [
+            (path, row)
+            for path in remaining
+            for row in new_package.get("wheels", [])
+            if path.name == Path(urlsplit(row["url"]).path).name
+        ]
+        if len(candidates) != 1:
+            raise ValueError("dependency wheel is absent or ambiguous in target lock")
+        wheel, locked = candidates[0]
+        if (
+            wheel.resolve(strict=True) != wheel
+            or not stat.S_ISREG(wheel.lstat().st_mode)
+            or wheel.stat().st_nlink != 1
+            or not 0 < wheel.stat().st_size <= 32 * 1024**2
+            or not wheel.name.endswith("-py3-none-any.whl")
+        ):
+            raise ValueError("dependency wheel must be one bounded unlinked pure Python wheel")
+        raw = wheel.read_bytes()
+        if (
+            len(raw) != locked["size"]
+            or "sha256:" + hashlib.sha256(raw).hexdigest() != locked["hash"]
+        ):
+            raise ValueError("dependency wheel differs from target lock hash or size")
+        old_info = f"{name.replace('-', '_')}-{old_package['version']}.dist-info"
+        new_info = f"{name.replace('-', '_')}-{new_package['version']}.dist-info"
+        record = site / old_info / "RECORD"
+        record_raw = record.read_bytes()
+        record_key = record.relative_to(previous).as_posix()
+        if (
+            record_key not in signed_files
+            or hashlib.sha256(record_raw).hexdigest() != signed_files[record_key].sha256
+        ):
+            raise ValueError("selected signed dependency RECORD differs")
+        old_paths = {_wheel_path(row[0]) for row in csv.reader(io.StringIO(record_raw.decode()))}
+        old_roots = {PurePosixPath(p).parts[0] for p in old_paths} - {old_info}
+        if not old_roots or any(root.endswith(".dist-info") for root in old_roots):
+            raise ValueError("dependency owns unsupported shared metadata")
+        for root in old_roots | {old_info}:
+            files = {
+                p.relative_to(site).as_posix() for p in (site / root).rglob("*") if p.is_file()
+            }
+            if not files <= old_paths:
+                raise ValueError("dependency has shared or unrecorded installed files")
+        with ZipFile(io.BytesIO(raw)) as archive:
+            entries = archive.infolist()
+            if len({p.filename for p in entries}) != len(entries):
+                raise ValueError("dependency wheel contains duplicate paths")
+            if sum(p.file_size for p in entries) > 64 * 1024**2:
+                raise ValueError("dependency wheel expansion exceeds bounded working set")
+            files = {}
+            for entry in entries:
+                if entry.is_dir():
+                    _wheel_path(entry.filename.rstrip("/"))
+                    continue
+                path = _wheel_path(entry.filename)
+                if stat.S_ISLNK(entry.external_attr >> 16):
+                    raise ValueError("dependency wheel contains a symlink")
+                files[path] = archive.read(entry)
+        if {PurePosixPath(p).parts[0] for p in files} != old_roots | {new_info}:
+            raise ValueError("dependency wheel changes package ownership roots")
+        metadata = email.parser.BytesParser().parsebytes(files[new_info + "/METADATA"])
+        wheel_metadata = email.parser.BytesParser().parsebytes(files[new_info + "/WHEEL"])
+        if (
+            metadata["Name"] != name
+            or metadata["Version"] != new_package["version"]
+            or wheel_metadata["Root-Is-Purelib"] != "true"
+            or wheel_metadata.get_all("Tag") != ["py3-none-any"]
+            or new_info + "/entry_points.txt" in files
+        ):
+            raise ValueError("dependency wheel metadata or entry points are unsupported")
+        rows = list(csv.reader(io.StringIO(files[new_info + "/RECORD"].decode())))
+        if len(rows) != len(files) or {row[0] for row in rows} != files.keys():
+            raise ValueError("dependency wheel RECORD inventory differs")
+        for path, digest, length in rows:
+            if path == new_info + "/RECORD" and digest == length == "":
+                continue
+            expected = "sha256=" + base64.urlsafe_b64encode(
+                hashlib.sha256(files[path]).digest()
+            ).decode().rstrip("=")
+            if digest != expected or length != str(len(files[path])):
+                raise ValueError("dependency wheel RECORD integrity differs")
+        plans.append(
+            {
+                "site": site.relative_to(previous),
+                "remove": old_paths,
+                "files": files,
+                "report": {
+                    "name": name,
+                    "previous_version": old_package["version"],
+                    "version": new_package["version"],
+                    "wheel_sha256": locked["hash"][7:],
+                    "wheel_bytes": len(raw),
+                    "removed_files": len(old_paths),
+                    "installed_files": len(files),
+                },
+            }
+        )
+        remaining.remove(wheel)
+    if remaining:
+        raise ValueError("unused dependency wheel")
+    return plans
 
 
 def source_sha256(root: Path) -> str:
@@ -213,6 +391,7 @@ def build_successor_host(
     maintenance_path: Path,
     hosts_root: Path = HOSTS_ROOT,
     minimum_build_available_bytes: int = 3 * 1024**3,
+    dependency_wheels: tuple[Path, ...] = (),
     emit: Callable[[dict], None] = _emit,
 ) -> dict:
     """Prepare output_root/unsigned-host and unsigned-host-build.json.
@@ -235,6 +414,7 @@ def build_successor_host(
             maintenance_path=maintenance_path,
             hosts_root=hosts_root,
             minimum_build_available_bytes=minimum_build_available_bytes,
+            dependency_wheels=dependency_wheels,
             progress=progress,
         )
     except Exception as error:
@@ -254,6 +434,7 @@ def _build(
     maintenance_path: Path,
     hosts_root: Path,
     minimum_build_available_bytes: int,
+    dependency_wheels: tuple[Path, ...],
     progress: _Progress,
 ) -> dict:
     progress.update("preflight", 0, 1)
@@ -303,8 +484,16 @@ def _build(
         config=config,
         expected_manifest_sha256=previous_manifest_sha256,
     )
-    if (source / "uv.lock").read_bytes() != (previous / "uv.lock").read_bytes():
-        raise ValueError("candidate dependency lock changed: uv.lock")
+    metadata_bytes = {
+        name: (source / name).read_bytes()
+        for name in ("pyproject.toml", "uv.lock", "README.md", "LICENSE")
+    }
+    migration = locked_wheel_migration(
+        previous,
+        source,
+        tuple(dependency_wheels),
+        {item.path: item for item in signed.manifest.files},
+    )
     added_scripts = compatible_project_scripts(
         (previous / "pyproject.toml").read_bytes(), (source / "pyproject.toml").read_bytes()
     )
@@ -362,6 +551,28 @@ def _build(
     for path in (tree, *tree.rglob("*")):
         if path.is_dir():
             path.chmod(0o700)
+    if migration:
+        progress.update("locked_dependency_migration", 0, len(migration))
+        for index, plan in enumerate(migration, 1):
+            site = tree / plan["site"]
+            for relative in plan["remove"]:
+                (site / relative).unlink()
+            for relative, raw in plan["files"].items():
+                target = site / relative
+                if target.exists():
+                    raise ValueError("dependency wheel conflicts with retained installation")
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                target.write_bytes(raw)
+            parents = {
+                parent
+                for relative in plan["remove"]
+                for parent in (site / relative).parents
+                if site in parent.parents
+            }
+            for directory in sorted(parents, key=lambda p: len(p.parts), reverse=True):
+                if directory.is_dir() and not any(directory.iterdir()):
+                    directory.rmdir()
+            progress.update("locked_dependency_migration", index, len(migration))
     progress.update("source_and_launcher_migration", 0, 1)
     shutil.rmtree(tree / "src")
     shutil.copytree(
@@ -371,6 +582,11 @@ def _build(
         target = tree / name
         target.chmod(0o600)
         shutil.copyfile(source / name, target)
+        if (
+            target.read_bytes() != metadata_bytes[name]
+            or (source / name).read_bytes() != metadata_bytes[name]
+        ):
+            raise ValueError("candidate metadata changed during build")
     if (
         source_sha256(tree / "src/umi") != source_hash
         or source_sha256(source / "src/umi") != source_hash
@@ -462,6 +678,7 @@ def _build(
         "rewritten_paths": sorted(rewritten),
         "guarded_entrypoints": sorted(HOST_ENTRYPOINTS),
         "uninstalled_added_project_scripts": added_scripts,
+        "locked_dependency_migrations": [plan["report"] for plan in migration],
         "wallet_accessed": False,
         "signed": False,
         "staged": False,
@@ -482,6 +699,9 @@ def main() -> None:
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--hosts-root", type=Path, default=HOSTS_ROOT)
     parser.add_argument("--minimum-build-available-bytes", type=int, default=3 * 1024**3)
+    parser.add_argument(
+        "--dependency-wheel", dest="dependency_wheels", type=Path, action="append", default=[]
+    )
     os.umask(0o077)
     _emit(build_successor_host(**vars(parser.parse_args())))
 

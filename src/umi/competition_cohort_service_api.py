@@ -382,7 +382,7 @@ class ServiceWorkAdmissionAPI:
                 # fence before collecting fresh owner inputs; accepted retries
                 # still recover first, and the commit rechecks capacity atomically.
                 reason, _ = await self._local(self._capacity, queue)
-                if reason in ("sealed", "tail_fenced"):
+                if reason in ("sealed", "tail_fenced", "model_only"):
                     raise ServiceQueueClosed(reason)
                 if reason != "accepting":
                     raise ServiceQueueBackpressure("service queue has no unreserved claim capacity")
@@ -454,10 +454,10 @@ class ServiceWorkAdmissionAPI:
         # commit owns the writer and rechecks its actual allowance atomically.
         # Readiness must not hold up dispatch/retirement writers or wait for them.
         with canonical_json_reuse(), queue.journal.read_transaction(wait=False) as db:
-            catalog, _ = queue._catalog(db)
+            catalog, round_ = queue._catalog(db)
             count = db.execute("SELECT COUNT(*) FROM service_claims").fetchone()[0]
             remaining = max(0, min(len(catalog.catalog.work), queue.config.maximum_claims) - count)
-            closed = queue._admission_closed(db)
+            closed = queue._admission_closed(db, round_=round_)
             if closed is not None:
                 return closed, remaining
             if not remaining:
@@ -510,7 +510,7 @@ class ServiceWorkAdmissionAPI:
                 reason, remaining = await run_owned_thread(self._capacity, queue)
                 result.update(reason_code=reason, remaining_claims=remaining)
                 if reason != "accepting":
-                    if reason in ("sealed", "tail_fenced"):
+                    if reason in ("sealed", "tail_fenced", "model_only"):
                         result["new_claims_closed"] = True
                     return result
                 result["reason_code"] = "owner_inputs_unavailable"
@@ -526,7 +526,7 @@ class ServiceWorkAdmissionAPI:
                 )
                 result.update(reason_code=reason, remaining_claims=remaining)
                 if reason != "accepting":
-                    if reason in ("sealed", "tail_fenced"):
+                    if reason in ("sealed", "tail_fenced", "model_only"):
                         result["new_claims_closed"] = True
                     return result
                 result.update(

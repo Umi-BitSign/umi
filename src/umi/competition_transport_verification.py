@@ -6,26 +6,41 @@ certification or current authority. Damaged records receive visible scoped repai
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import stat
+import sys
 import tempfile
 import time
-from contextlib import suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar
+from itertools import count
 from pathlib import Path
 from threading import Event, RLock, Thread
 
+from .competition_cohort_public_progress import (
+    EXECUTION_JOB_SCOPE,
+    PUBLIC_COHORT_PROGRESS,
+    PUBLIC_COHORT_SCOPE,
+)
 from .competition_reward_proof_archive import _publication_clock_ns
 from .competition_verification_rules import runtime_identity
 from .file_identity import file_fingerprint
-from .private_files import ensure_private_directory, lock_private_file, private_path
+from .private_files import (
+    PrivateStateBusyError,
+    ensure_private_directory,
+    lock_private_file,
+    private_path,
+)
 
 _LOG = logging.getLogger("umi.competition.progress")
 _CURRENT = ContextVar("umi_transport_progress", default=None)
 BYTE_VERIFIER_ABI = "umi-local-byte-verification/1"
+_PUBLIC_WORK_IDS = count(1)
 
 
 def verifier_semantics():
@@ -91,6 +106,7 @@ class TransferProgress:
         planning_work_bytes=None,
         total_operations=None,
         planning_unit_seconds=(1.0, 300.0),
+        idle_stall_seconds=None,
     ):
         self.stage, self.total, self.report = stage, total, report
         self.unit = unit
@@ -102,15 +118,29 @@ class TransferProgress:
         self.completed_operations = self.native_operations = 0
         self.planning_work_bytes = planning_work_bytes
         self.planning_unit_seconds = planning_unit_seconds
+        if idle_stall_seconds is not None:
+            if (
+                isinstance(idle_stall_seconds, bool)
+                or not isinstance(idle_stall_seconds, (int, float))
+                or not math.isfinite(idle_stall_seconds)
+                or idle_stall_seconds <= 0
+            ):
+                raise ValueError("progress idle stall interval must be positive and finite")
+            self.stalled_seconds = idle_stall_seconds
         self.last_emit = 0.0
         self.token = None
         self.started = self.changed = self.rate_started = time.monotonic()
+        self.accounted_at = self.started
+        self.byte_seconds = self.operation_seconds = 0.0
         self.completed = self.native = 0
         self.state = "running"
         self.reason = None
         self.lock, self.stop = RLock(), Event()
         self.thread = None
         self.child = None
+        self.public_cohort = PUBLIC_COHORT_SCOPE.get()
+        self.public_work_id = -next(_PUBLIC_WORK_IDS)
+        self.job_sha256 = EXECUTION_JOB_SCOPE.get()
 
     def __enter__(self):
         self.token = _CURRENT.set(self)
@@ -121,7 +151,7 @@ class TransferProgress:
 
     def __exit__(self, kind, value, traceback):
         self.stop.set()
-        if self.thread is not None:
+        if self.thread is not None and self.thread.ident is not None:
             self.thread.join()
         self.emit(
             "completed" if kind is None and self._complete() else "retrying",
@@ -129,6 +159,7 @@ class TransferProgress:
         )
         if self.token is not None:
             _CURRENT.reset(self.token)
+            self.token = None
 
     def _complete(self):
         return self.completed == self.total and (
@@ -145,6 +176,7 @@ class TransferProgress:
             ):
                 raise ValueError("transfer operations exceed declared work")
             self.completed_operations += count
+            self._account_interval("operation", count, restored)
             if not restored:
                 self.native_operations += count
             if count:
@@ -163,6 +195,7 @@ class TransferProgress:
 
     def advance(self, count, *, restored=False):
         with self.lock:
+            self._account_interval("byte", count, restored)
             self.completed += count
             if not restored:
                 self.native += count
@@ -177,6 +210,21 @@ class TransferProgress:
                 self.emit(
                     "running", reason="restored_checkpoint" if restored else "native_progress"
                 )
+
+    def _account_interval(self, kind, count, restored):
+        # Attribute each interval once. Byte advances include obtaining/writing
+        # bytes; the following operation advance measures its fixed completion
+        # work. Bulk transfer time must not become a per-file overhead sample.
+        if not count:
+            return
+        now = time.monotonic()
+        elapsed = max(0.0, now - self.accounted_at)
+        self.accounted_at = now
+        if not restored:
+            if kind == "byte":
+                self.byte_seconds += elapsed
+            else:
+                self.operation_seconds += elapsed
 
     def child_report(self):
         """Observe one child scope without claiming its work as parent completion.
@@ -221,6 +269,7 @@ class TransferProgress:
                         "total_units",
                         "unit",
                         "eta_seconds",
+                        "planning_eta_seconds",
                         "eta_basis",
                     )
                 }
@@ -239,7 +288,10 @@ class TransferProgress:
                 raise ValueError("transfer progress exceeds its declared work")
             if count < self.completed:
                 self.completed = self.native = 0
+                self.completed_operations = self.native_operations = 0
+                self.byte_seconds = self.operation_seconds = 0.0
                 self.rate_started = self.changed = time.monotonic()
+                self.accounted_at = self.rate_started
                 self.emit("retrying", reason="transfer_generation_reset")
             self.advance(count - self.completed, restored=restored)
 
@@ -253,11 +305,14 @@ class TransferProgress:
                 self.reason = reason
             elapsed = now - self.started
             stalled = state == "stalled" or (
-                state in {"running", "waiting"} and now - self.changed >= self.stalled_seconds
+                state in {"started", "running", "waiting"}
+                and now - self.changed >= self.stalled_seconds
             )
             remaining = max(0, self.total - self.completed)
             measured_elapsed = now - self.rate_started
-            rate = self.native / measured_elapsed if measured_elapsed >= 1 and self.native else None
+            split_costs = self.unit == "bytes" and self.total_operations is not None
+            byte_elapsed = self.byte_seconds if split_costs else measured_elapsed
+            rate = self.native / byte_elapsed if byte_elapsed >= 1 and self.native else None
             eta, planning = None, None
             basis = "waiting_for_native_samples"
             if state == "completed":
@@ -290,22 +345,91 @@ class TransferProgress:
                 and state not in {"retrying", "refused", "repair_required", "waiting"}
             ):
                 operations_left = self.total_operations - self.completed_operations
-                if operations_left and self.native_operations and measured_elapsed >= 1:
-                    operation_eta = operations_left * measured_elapsed / self.native_operations
-                    eta = max(eta or 0, operation_eta)
-                    basis = "maximum_native_byte_and_operation_extrapolations"
-                elif operations_left and remaining == 0:
+                if operations_left and self.native_operations and self.operation_seconds > 0:
+                    operation_eta = (
+                        operations_left * self.operation_seconds / self.native_operations
+                    )
+                    eta = (
+                        (remaining / rate if remaining else 0) + operation_eta
+                        if (not remaining or rate is not None)
+                        else None
+                    )
+                    basis = (
+                        "separate_native_byte_time_and_operation_overhead"
+                        if eta is not None
+                        else "waiting_for_native_byte_samples"
+                    )
+                elif operations_left:
                     eta, basis = None, "waiting_for_native_operation_samples"
             if (
-                remaining == 0
-                and self.child is not None
+                self.child is not None
                 and self.child.get("status") != "completed"
                 and state != "completed"
-                and operation_eta is None
             ):
-                eta, basis = None, "required_child_scope_incomplete"
+                child_eta = self.child.get("eta_seconds")
+                child_planning = self.child.get("planning_eta_seconds")
+                if (
+                    not stalled
+                    and state not in {"retrying", "refused", "repair_required", "waiting"}
+                    and isinstance(child_eta, (int, float))
+                    and child_eta > 0
+                ):
+                    if eta is not None:
+                        eta = max(eta, child_eta)
+                        basis = "required_child_and_remaining_native_work"
+                    elif not remaining and (
+                        self.total_operations is None
+                        or self.completed_operations == self.total_operations
+                    ):
+                        eta, basis = child_eta, "required_child_remaining_work"
+                    else:
+                        planning, basis = None, "waiting_for_parent_and_required_child_samples"
+                else:
+                    if (
+                        not stalled
+                        and state not in {"retrying", "refused", "repair_required", "waiting"}
+                        and isinstance(child_planning, (list, tuple))
+                        and len(child_planning) == 2
+                        and all(
+                            isinstance(value, (int, float))
+                            and not isinstance(value, bool)
+                            and math.isfinite(value)
+                            and value >= 0
+                            for value in child_planning
+                        )
+                        and child_planning[0] <= child_planning[1]
+                    ):
+                        parent_planning = [eta, eta] if eta is not None else planning
+                        if parent_planning is not None:
+                            # The child runs inside the parent operation, so the
+                            # remaining wall time is bounded by the slower scope.
+                            planning = [
+                                max(parent_planning[0], child_planning[0]),
+                                max(parent_planning[1], child_planning[1]),
+                            ]
+                            eta, basis = None, "planning_parent_and_required_child_work"
+                        elif not remaining and (
+                            self.total_operations is None
+                            or self.completed_operations == self.total_operations
+                        ):
+                            eta, planning, basis = (
+                                None,
+                                list(child_planning),
+                                "planning_required_child_remaining_work",
+                            )
+                        else:
+                            eta, planning, basis = (
+                                None,
+                                None,
+                                "waiting_for_parent_and_required_child_samples",
+                            )
+                    else:
+                        eta, planning, basis = None, None, "required_child_scope_incomplete"
             event = {
                 "schema": "umi-transport-work-progress/1",
+                "pid": os.getpid(),
+                "work_id": self.public_work_id,
+                "job_sha256": self.job_sha256,
                 "stage": self.stage,
                 "status": "stalled" if stalled else state,
                 "completed_units": self.completed,
@@ -338,6 +462,9 @@ class TransferProgress:
                     native_operations=self.native_operations,
                     restored_operations=self.completed_operations - self.native_operations,
                     operation_eta_seconds=operation_eta,
+                    native_byte_seconds=self.byte_seconds,
+                    native_operation_seconds=self.operation_seconds,
+                    eta_assumptions="remaining byte and fixed operation costs match native samples",
                 )
             if self.unit == "bytes":
                 event.update(
@@ -346,10 +473,88 @@ class TransferProgress:
                     native_bytes=self.native,
                     restored_bytes=self.completed - self.native,
                 )
+            PUBLIC_COHORT_PROGRESS.record(
+                "work",
+                {
+                    **event,
+                    "cohort_sha256": self.public_cohort,
+                    "work_id": self.public_work_id,
+                    "state": "running"
+                    if not self.stop.is_set()
+                    and state in {"started", "running", "repair_completed", "retrying", "waiting"}
+                    else "completed"
+                    if state == "completed"
+                    else "interrupted",
+                    "completed": self.completed,
+                    "total": self.total,
+                    "stalled_or_retrying": stalled
+                    or state in {"retrying", "refused", "repair_required", "waiting"},
+                },
+            )
             if self.report is None:
                 _LOG.info(json.dumps(event, separators=(",", ":")))
             else:
                 self.report(event)
+
+
+@contextmanager
+def response_read_progress(total):
+    """Expose existing range reads without advancing their parent's byte facts."""
+    parent = _CURRENT.get()
+    if parent is None:
+        yield None
+        return
+    progress = None
+    try:
+        progress = TransferProgress("r2_response_read", total, parent.child_report())
+        progress.__enter__()
+    except Exception:
+        if progress is not None:
+            with suppress(Exception):
+                progress.__exit__(*sys.exc_info())
+        yield None
+        return
+    try:
+        yield progress
+    except BaseException:
+        with suppress(Exception):
+            progress.__exit__(*sys.exc_info())
+        raise
+    else:
+        with suppress(Exception):
+            progress.__exit__(None, None, None)
+
+
+@asynccontextmanager
+async def owned_byte_checkpoint(context, progress):
+    """Wait for the exact shared store without restarting this operation.
+
+    Only actual native mutex contention is retryable here. Unsafe metadata,
+    missing dependencies and other errors remain failures. The event loop stays
+    available to the holder; cancellation releases any acquired original lease.
+    """
+    waited = False
+    while True:
+        try:
+            value = context.__enter__()
+            break
+        except PrivateStateBusyError:
+            waited = True
+            progress.emit("retrying", reason="shared_byte_checkpoint_busy")
+            await asyncio.sleep(0.5)
+    try:
+        # A restored file may perform no network await at all. Yield while its
+        # acquired lease is covered by cleanup, so a long run of completed files
+        # cannot monopolize the service loop or leak a lease on cancellation.
+        await asyncio.sleep(0)
+        if waited:
+            progress.emit("running", reason="shared_byte_checkpoint_acquired")
+        yield value
+    except BaseException:
+        if not context.__exit__(*sys.exc_info()):
+            raise
+    else:
+        context.__exit__(None, None, None)
 
 
 class ByteCheckpoints:

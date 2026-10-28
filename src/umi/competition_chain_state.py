@@ -35,6 +35,7 @@ from .competition_chain import (
 )
 from .competition_reward_runtime import validate_weight_runtime
 from .competition_weight_rpc import WeightProofRpc
+from .competition_work_progress import WorkProgress
 from .competition_worker import (
     CompetitionReplayWorker,
     _open_directory_without_links,
@@ -87,7 +88,9 @@ _CACHE_LOCK_FILE = "namespace.lock"
 _CACHE_NAMESPACE = re.compile(r"^[0-9a-f]{64}$")
 
 
-def _cache_file_info(directory: int, name: str, *, budget: bool = False):
+def _cache_file_info(
+    directory: int, name: str, *, budget: bool = False, pending_budget: bool = False
+):
     try:
         descriptor = os.open(
             name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory
@@ -105,7 +108,8 @@ def _cache_file_info(directory: int, name: str, *, budget: bool = False):
             not stat.S_ISREG(info.st_mode)
             or info.st_nlink != 1
             or info.st_uid != os.getuid()
-            or stat.S_IMODE(info.st_mode) != (0o400 if budget else 0o600)
+            or stat.S_IMODE(info.st_mode)
+            not in ({0o400, 0o600} if pending_budget else {0o400 if budget else 0o600})
         ):
             raise ValueError("weight cache contains an unsafe file")
         return info.st_size
@@ -113,9 +117,11 @@ def _cache_file_info(directory: int, name: str, *, budget: bool = False):
         os.close(descriptor)
 
 
-def _cache_budget(directory: int, namespace: str, maximum_bytes: int) -> int:
+def _cache_budget(
+    directory: int, namespace: str, maximum_bytes: int, *, filename: str = _CACHE_BUDGET_FILE
+) -> int:
     descriptor = os.open(
-        _CACHE_BUDGET_FILE,
+        filename,
         os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
         dir_fd=directory,
     )
@@ -146,7 +152,12 @@ def _cache_budget(directory: int, namespace: str, maximum_bytes: int) -> int:
     return record["maximum_namespace_bytes"]
 
 
-def _cache_usage(root: Path, maximum_bytes: int) -> dict[str, int]:
+def _cache_usage(
+    root: Path,
+    maximum_bytes: int,
+    *,
+    capacity_transition: tuple[str, str] | None = None,
+) -> dict[str, int]:
     """Bound and account every entry, including retained pre-namespace databases."""
     root_fd = _open_directory_without_links(root)
     usage = {"legacy": 0}
@@ -171,13 +182,19 @@ def _cache_usage(root: Path, maximum_bytes: int) -> dict[str, int]:
                         subtotal, names = 0, set()
                         with os.scandir(directory) as children:
                             for child in children:
-                                if child.name not in _CACHE_DATABASE_FILES | {_CACHE_BUDGET_FILE}:
+                                allowed = _CACHE_DATABASE_FILES | {_CACHE_BUDGET_FILE}
+                                if capacity_transition is not None and name in capacity_transition:
+                                    allowed = allowed | {_CACHE_BUDGET_FILE + ".pending"}
+                                if child.name not in allowed:
                                     raise ValueError(
                                         "weight cache namespace contains an unknown entry"
                                     )
                                 names.add(child.name)
                                 subtotal += _cache_file_info(
-                                    directory, child.name, budget=child.name == _CACHE_BUDGET_FILE
+                                    directory,
+                                    child.name,
+                                    budget=child.name == _CACHE_BUDGET_FILE,
+                                    pending_budget=child.name == _CACHE_BUDGET_FILE + ".pending",
                                 )
                                 if subtotal > maximum_bytes:
                                     raise ValueError(
@@ -185,7 +202,39 @@ def _cache_usage(root: Path, maximum_bytes: int) -> dict[str, int]:
                                     )
                         if _CACHE_BUDGET_FILE not in names:
                             raise ValueError("weight cache namespace is incomplete; preserve it")
-                        if subtotal > _cache_budget(directory, name, maximum_bytes):
+                        transition_new = (
+                            capacity_transition is not None and name == capacity_transition[0]
+                        )
+                        try:
+                            bound = _cache_budget(directory, name, maximum_bytes)
+                        except ValueError:
+                            if not transition_new:
+                                raise
+                            # A crash may leave the renamed directory carrying
+                            # its exact predecessor budget until the atomic swap.
+                            bound = _cache_budget(directory, capacity_transition[1], maximum_bytes)
+                        pending = _CACHE_BUDGET_FILE + ".pending"
+                        if pending in names:
+                            if capacity_transition is None or name not in capacity_transition:
+                                raise ValueError("unexpected pending cache budget")
+                            try:
+                                pending_bound = _cache_budget(
+                                    directory,
+                                    capacity_transition[0],
+                                    maximum_bytes,
+                                    filename=pending,
+                                )
+                            except ValueError:
+                                # The owner is still stopped. The migration
+                                # checks an interrupted write against the exact
+                                # selected bytes before using this directory.
+                                pending_bound = maximum_bytes
+                            else:
+                                if pending_bound < bound:
+                                    raise ValueError("pending cache budget shrinks capacity")
+                        else:
+                            pending_bound = None
+                        if subtotal > (pending_bound if pending_bound is not None else bound):
                             raise ValueError("weight cache namespace byte budget is exhausted")
                         usage[name] = subtotal
                     finally:
@@ -197,6 +246,117 @@ def _cache_usage(root: Path, maximum_bytes: int) -> dict[str, int]:
         return usage
     finally:
         os.close(root_fd)
+
+
+def _grow_cache_namespace(root: Path, root_fd: int, old: str, new: str, maximum_bytes: int) -> bool:
+    """Move one stopped owner's verified databases without copying their payloads.
+
+    The root lease belongs to the caller. The pending budget and directory
+    rename make every completed step recognizable after an interrupted start.
+    """
+    usage = _cache_usage(root, maximum_bytes, capacity_transition=(new, old))
+    if old in usage and new in usage:
+        raise ValueError("both predecessor and successor cache namespaces exist")
+    if old not in usage and new not in usage:
+        return False
+    other = sum(size for name, size in usage.items() if name not in {old, new})
+    available = maximum_bytes - other
+    name = old if old in usage else new
+    child = os.open(
+        name,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        dir_fd=root_fd,
+    )
+    try:
+        try:
+            _cache_budget(child, new, maximum_bytes)
+            already_rebound = True
+        except ValueError as error:
+            predecessor = _cache_budget(child, old, maximum_bytes)
+            if available <= predecessor:
+                raise ValueError(
+                    "cache capacity successor has no larger namespace budget"
+                ) from error
+            already_rebound = False
+        pending = _CACHE_BUDGET_FILE + ".pending"
+        if not already_rebound:
+            budget = canonical_json_bytes(
+                {
+                    "schema": "umi-competition-weight-cache-budget/1",
+                    "configuration_sha256": new,
+                    "maximum_namespace_bytes": available,
+                }
+            )
+            try:
+                descriptor = os.open(
+                    pending,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=child,
+                )
+            except FileNotFoundError:
+                descriptor = os.open(
+                    pending,
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    0o600,
+                    dir_fd=child,
+                )
+            try:
+                info = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.getuid()
+                    or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) not in {0o400, 0o600}
+                    or info.st_size > len(budget)
+                ):
+                    raise ValueError("pending cache budget is unsafe")
+                prior = os.read(descriptor, len(budget) + 1)
+                if not budget.startswith(prior):
+                    raise ValueError("pending cache capacity differs from selected successor")
+                if len(prior) < len(budget):
+                    os.fchmod(descriptor, 0o600)
+                    os.close(descriptor)
+                    descriptor = os.open(
+                        pending,
+                        os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        dir_fd=child,
+                    )
+                    os.lseek(descriptor, len(prior), os.SEEK_SET)
+                    view = memoryview(budget)[len(prior) :]
+                    while view:
+                        written = os.write(descriptor, view)
+                        if written <= 0:
+                            raise OSError("cache successor budget write failed")
+                        view = view[written:]
+                os.fchmod(descriptor, 0o400)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.fsync(child)
+        elif name == new:
+            return True
+        else:
+            raise ValueError("predecessor directory has successor budget")
+    finally:
+        os.close(child)
+    if name == old:
+        os.rename(old, new, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        os.fsync(root_fd)
+    successor = os.open(
+        new,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        dir_fd=root_fd,
+    )
+    try:
+        _cache_budget(successor, old, maximum_bytes)
+        if _cache_budget(successor, new, maximum_bytes, filename=pending) != available:
+            raise ValueError("pending cache capacity differs from selected successor")
+        os.replace(pending, _CACHE_BUDGET_FILE, src_dir_fd=successor, dst_dir_fd=successor)
+        os.fsync(successor)
+    finally:
+        os.close(successor)
+    _cache_usage(root, maximum_bytes)
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -436,8 +596,27 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self._cache_lease = weakref.finalize(self, os.close, lock)
             lock = None
+            selected = config.model_copy(update={"previous_maximum_cache_bytes": None})
+            namespace = digest(selected)
+            migrated = False
+            if config.previous_maximum_cache_bytes is not None:
+                if config.previous_maximum_cache_bytes >= config.maximum_cache_bytes:
+                    raise ValueError("cache capacity predecessor must be smaller")
+                predecessor = selected.model_copy(
+                    update={"maximum_cache_bytes": config.previous_maximum_cache_bytes}
+                )
+                with WorkProgress(
+                    "weight_cache_capacity_namespace",
+                    1,
+                    unit="namespaces",
+                    planning_range_seconds=(0.01, 60.0),
+                    planning_basis="one_stopped_owner_directory_and_budget_rebind",
+                ) as progress:
+                    migrated = _grow_cache_namespace(
+                        root, root_fd, digest(predecessor), namespace, config.maximum_cache_bytes
+                    )
+                    progress.advance()
             usage = _cache_usage(root, config.maximum_cache_bytes)
-            namespace = digest(config)
             directory = root / namespace
             if namespace not in usage:
                 if len(usage) - 1 >= _MAX_CACHE_NAMESPACES:
@@ -492,6 +671,20 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                     _verify_sqlite_family(directory / name, "weight finality cache")
             finally:
                 os.close(child)
+            if migrated:
+                from .competition_chain_capacity import grow_registration_cache
+
+                with WorkProgress(
+                    "weight_cache_capacity_registration",
+                    1,
+                    unit="databases",
+                    planning_range_seconds=(0.01, 300.0),
+                    planning_basis="one_retained_registration_binding_transaction",
+                ) as progress:
+                    grow_registration_cache(
+                        directory / "registrations.sqlite3", predecessor, selected
+                    )
+                    progress.advance()
             self._cache_root, self._cache_namespace = root, namespace
             return directory
         finally:
@@ -501,6 +694,10 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
 
     def _finality_storage_limits(self):
         return self._limits_for_namespace(self._namespace_budget)
+
+    def _predecessor_finality_storage_limits(self):
+        previous = self.config.previous_maximum_cache_bytes
+        return None if previous is None else self._limits_for_namespace(previous)
 
     def _finality_operational_limits(self):
         return self._limits_for_namespace(self._namespace_available)

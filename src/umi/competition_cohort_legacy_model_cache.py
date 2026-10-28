@@ -19,10 +19,13 @@ from .protocol import canonical_json_bytes
 class LegacyCohortModelCache:
     """Byte restoration only; original review/order journals still own authority."""
 
-    def __init__(self, artifacts, sources):
+    def __init__(self, artifacts, sources, *, reference_authorized=None):
         if digest(artifacts.policy) != digest(sources.policy):
             raise ValueError("legacy cache policy differs from its authenticated readers")
         self.artifacts, self.sources = artifacts, sources
+        if reference_authorized is not None and not callable(reference_authorized):
+            raise ValueError("certified reference authorization must be callable")
+        self.reference_authorized = reference_authorized
 
     def execution_source(self, job, role, bundle, request=None):
         cohort = job.round.cohort_sha256
@@ -49,6 +52,27 @@ class LegacyCohortModelCache:
         elif role == "incumbent":
             if digest(bundle) != job.round.incumbent_model_sha256:
                 raise ValueError("legacy execution reference differs from its certified round")
+            model = digest(bundle)
+            if (
+                model != authenticated.legacy.baseline_model_sha256
+                and not any(
+                    value.model_sha256 == model for value in authenticated.legacy.incumbents
+                )
+                and self.reference_authorized is not None
+            ):
+                with TransferProgress(
+                    "certified_cohort_reference_selection",
+                    1,
+                    unit="models",
+                    planning_unit_seconds=(0.001, 1),
+                ) as progress:
+                    if self.reference_authorized(job, bundle) is True:
+                        # The later baseline certificate selects the reference;
+                        # the original adoption still selects only its byte source.
+                        # This grants no new admission or execution order.
+                        preserved = self.sources.preserved_reference(cohort, bundle)
+                        progress.advance(1)
+                        return preserved
             resolved = self.sources.resolve(
                 cohort,
                 baseline=digest(bundle) == authenticated.legacy.baseline_model_sha256,
@@ -68,6 +92,10 @@ class LegacyCohortModelCache:
         return digest(
             {"schema": "umi-legacy-model-cache-selection/1", "selection": digest(source.selection)}
         )
+
+    async def available(self, source):
+        """Check the authenticated source without filling the execution cache."""
+        await self.sources.reader(source).available()
 
     async def resumable(self, source, archive):
         try:
@@ -126,7 +154,7 @@ class LegacyCohortModelCache:
                     with TransferProgress(
                         "legacy_model_cache_space_preparation", 1, unit="models"
                     ) as progress:
-                        cache.prepare(source.selection.bundle)
+                        cache.prepare(source.selection.bundle, archive=archive)
                         progress.advance(1)
                 return await self.sources.reader(source).materialize(
                     archive,
@@ -134,4 +162,5 @@ class LegacyCohortModelCache:
                     available_bytes=available if cache is None else cache.available_bytes,
                     reserve_bytes=c.materialization_free_space_reserve_bytes,
                     check_write=check_write if cache is None else cache.check_write,
+                    check_file_write=None if cache is None else cache.check_file_write,
                 )

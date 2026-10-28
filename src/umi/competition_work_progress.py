@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -18,6 +19,11 @@ from itertools import count
 from threading import RLock
 from typing import TypeVar
 
+from .competition_cohort_public_progress import (
+    EXECUTION_JOB_SCOPE,
+    PUBLIC_COHORT_PROGRESS,
+    PUBLIC_COHORT_SCOPE,
+)
 from .competition_forecast import ForecastAttempt, ForecastCapacityRequired
 
 _LOG = logging.getLogger("umi.competition.progress")
@@ -97,12 +103,33 @@ class WorkProgress:
     """
 
     def __init__(
-        self, stage: str, total: int, *, unit: str, cohort: str | None = None, estimate: bool = True
+        self,
+        stage: str,
+        total: int,
+        *,
+        unit: str,
+        cohort: str | None = None,
+        estimate: bool = True,
+        planning_range_seconds: tuple[float, float] | None = None,
+        planning_basis: str | None = None,
     ):
+        if planning_range_seconds is not None and (
+            len(planning_range_seconds) != 2
+            or any(
+                type(value) not in (int, float) or not math.isfinite(value)
+                for value in planning_range_seconds
+            )
+            or not 0 <= planning_range_seconds[0] <= planning_range_seconds[1]
+            or not planning_basis
+        ):
+            raise ValueError("work planning range requires finite ordered bounds and basis")
         self.enabled = _name(stage, 79) and _name(unit, 39) and type(total) is int and total >= 0
         self.stage, self.total, self.unit, self.cohort = stage, total, unit, _cohort(cohort)
         self.estimate = estimate is True
+        self.planning_range_seconds = planning_range_seconds
+        self.planning_basis = planning_basis
         self.identity = next(_IDS)
+        self.job_sha256 = EXECUTION_JOB_SCOPE.get()
         self.completed = 0
         self.started = time.monotonic()
         self.last_completed = self.started
@@ -116,6 +143,7 @@ class WorkProgress:
         except Exception:
             self.forecast_error = "repair_required"
         self.closed = False
+        self.public_scope_token = None
         self.active_meters = _ACTIVE_METERS.get()
         if self.active_meters is not None:
             with self.active_meters[0]:
@@ -123,13 +151,20 @@ class WorkProgress:
         self.emit("started")
 
     def __enter__(self):
+        cohort = self.cohort or _cohort(self.context.get("cohort_sha256"))
+        if cohort is not None:
+            self.public_scope_token = PUBLIC_COHORT_SCOPE.set(cohort)
         return self
 
     def __exit__(self, exception_type, exception, traceback):
-        if exception_type is None:
-            self.finish()
-        else:
-            self.interrupt()
+        try:
+            if exception_type is None:
+                self.finish()
+            else:
+                self.interrupt()
+        finally:
+            if self.public_scope_token is not None:
+                PUBLIC_COHORT_SCOPE.reset(self.public_scope_token)
         return False
 
     def emit(self, state: str) -> None:
@@ -157,12 +192,27 @@ class WorkProgress:
                 and not stalled
             ):
                 eta = max(0.0, mean * (self.total - self.completed))
+            planning = None
+            if (
+                self.planning_range_seconds is not None
+                and eta is None
+                and state not in {"interrupted", "accounting_mismatch"}
+            ):
+                low, high = self.planning_range_seconds
+                if elapsed > high:
+                    stalled = True
+                else:
+                    planning = [
+                        round(max(0.0, low - elapsed), 1),
+                        round(max(0.0, high - elapsed), 1),
+                    ]
             body = {
                 "schema": "umi-competition-work-progress/1",
                 "pid": os.getpid(),
                 "observed_unix_ms": time.time_ns() // 1_000_000,
                 **self.context,
                 "work_id": self.identity,
+                "job_sha256": self.job_sha256,
                 "stage": self.stage,
                 "state": state,
                 "cohort_sha256": self.cohort or self.context.get("cohort_sha256"),
@@ -172,9 +222,14 @@ class WorkProgress:
                 "percent": round(percent, 2),
                 "elapsed_seconds": round(elapsed, 3),
                 "eta_seconds": None if eta is None else round(eta, 1),
+                **({"planning_eta_seconds": planning} if planning is not None else {}),
                 "eta_basis": (
                     "completed"
                     if state == "completed"
+                    else "planning_range_exceeded_retrying"
+                    if self.planning_range_seconds is not None and stalled
+                    else self.planning_basis
+                    if planning is not None
                     else "unestimated_scope"
                     if not self.estimate
                     else "recent_active_item_rate"
@@ -189,6 +244,14 @@ class WorkProgress:
                 "eta_raw_sample_seconds": list(self.durations),
                 "eta_assumption": (
                     "remaining_units_match_recent_active_cost" if self.estimate else None
+                ),
+                **(
+                    {
+                        "forecast_classification": "planning_scenario",
+                        "forecast_finish_range_seconds": planning,
+                    }
+                    if planning is not None
+                    else {}
                 ),
                 "stalled": stalled,
                 "scope": "current_attempt_substage",
@@ -215,6 +278,7 @@ class WorkProgress:
                     ),
                     "certification_authority": False,
                 }
+            PUBLIC_COHORT_PROGRESS.record("work", body)
             _LOG.info(json.dumps(body, separators=(",", ":")))
             self.last_emitted = now
 
@@ -378,6 +442,8 @@ async def await_progress(work: Awaitable[_T], *, stage: str, cohort: str | None 
     and adds no task or cleanup await that could alter native cancellation.
     """
     meter = WorkProgress(stage, 1, unit="responses", cohort=cohort)
+    public_scope = meter.cohort or _cohort(meter.context.get("cohort_sha256"))
+    public_token = PUBLIC_COHORT_SCOPE.set(public_scope) if public_scope is not None else None
     loop = asyncio.get_running_loop()
     timer = None
 
@@ -398,3 +464,5 @@ async def await_progress(work: Awaitable[_T], *, stage: str, cohort: str | None 
         if timer is not None:
             timer.cancel()
         meter.interrupt()
+        if public_token is not None:
+            PUBLIC_COHORT_SCOPE.reset(public_token)

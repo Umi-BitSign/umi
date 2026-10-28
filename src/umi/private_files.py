@@ -43,6 +43,7 @@ def acquire_private_mutex(
     path: Path,
     *,
     operation: Literal["private_file_lock", "round_journal_lock"],
+    shared: bool = False,
 ) -> None:
     """Classify only actual nonblocking flock contention, without disclosing paths.
 
@@ -50,7 +51,7 @@ def acquire_private_mutex(
     in those steps, or in journal I/O, must not be reported as mutex contention.
     """
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(descriptor, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
     except BlockingIOError as error:
         resource = hashlib.sha256(
             b"umi-private-state-lock-v1\0" + os.fsencode(os.path.abspath(path))
@@ -131,7 +132,7 @@ def read_private_model(
     return value
 
 
-def lock_private_file(path: Path) -> int:
+def lock_private_file(path: Path, *, shared: bool = False) -> int:
     """Return an exclusively locked descriptor; its owner must close it."""
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     try:
@@ -143,7 +144,7 @@ def lock_private_file(path: Path) -> int:
             or info.st_mode & 0o077
         ):
             raise ValueError("evaluator lock must be an owned private regular file")
-        acquire_private_mutex(fd, path, operation="private_file_lock")
+        acquire_private_mutex(fd, path, operation="private_file_lock", shared=shared)
     except BaseException:
         os.close(fd)
         raise
@@ -196,6 +197,11 @@ def _publish_locked(path: Path, value: BaseModel, raw: bytes, *, maximum_bytes: 
         if not canonical_json_matches(retained, raw):
             raise ValueError("evaluator input must have stable canonical bytes")
         return
+    _write_private_bytes(path, raw)
+
+
+def _write_private_bytes(path: Path, raw: bytes) -> None:
+    """Write under the caller's private directory lease; caller syncs its directory."""
     fd, name = tempfile.mkstemp(prefix=".pending-", dir=path.parent)
     try:
         with os.fdopen(fd, "wb") as stream:

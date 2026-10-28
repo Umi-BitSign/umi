@@ -261,6 +261,85 @@ async def test_remote_exact_transition_uses_durable_signer(remote):
     assert len(h.calls) == 1
 
 
+async def test_transition_reuses_own_committed_progress_review_after_restart(remote, monkeypatch):
+    h = remote
+    await h.signer().attest(h.result.progress)
+    requests_before = len(h.requests)
+
+    async def no_repeat(*args):
+        raise AssertionError("committed progress must not replay the roster again")
+
+    monkeypatch.setattr(h.reviewer, "review", no_repeat)
+    evidence = CohortDecisionInput(
+        schema="umi-cohort-decision-input/1",
+        progress=AttestedCohortPhaseProgress(
+            progress=h.result.progress, signatures=signatures(h.result.progress)
+        ),
+        observation=execution_boundary(h.archive.capture),
+    )
+    state, restored, prior = replay_cohort_decisions(h.history, h.intake.policy, lambda _: None)
+    body, _ = _choice(
+        state, h.history.authority.authority, h.intake.policy, evidence, restored, prior
+    )
+    vote = await h.signer().certify(body, evidence)
+    assert len(h.requests) == requests_before + 1  # Fresh decision/history export remains.
+    assert await h.signer().certify(body, evidence) == vote
+
+
+async def test_original_participations_reuse_own_admission_verdict(remote, tmp_path, monkeypatch):
+    from functools import partial
+
+    from umi.competition_cohort_admission_journal import (
+        CohortAdmissionJournal,
+        CohortAdmissionSignerConfig,
+    )
+    from umi.competition_cohort_admission_signer import AdmissionHistory, CohortAdmissionSigner
+    from umi.concurrency import run_owned_thread
+
+    h = remote
+    journal = CohortAdmissionJournal(
+        CohortAdmissionSignerConfig(
+            schema="umi-cohort-admission-signer-config/1",
+            directory=str(tmp_path / "admission-reuse"),
+            policy_sha256=digest(h.intake.policy),
+            signer=wallet("Charlie").hotkey.ss58_address,
+            cohorts=h.intake.config.cohorts,
+        ),
+        h.intake.policy,
+    )
+
+    async def history(_):
+        return AdmissionHistory(h.history)
+
+    async def sign(body):
+        return sign_object(body, wallet("Charlie"))
+
+    signer = CohortAdmissionSigner(
+        journal, h.archive.reviewer, history, sign, archive=h.reviewer.archive
+    )
+    raw = canonical_json_bytes(h.exported.records[0])
+    await signer.attest(raw)
+    h.reviewer.reviewed_participation = partial(run_owned_thread, journal.reviewed_participation)
+
+    async def no_repeat(*args, **kwargs):
+        raise AssertionError("admission proof already reviewed by this owner")
+
+    from umi import competition_cohort_admission_review as module
+
+    monkeypatch.setattr(module, "review_cohort_participation", no_repeat)
+    assert await h.reviewer.review(h.result.progress)
+
+
+async def test_final_intake_freshness_does_not_collect_new_membership(remote, monkeypatch):
+    h = remote
+
+    async def no_membership():
+        raise AssertionError("freshness only requires the existing verifier-owned head")
+
+    monkeypatch.setattr(h.archive.reviewer, "collect", no_membership)
+    assert await h.reviewer.review(h.result.progress)
+
+
 async def test_lost_signature_retries_original_body_without_expiry(remote):
     h = remote
     h.fail_sign = True

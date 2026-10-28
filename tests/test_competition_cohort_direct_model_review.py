@@ -224,6 +224,33 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(
     source.key = preserved_model_object_key(
         reservation.cohort_sha256, payload.model_sha256, payload.payload_sha256
     )
+    # Readiness selects the certified source and checks presence. It cannot
+    # require a new preserved-key byte receipt before the first execution.
+    reads = source.ranges_read
+    await verifier.available(direct_request)
+    assert source.ranges_read == reads
+    heads = source.heads_read
+    damaged = direct_request.model_copy(
+        update={
+            "acceptance": direct_request.acceptance.model_copy(update={"model_sha256": "ef" * 32})
+        }
+    )
+    with pytest.raises(ValueError, match="direct model acceptance source differs"):
+        await verifier.available(damaged)
+    assert source.heads_read == heads and source.ranges_read == reads
+
+    async def missing(*args, **kwargs):
+        return None
+
+    async def wrong_size(*args, **kwargs):
+        return SimpleNamespace(size_bytes=len(body) + 1, etag=source.etag)
+
+    for unavailable in (missing, wrong_size):
+        with monkeypatch.context() as patch:
+            patch.setattr(source, "head", unavailable)
+            with pytest.raises(OSError, match="object is unavailable"):
+                await verifier.available(direct_request)
+    assert source.ranges_read == reads
     scratch = reviews.root / "bounded-scratch"
     scratch.mkdir(mode=0o700)
     monkeypatch.setattr(
@@ -266,6 +293,41 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(
     after_materialization = source.ranges_read
     await durable.verify(direct_request, preserved=True)
     assert source.ranges_read == after_materialization
+    # A separately booted downstream consumer reuses the account's completed
+    # byte work. Its local fallback state and signing checks remain independent.
+    selected_config = verifier.config.model_copy(
+        update={"verification_directory": str(durable_root)}
+    )
+    shared = DirectModelArtifactReviewer(
+        selected_config,
+        verifier.policy,
+        verifier.owner_hotkey,
+        multipart=source,
+        verification_root=reviews.root / "unused-settlement-default",
+    )
+    assert shared.verification_root == durable_root
+    assert durable_root in shared.config.stores()
+    assert "verification_directory" not in verifier.config.model_dump(mode="json")
+    assert (await shared.verify(direct_request, preserved=True))[0] == result
+    assert source.ranges_read == after_materialization
+    assert not (reviews.root / "unused-settlement-default").exists()
+    # Changing the policy owner is still rejected before it can reuse bytes.
+    changed_owner = DirectModelArtifactReviewer(
+        selected_config,
+        verifier.policy,
+        wallet("Dave").hotkey.ss58_address,
+        multipart=source,
+    )
+    with pytest.raises(ValueError, match="differs from its request"):
+        await changed_owner.verify(direct_request, preserved=True)
+    assert source.ranges_read == after_materialization
+    with pytest.raises(ValueError, match="overlaps credentials or cache"):
+        DirectModelReviewSourceConfig.model_validate(
+            {
+                **selected_config.model_dump(by_alias=True),
+                "verification_directory": selected_config.r2_credentials_file,
+            }
+        )
     shutil.rmtree(durable_cache)
     restarted = DirectModelArtifactReviewer(
         verifier.config,
@@ -287,6 +349,9 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(
     interrupted_cache = scratch / "interrupted-materialization"
     original_read = source.read_range
     first_file_bytes = bundle.files[0].size_bytes
+    import umi.competition_model_materialization as transfers
+
+    monkeypatch.setattr(transfers, "MAXIMUM_RANGE_BYTES", first_file_bytes)
 
     async def interrupt_second_file(key, *, offset, size_bytes, **kwargs):
         if offset >= first_file_bytes:
@@ -339,7 +404,6 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(
         patch.setattr(direct_review, "publish_private_model", lose_final_marker)
         with pytest.raises(OSError, match="lost final materialization publication"):
             await durable.materialize(direct_request, interrupted_cache)
-    import umi.competition_model_materialization as transfers
 
     async def no_transfer(*args, **kwargs):
         raise AssertionError("completed payload was downloaded during finalization recovery")
@@ -399,10 +463,62 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(
         await boot_reviewer().materialize(direct_request, boot_archive)
         assert await boot_reviewer().materialized(direct_request, boot_archive)
     reads_before_eviction = source.ranges_read
+    # Production's parallel selector must recognize completed native slots after
+    # the pending marker is removed, before considering them eviction candidates.
+    from umi.competition_cohort_parallel_cache import ModelPlan, ParallelModelCache
+
+    from .test_competition_cohort_parallel_cache import Capacity
+
+    assert not (boot_archive / "materialization-pending.json").exists()
+    native_restarted = boot_reviewer()
+    assert await native_restarted.resumable(direct_request, boot_archive)
+    inode = boot_archive.stat().st_ino
+
+    async def unexpected_eviction(*args, **kwargs):
+        pytest.fail("completed native model slot was selected for eviction")
+
+    port = SimpleNamespace(
+        cache=boot_root,
+        boot=boot_config.materialization_boot_disk_cache,
+        artifacts=native_restarted,
+        slot_identities={},
+        slot_clock=0,
+        _evict_archive=unexpected_eviction,
+    )
+    parallel = ParallelModelCache(port, Capacity(), 2)
+    plan = ModelPlan(
+        direct_request, bundle, native_restarted, native_restarted.cache_identity(direct_request)
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(source, "read_range", no_transfer)
+        patch.setattr(artifacts, "verify_bundle_directory", no_second_weight_read)
+        selected = await parallel._select(plan)
+        assert selected == boot_archive
+        await parallel._load(selected, plan)
+    assert boot_archive.stat().st_ino == inode and source.ranges_read == reads_before_eviction
+    # A foreign completed receipt is never a match for this exact model request.
+    original_completed = read_private_model(
+        boot_archive / "materialization.json", direct_review.DirectModelMaterialization
+    )
+    (boot_archive / "materialization.json").unlink()  # Fixture-only foreign receipt.
+    publish_private_model(
+        boot_archive / "materialization.json",
+        original_completed.model_copy(update={"payload_sha256": "ff" * 32}),
+    )
+    assert not await native_restarted.resumable(direct_request, boot_archive)
     shutil.rmtree(boot_archive)
     assert (await boot_reviewer().verify(direct_request, preserved=True))[0] == result
     assert source.ranges_read == reads_before_eviction
     assert canonical_json_bytes(direct_request) == signed_before
+
+    from .cohort_reference_cache_checks import check_inherited_direct_reference
+
+    with monkeypatch.context() as patch:
+        patch.setattr(direct_review, "_filesystem_device", lambda path: path.stat().st_dev)
+        patch.setattr(direct_review, "_filesystem_usage", shutil.disk_usage)
+        await check_inherited_direct_reference(
+            boot_reviewer(), direct_request, result, boot_root / "inherited-reference"
+        )
 
     changed = next(record for record in bundle.files if record.size_bytes)
     changed_path = materialized / digest(bundle) / "model" / changed.path
@@ -492,6 +608,12 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(
     settlement = DirectModelSettlementVerifier(
         verifier, reviews.owner.archive, reviews.root / "settlement-receipts"
     )
+    retained_heads = source.heads_read
+    preparation = SettlementArtifactPreparation(
+        config, SimpleNamespace(directory=early_root), {reviews.cohort: settlement}
+    )
+    assert (await preparation.poll_once(asyncio.Event()))["entries_ready"] == 1
+    assert source.heads_read == retained_heads and source.ranges_read == retained_reads
     await settlement.ensure(participant, certificate)
     assert source.ranges_read == retained_reads
     receipt_path = settlement._path(certificate)
@@ -503,10 +625,15 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(
     receipt_path.chmod(0o400)
     with pytest.raises(ValueError, match="differs from accepted artifact"):
         settlement.verify_candidate(certificate, participant)
+    retained_heads = source.heads_read
+    assert (await preparation.poll_once(asyncio.Event()))["entries_pending"] == 1
+    assert source.heads_read == retained_heads and source.ranges_read == retained_reads
     receipt_path.chmod(0o600)
     receipt_path.write_bytes(canonical_json_bytes(receipt))
     receipt_path.chmod(0o400)
     source.etag = "changed-after-settlement-verification"
+    assert (await preparation.poll_once(asyncio.Event()))["entries_ready"] == 1
+    assert source.heads_read == retained_heads and source.ranges_read == retained_reads
     with pytest.raises(ValueError, match="changed after verification"):
         await settlement.ensure(participant, certificate)
     source.etag = "read-only-object"

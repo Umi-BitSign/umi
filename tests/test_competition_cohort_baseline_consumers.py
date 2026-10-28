@@ -1,6 +1,8 @@
 """Native history/preparation consumers; finality, R2 and inference are fixtures."""
 
 import hashlib
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -32,12 +34,14 @@ from umi.competition_cohort_participation import (
     SignedCohortParticipationConsent,
 )
 from umi.competition_cohort_preparation_owner import CohortPreparation
+from umi.competition_cohort_preparation_publisher import CohortPreparationPublisher
 from umi.competition_cohort_recovery import (
     ModelDeliveryProfile,
     RecoverableCohortPlan,
     SignedCohortRecoveryAuthority,
     admit_recoverable_cohort,
 )
+from umi.competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from umi.competition_publication import PublicationReplayLimits, build_cutoff_publication
 from umi.competition_review_history import EvaluatorReviewStore
 from umi.competition_settlement import EvidenceCutoffSchedule
@@ -183,7 +187,7 @@ def test_independent_review_history_accepts_winner_without_intake_authority(
 
 
 @pytest.mark.parametrize("model_parent_context", [None, "89" * 32], indirect=True)
-def test_model_only_direct_round_selects_winner_and_keeps_signed_ancestry(
+async def test_model_only_direct_round_selects_winner_and_keeps_signed_ancestry(
     retained_case, model_case, tmp_path, monkeypatch
 ):
     source, review, _, b = retained_case
@@ -348,6 +352,26 @@ def test_model_only_direct_round_selects_winner_and_keeps_signed_ancestry(
     assert canonical_json_bytes(retained) == original_signed
     assert bundle.parent_baseline_sha256 != prepared.roster.round.incumbent_model_sha256
 
+    # A new winner is present in certified promotion history, but its declaration
+    # was never a setup input for this successor. Publish it before the round so
+    # the unchanged benchmark scheduler can construct its first execution order.
+    objects = SettlementEvidenceFiles(tmp_path / "successor-objects")
+    output = tmp_path / "successor-rounds"
+    provider = SimpleNamespace(
+        policy=policy,
+        ensure_observer_running=lambda: None,
+        current_finalized_block=AsyncMock(return_value=330),
+    )
+    publisher = CohortPreparationPublisher(owner, provider, output, objects=objects)
+    await publisher.publish_history(closed)
+    assert objects(digest(review.model)) == canonical_json_bytes(review.model)
+    round_bytes = (output / (cohort + ".json")).read_bytes()
+    assert round_bytes == canonical_json_bytes(prepared)
+    (objects.root / (digest(review.model) + ".json")).unlink()
+    await publisher.publish_history(closed)
+    assert objects(digest(review.model)) == canonical_json_bytes(review.model)
+    assert (output / (cohort + ".json")).read_bytes() == round_bytes
+
     def no_payload(*args, **kwargs):
         raise AssertionError("restarting a prepared successor must not reverify model payloads")
 
@@ -363,3 +387,13 @@ def test_model_only_direct_round_selects_winner_and_keeps_signed_ancestry(
         restarted.retained(cohort, expected_tip_sha256=history_tip(closed), current_block=100_330)
         == prepared
     )
+
+    def no_repeat_baseline_review(*args, **kwargs):
+        raise AssertionError("existing immutable declaration must not replay its certificate")
+
+    monkeypatch.setattr(
+        replay_store, "certified_cohort_baseline_reference", no_repeat_baseline_review
+    )
+    repeated = CohortPreparationPublisher(restarted, provider, output, objects=objects)
+    await repeated.publish_history(closed)
+    assert (output / (cohort + ".json")).read_bytes() == round_bytes

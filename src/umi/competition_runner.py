@@ -17,17 +17,21 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from pydantic import Field, TypeAdapter, model_validator
 from typing_extensions import Self
 
 from .competition_artifacts import verify_preserved_bundle
+from .competition_model_interface import model_python_entrypoint
 from .competition_native import OfflineMpsRuntime
 from .concurrency import kill_and_reap
 from .open_competition import CaseOutput, CompetitionPolicy, ModelBundle, digest
 from .private_files import ensure_private_directory
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+
+if TYPE_CHECKING:
+    from .competition_evaluation_runtime import AuthorizedEvaluationRuntime
 
 
 class OfflineCpuRuntime(StrictProtocolModel):
@@ -43,7 +47,7 @@ class OfflineCpuRuntime(StrictProtocolModel):
     cpus: Annotated[int, Field(ge=1, le=8)]
     memory_bytes: Annotated[int, Field(ge=128 * 1024**2, le=64 * 1024**3)]
     scratch_bytes: Annotated[int, Field(ge=1024**2, le=4 * 1024**3)]
-    pids_limit: Annotated[int, Field(ge=16, le=256)]
+    pids_limit: Annotated[int, Field(ge=16, le=256)] = 256
     maximum_video_bytes: Annotated[int, Field(ge=1, le=64 * 1024**2)]
 
     @model_validator(mode="after")
@@ -78,14 +82,25 @@ class OfflineCaseExecution(StrictProtocolModel):
     returncode: Annotated[int, Field(ge=-65536, le=65536)] | None
 
 
-def validate_case_execution(record: OfflineCaseExecution, policy: CompetitionPolicy) -> None:
+def validate_case_execution(
+    record: OfflineCaseExecution,
+    policy: CompetitionPolicy,
+    *,
+    runtime_authorization: AuthorizedEvaluationRuntime | None = None,
+) -> None:
     """Replay output parsing/classification without trusting a supplied hypothesis."""
+    from .competition_evaluation_runtime import validate_evaluation_runtime_authorization
+
     record = OfflineCaseExecution.model_validate_json(canonical_json_bytes(record))
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     raw = bytes.fromhex(record.stdout_hex)
     output = record.output
-    if record.runtime_sha256 != policy.evaluation_runtime_sha256:
-        raise ValueError("execution runtime mismatch")
+    try:
+        validate_evaluation_runtime_authorization(
+            runtime_authorization, policy=policy, runtime_sha256=record.runtime_sha256
+        )
+    except ValueError as error:
+        raise ValueError("execution runtime mismatch") from error
     if record.returncode in {125, 126, 127}:
         raise ValueError("runtime failures cannot become miner failures")
     if len(raw) > policy.maximum_output_bytes + 1:
@@ -240,7 +255,22 @@ async def _small_command(arguments: tuple[str, ...], *, timeout: float = 10) -> 
             await kill_and_reap(process)
 
 
-async def verify_runtime(runtime: OfflineRuntime, policy: CompetitionPolicy) -> None:
+async def verify_runtime(
+    runtime: OfflineRuntime,
+    policy: CompetitionPolicy,
+    *,
+    runtime_authorization: AuthorizedEvaluationRuntime | None = None,
+) -> None:
+    from .competition_evaluation_runtime import validate_evaluation_runtime_authorization
+
+    try:
+        validate_evaluation_runtime_authorization(
+            runtime_authorization, policy=policy, runtime_sha256=digest(runtime)
+        )
+    except ValueError as error:
+        raise EvaluationInfrastructureError(
+            "offline runtime does not match the signed policy or authorized amendment"
+        ) from error
     if isinstance(runtime, OfflineMpsRuntime):
         from .competition_native import verify_native_runtime
 
@@ -248,8 +278,6 @@ async def verify_runtime(runtime: OfflineRuntime, policy: CompetitionPolicy) -> 
         return
     if sys.platform != "linux" or os.geteuid() == 0:
         raise EvaluationInfrastructureError("offline evaluation requires a non-root Linux operator")
-    if digest(runtime) != policy.evaluation_runtime_sha256:
-        raise EvaluationInfrastructureError("offline runtime does not match the signed policy")
     try:
         code, output = await _small_command(
             ("/usr/bin/podman", "info", "--format=json"), timeout=60
@@ -317,12 +345,14 @@ async def execute_offline_case(
     video: bytes,
     invocation_sha256: Hex32 | None = None,
     workspace: Path | None = None,
+    runtime_authorization: AuthorizedEvaluationRuntime | None = None,
 ) -> OfflineCaseExecution:
     """Run a verified model on one clip, with no reference text passed to it.
 
     Cold start and sandbox initialization are included in the case deadline.
-    The only supported entrypoint is one declared Python inference file that
-    reads argv[1] and emits one UTF-8 English hypothesis to stdout.
+    The selected declared Python entrypoint reads argv[1] and emits one UTF-8
+    English hypothesis to stdout. Routed bundles use the root umi_inference.py
+    wrapper when they declare additional inference helpers.
     """
     runtime = OFFLINE_RUNTIME.validate_json(canonical_json_bytes(runtime))
     if (invocation_sha256 is None) != (workspace is None):
@@ -333,6 +363,8 @@ async def execute_offline_case(
             raise EvaluationInfrastructureError("retained invocation requires a CPU runtime")
         ensure_private_directory(workspace)
     if isinstance(runtime, OfflineMpsRuntime):
+        if runtime_authorization is not None:
+            raise EvaluationInfrastructureError("CPU runtime amendment cannot authorize MPS")
         from .competition_native import execute_native_case
 
         return await execute_native_case(
@@ -351,11 +383,12 @@ async def execute_offline_case(
         or hashlib.sha256(video).hexdigest() != video_sha256
     ):
         raise EvaluationInfrastructureError("video bytes do not match the assignment")
-    await verify_runtime(runtime, policy)
+    await verify_runtime(runtime, policy, runtime_authorization=runtime_authorization)
     verify_preserved_bundle(bundle, archive, policy)
-    entrypoints = [f.path for f in bundle.files if f.role == "inference"]
-    if len(entrypoints) != 1 or not entrypoints[0].endswith(".py"):
-        raise EvaluationInfrastructureError("CPU runtime requires one declared Python entrypoint")
+    try:
+        entrypoint = model_python_entrypoint(bundle)
+    except ValueError as error:
+        raise EvaluationInfrastructureError(str(error)) from error
     name = (
         "umi-evaluation-" + uuid.uuid4().hex
         if invocation_sha256 is None
@@ -372,7 +405,7 @@ async def execute_offline_case(
             name=name,
             model=archive / digest(bundle) / "model",
             inputs=inputs,
-            entrypoint=entrypoints[0],
+            entrypoint=entrypoint,
             maximum_inference_ms=policy.maximum_inference_ms,
         )
         started = time.monotonic()
@@ -455,7 +488,7 @@ async def execute_offline_case(
             reason=reason,
             returncode=returncode,
         )
-        validate_case_execution(record, policy)
+        validate_case_execution(record, policy, runtime_authorization=runtime_authorization)
         return record
 
 

@@ -1,14 +1,17 @@
 """Select native reviewers lazily from the host's immutable series manifest."""
 
+from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
 
+from .competition_cohort_admission_journal import CohortAdmissionJournal
 from .competition_cohort_history_http import CohortHistoryHTTPClient, CohortHistoryReader
 from .competition_cohort_intake_export import RemoteIntakeProgressReviewer
 from .competition_cohort_intake_review_http import IntakeReviewHTTPClient
 from .competition_cohort_model_delivery_api import ModelDeliveryAdoptionReviewer
 from .competition_cohort_model_delivery_candidate import ModelDeliveryAdoptionCandidate
 from .competition_cohort_model_delivery_reservation import ModelDeliveryReservationReader
+from .competition_cohort_model_transport_selection import selected_cohort_profile
 from .competition_cohort_preparation_export import RemotePreparationProgressReviewer
 from .competition_cohort_preparation_review_http import PreparationReviewHTTPClient
 from .competition_cohort_recovery import cohort_tracks, verify_cohort_service_pool
@@ -20,8 +23,13 @@ from .competition_cohort_review_config import PhaseReviewServiceConfig
 from .competition_cohort_roster import RecoverableRosterEvidence
 from .competition_cohort_service_quality import ServiceTerms
 from .competition_cohort_service_work import SignedServiceWorkCatalog
+from .competition_cohort_suite_adoption_api import EvaluationSuiteAdoptionReviewer
+from .competition_cohort_suite_adoption_candidate import EvaluationSuiteAdoptionCandidate
+from .competition_cohort_suite_adoption_reservation import EvaluationSuiteReservationReader
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_store import CompetitionStore
+from .competition_verification_reuse import VerificationReuse
+from .competition_work_progress import work_heartbeats
 from .concurrency import run_owned_thread
 from .host_memory_request_bounds import bounded_stage_declarations, stage_count
 from .host_memory_runtime import memory_operation, requests_stage_policy
@@ -47,9 +55,19 @@ class SelectedPhaseReviewer:
         token: str,
         archive,
         promotion: CompetitionStore,
+        admission: CohortAdmissionJournal | None = None,
     ):
         self.config, self.provider = config, provider
         self.policy, self.cohorts = config.policy, config.signing.cohorts
+        self.request_verification = VerificationReuse(
+            Path(config.signing.directory) / "request-verification",
+            owner={
+                "kind": "selected_request_review",
+                "signer": config.signing.signer,
+                "source_owner": config.owner_hotkey,
+                "policy": digest(config.policy),
+            },
+        )
         phase_export_timeout = (
             config.phase_review_budget.export_exchange_seconds
             if config.phase_review_budget is not None
@@ -64,6 +82,16 @@ class SelectedPhaseReviewer:
             IntakeReviewHTTPClient(client, config.owner_origin, token=token, **common),
             archive,
             maximum_sample_gap_blocks=config.maximum_sample_gap_blocks,
+            reviewed_participation=(
+                None
+                if admission is None
+                else partial(run_owned_thread, admission.reviewed_participation)
+            ),
+            remember_participation_review=(
+                None
+                if admission is None
+                else partial(run_owned_thread, admission.remember_participation_review)
+            ),
             **common,
         )
         self.preparation = RemotePreparationProgressReviewer(
@@ -73,6 +101,8 @@ class SelectedPhaseReviewer:
             promotion,
             eligible_tracks=config.eligible_tracks,
             maximum_promotion_bytes=config.maximum_promotion_bytes,
+            reviewed_participation=self.intake.reviewed_participation,
+            remember_participation_review=self.intake.remember_participation_review,
             **common,
         )
         self.request_fetch = RequestReviewHTTPClient(
@@ -133,13 +163,35 @@ class SelectedPhaseReviewer:
             budget=config.phase_review_budget,
         )
 
+        self.evaluation_suite_adoption = EvaluationSuiteAdoptionReviewer(
+            config.series,
+            self.policy,
+            provider,
+            self.adoption.history,
+            EvaluationSuiteReservationReader(
+                client,
+                config.owner_origin,
+                token=token,
+                owner=config.owner_hotkey,
+                timeout_seconds=adoption_export_timeout,
+                complete_exchange=config.phase_review_budget is not None,
+            ),
+            candidates={
+                c.cohort_sha256: EvaluationSuiteAdoptionCandidate(c, self.policy)
+                for c in config.evaluation_suite_adoption_candidates
+            },
+            budget=config.phase_review_budget,
+        )
+
     @bounded_stage_declarations
     def _requests(self, cohort: str) -> RemoteRequestProgressReviewer:
         c = self.config
         plan = next((plan for plan in c.series.cohorts if digest(plan) == cohort), None)
         if plan is None:
             raise ValueError("phase review cohort is absent from its standing series")
-        selected_tracks = cohort_tracks(plan, c.eligible_tracks)
+        selected_tracks = cohort_tracks(
+            plan, c.eligible_tracks, adoption=selected_cohort_profile(c, cohort)
+        )
         requirement = c.manifest.requirement(cohort)
         root = Path(c.inputs_directory)
         total = 0
@@ -211,7 +263,11 @@ class SelectedPhaseReviewer:
         scope=lambda self, progress: (progress.cohort_sha256, progress.phase),
     )
     async def review(self, progress):
-        return await (await self._select(progress)).review(progress)
+        scope = (
+            self.request_verification.selected() if progress.phase == "requests" else nullcontext()
+        )
+        with scope, work_heartbeats():
+            return await (await self._select(progress)).review(progress)
 
     @memory_operation(
         operation="requests_decision",
@@ -221,4 +277,8 @@ class SelectedPhaseReviewer:
         progress = evidence.progress.progress
         if (transition.cohort_sha256, transition.phase) != (progress.cohort_sha256, progress.phase):
             raise ValueError("decision scope differs from its reserved progress")
-        return await (await self._select(progress)).decision(transition, evidence)
+        scope = (
+            self.request_verification.selected() if progress.phase == "requests" else nullcontext()
+        )
+        with scope, work_heartbeats():
+            return await (await self._select(progress)).decision(transition, evidence)

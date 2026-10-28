@@ -396,7 +396,9 @@ def precommit_service_inventory(
 ):
     """Select fixed inventory without reading a roster, promotion or future block."""
     assert h.intake.export_records(h.cohort, maximum_bytes=1024**2, maximum_records=8) == ()
-    assert not h.intake.history(h.cohort).transitions
+    # An intake amendment preserves the precommitted cohort identity. No phase
+    # closure or execution may precede this fixture's original inventory.
+    assert all(t.transition.is_policy_adoption for t in h.intake.history(h.cohort).transitions)
     policy = h.intake.policy
     body = PrecommittedServiceWorkCatalog(
         schema="umi-cohort-service-work-catalog/2",

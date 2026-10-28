@@ -155,8 +155,11 @@ async def admission_case(historical, monkeypatch, tmp_path):
     # history schema. Original native source bytes and signing records stay exact.
     journal = h.reader.journal
     with journal.transaction() as db:
-        for name in h.reader.checkpoints.triggers:
+        for name in (*h.reader.checkpoints.triggers, *h.reader.folded_frontier.triggers):
             db.execute("DROP TRIGGER " + name)
+        db.execute("DROP TABLE history_folded_state")
+        db.execute("DROP TABLE history_folded_anchors")
+        db.execute("DELETE FROM records WHERE kind LIKE 'control_history_folded_%'")
         for name in (
             "history_checkpoint_state",
             "history_checkpoint_index",
@@ -210,6 +213,9 @@ async def admission_case(historical, monkeypatch, tmp_path):
         migrate=migrate,
         migrate_result=migrate_result,
         expected=reviewed_history,
+        original_control=control,
+        original_review=review,
+        decision_reader=decision_reader,
     )
 
 
@@ -493,7 +499,7 @@ async def test_direct_remote_tail_preserves_admitted_prefix_and_all_original_fen
     result = await h.reader.advance(h.item.provider, through_block=h.end)
     assert result.history.tip.block_number == h.end
     assert h.reader.progress.native_completed == h.end - c.boundary
-    assert originals(h.reader.journal) == prefix_sources
+    assert not originals(h.reader.journal)
     assert h.reader.completed_admission.load() == admission
     with h.reader.journal.read_transaction() as db:
         assert db.execute("SELECT revision FROM history_completed_admission").fetchall() == [(0,)]
@@ -509,10 +515,11 @@ async def test_direct_remote_tail_preserves_admitted_prefix_and_all_original_fen
     assert server.calls == []
     assert h.reader.checkpoints.load(h.end) == saved
     assert h.reader.completed_admission.load() == admission
-    # The existing protection still detects an ordinary source mutation.
-    kind, key, _ = prefix_sources[0]
+    # Reintroducing even identical old raw bytes must invalidate the interval;
+    # new tail captures remain allowed and do not invalidate it.
+    kind, key, raw = prefix_sources[0]
     with h.reader.journal.transaction() as db:
-        db.execute("UPDATE records SET body=body WHERE kind=? AND id=?", (kind, key))
+        db.execute("INSERT INTO records VALUES (?,?,?)", (kind, key, raw))
     with pytest.raises(HistoryCheckpointRepairRequired, match="source or marker changed"):
         h.reader.completed_admission.load()
 
@@ -668,3 +675,57 @@ async def test_no_later_records_still_requires_finalized_economics_reconciliatio
     result = await admission_case.migrate_result()
     assert result.reconciliation["later_decisions_present"] is False
     assert result.reconciliation["publication_authorized"] is False
+
+
+async def test_aggregate_admission_archive_backfill_preserves_interval_without_per_block_verdicts(
+    admission_case,
+    tmp_path,
+):
+    from umi.competition_reward_proof_archive import RewardProofArchive
+
+    from .test_competition_reward_history_archive_backfill import selected
+
+    c, h = admission_case, admission_case.h
+    archive = RewardProofArchive(tmp_path / "original-admission-archive")
+    h.reader = h.new_reader()
+    for height in range(h.reader.first_block, c.boundary + 1):
+        h.reader._export_fields(height, h.reader._load(height), archive)
+    await c.migrate()
+    h.reader = h.new_reader()
+    remote = selected(tmp_path / "archive-remote", EvidenceServer())
+    h.reader = reopen(
+        h.reader,
+        remote,
+        export_archive=RewardProofArchive(
+            archive.root,
+            remote=remote,
+            legacy_read_through=True,
+        ),
+    )
+    for _ in range(c.boundary - h.reader.first_block + 1):
+        assert (
+            await h.reader.advance(h.item.provider, through_block=c.boundary)
+        ).history == c.expected
+    assert h.reader.progress.archive_delivery["state"] == "completed"
+    assert h.reader.progress.native_completed == 0
+    for height in range(h.reader.first_block, c.boundary + 1):
+        assert h.reader.checkpoints.load(height) is None
+
+
+async def test_aggregate_boundary_then_later_full_frontier_avoids_tail_metadata_rebuild(
+    admission_case,
+    monkeypatch,
+):
+    c, h = admission_case, admission_case.h
+    await c.migrate()
+    h.reader = h.new_reader()
+    expected = (await h.reader.advance(h.item.provider, through_block=h.end)).history
+    h.reader = h.new_reader()
+    assert (await h.reader.advance(h.item.provider, through_block=c.boundary)).history == c.expected
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("later owned frontier was rebuilt after the aggregate admission scope")
+
+    monkeypatch.setattr(h.reader.checkpoints, "load_restore_batch", forbidden)
+    assert (await h.reader.advance(h.item.provider, through_block=h.end)).history == expected
+    assert h.reader.progress.native_completed == 0

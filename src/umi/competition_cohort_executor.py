@@ -24,12 +24,17 @@ from .competition_cohort_order_signer import (
     CohortOrderHistory,
     OrderFinality,
     order_slot,
+    remember_closed_order_history,
     remember_order_history,
     review_order,
 )
 from .competition_execution import ExecutionBoundary, execution_boundary
+from .competition_progress import report_execution_retry
 from .competition_round_journal import FinalizedHeadRegression
 from .competition_runner import OfflineCaseExecution
+from .competition_transport_verification import TransferProgress
+from .competition_verification_reuse import VerificationReuse
+from .competition_work_progress import await_progress, review_scope
 from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
 from .open_competition import digest, identity
 from .protocol import canonical_json_bytes
@@ -56,6 +61,23 @@ class CohortExecutionAuthority:
         if provider.policy != journal.policy:
             raise ValueError("execution finality belongs to another policy")
         self.journal, self.provider, self.history = journal, provider, history
+        self.verification_reuse = VerificationReuse(
+            journal.journal.root / "authority-verification",
+            owner={
+                "schema": "umi-execution-authority-verification/1",
+                "policy": digest(journal.policy),
+                "cohorts": journal.cohorts,
+                "signer": identity(journal.config.signer),
+            },
+        )
+
+    def _verified(self, function, *args):
+        source = next(value for value in args if isinstance(value, CohortOrderHistory))
+        with (
+            review_scope("execution_authority", digest(source.history.plan), reads=0),
+            self.verification_reuse.selected(),
+        ):
+            return function(*args)
 
     async def current(
         self, assignment: CohortExecutionAssignment
@@ -76,34 +98,71 @@ class CohortExecutionAuthority:
     ) -> tuple[CohortOrderHistory, ExecutionBoundary]:
         timeout = self.journal.config.read_timeout_seconds
         cohort = assignment.certificate.order.round.cohort_sha256
-        source = await wait_for_owned(self.history(cohort), timeout=timeout)
+        source = await await_progress(
+            wait_for_owned(self.history(cohort), timeout=timeout),
+            stage="execution_owner_history",
+            cohort=cohort,
+        )
+        closed = await await_progress(
+            run_owned_thread(
+                self._verified,
+                remember_closed_order_history,
+                self.journal.journal,
+                self.journal.cohorts,
+                self.journal.policy,
+                source,
+            ),
+            stage="execution_history_phase",
+            cohort=cohort,
+        )
+        if closed:
+            raise ValueError("new order signatures require an open request phase")
         boundary = execution_boundary(
-            await wait_for_owned(self.provider.collect(), timeout=timeout)
+            await await_progress(
+                wait_for_owned(self.provider.collect(), timeout=timeout),
+                stage="execution_registration_capture",
+                cohort=cohort,
+            )
         )
         # Local authenticated replay must be allowed to finish. An overall
         # timeout here would repeatedly discard a valid but slow verification.
-        await run_owned_thread(
-            remember_order_history,
-            self.journal.journal,
-            self.journal.cohorts,
-            self.journal.policy,
-            source,
-            boundary.block,
+        await await_progress(
+            run_owned_thread(
+                self._verified,
+                remember_order_history,
+                self.journal.journal,
+                self.journal.cohorts,
+                self.journal.policy,
+                source,
+                boundary.block,
+            ),
+            stage="execution_history_review",
+            cohort=cohort,
         )
-        await run_owned_thread(
-            review_order,
-            assignment.certificate.order,
-            assignment.participant,
-            source,
-            self.journal.policy,
-            boundary.block,
+        await await_progress(
+            run_owned_thread(
+                self._verified,
+                review_order,
+                assignment.certificate.order,
+                assignment.participant,
+                source,
+                self.journal.policy,
+                boundary.block,
+            ),
+            stage="execution_order_review",
+            cohort=cohort,
         )
-        current = await wait_for_owned(self.history(cohort), timeout=timeout)
+        current = await await_progress(
+            wait_for_owned(self.history(cohort), timeout=timeout),
+            stage="execution_history_freshness",
+            cohort=cohort,
+        )
         if current != source:
             boundary = execution_boundary(
                 await wait_for_owned(self.provider.collect(), timeout=timeout)
             )
             await run_owned_thread(
+                self._verified,
                 remember_order_history,
                 self.journal.journal,
                 self.journal.cohorts,
@@ -136,6 +195,66 @@ class CohortExecutor(CohortExecutionAuthority):
         super().__init__(journal, provider, history)
         self.sandbox = sandbox
 
+    async def _journal_progress(self, assignment, operation, *args):
+        cohort = (
+            assignment.round.cohort_sha256
+            if isinstance(assignment, RecoverableExecutionJob)
+            else assignment.certificate.order.round.cohort_sha256
+        )
+        with review_scope("execution_journal", cohort, reads=0):
+            return await await_progress(
+                run_owned_thread(operation, *args),
+                stage="execution_journal_" + operation.__name__,
+                cohort=cohort,
+            )
+
+    async def _first_unfinished(self, job):
+        for index in range(step_count(job)):
+            if await run_owned_thread(self.journal.step, job, index) is None:
+                return index
+        return None
+
+    async def advance_batch(
+        self, assignment: CohortExecutionAssignment
+    ) -> RecoverableExecutionEvidence | None:
+        """Drain one resident paired job, preserving the ordinary per-step path."""
+        scope = getattr(self.sandbox, "execution_scope", None)
+        if scope is None:
+            return await self.advance(assignment)
+        slot = order_slot(assignment.certificate.order)
+        evidence = await self._completed(assignment, slot)
+        if evidence is not None:
+            return evidence
+        job = await self._journal_progress(assignment, self.journal.validate_assignment, assignment)
+        scope_input = (
+            job
+            if getattr(self.sandbox, "prepared_execution_scope", False)
+            else (assignment.certificate.order)
+        )
+        async with scope(scope_input) as enabled:
+            if not enabled:
+                return await self.advance(assignment)
+            total = step_count(job)
+            restored = await self._journal_progress(job, self.journal.checkpoint_count, job)
+            with TransferProgress(
+                "model_pair_execution",
+                total,
+                unit="case_role_steps",
+                planning_unit_seconds=(1, job_policy_timeout(self.journal)),
+                idle_stall_seconds=job_policy_timeout(self.journal),
+            ) as progress:
+                progress.advance(restored, restored=True)
+                # Each ordinary advance finishes at most one step. The extra
+                # iteration covers an already-complete retained job; this is a
+                # finite scheduling batch, not a new deadline or protocol gate.
+                for _ in range(total - restored + 1):
+                    result = await self.advance(assignment)
+                    if progress.completed < total:
+                        progress.advance(1)
+                    if result is not None:
+                        return result
+                raise RuntimeError("paired execution batch did not finish its retained steps")
+
     async def _completed(
         self, assignment: CohortExecutionAssignment, slot: str
     ) -> RecoverableExecutionEvidence | None:
@@ -162,22 +281,27 @@ class CohortExecutor(CohortExecutionAuthority):
             if evidence is not None:
                 return evidence
             source, started = await self.current(assignment)
-            job = await run_owned_thread(self.journal.retain, assignment, source, started.block)
-            shared = await run_owned_thread(
-                self.journal.reuse_endpoint_incumbent, slot, job, started
+            job = await self._journal_progress(
+                assignment, self.journal.retain, assignment, source, started.block
+            )
+            shared = await self._journal_progress(
+                job, self.journal.reuse_endpoint_incumbent, slot, job, started
             )
             if shared is not None:
                 return shared
-            for index in range(step_count(job)):
-                if await run_owned_thread(self.journal.step, job, index) is None:
-                    break
-            else:
-                return await run_owned_thread(self.journal.evidence, slot)
-            attempt = await run_owned_thread(self.journal.head, job, index)
+            with review_scope("execution_journal", job.round.cohort_sha256, reads=0):
+                index = await await_progress(
+                    self._first_unfinished(job),
+                    stage="execution_checkpoint_lookup",
+                    cohort=job.round.cohort_sha256,
+                )
+            if index is None:
+                return await self._journal_progress(job, self.journal.evidence, slot)
+            attempt = await self._journal_progress(job, self.journal.head, job, index)
             pending = (
                 None
                 if attempt is None
-                else await run_owned_thread(self.journal.result, job, attempt)
+                else await self._journal_progress(job, self.journal.result, job, attempt)
             )
             if pending is None:
                 if attempt is not None:
@@ -186,24 +310,31 @@ class CohortExecutor(CohortExecutionAuthority):
                         self.sandbox.reconcile(job, attempt),
                         timeout=SANDBOX_RECONCILIATION_TIMEOUT_SECONDS,
                     )
-                    await run_owned_thread(self.journal.stopped, attempt)
+                    await self._journal_progress(job, self.journal.stopped, attempt)
                     source, started = await self.current(assignment)
-                attempt = await run_owned_thread(self.journal.begin, job, index, source, started)
+                attempt = await self._journal_progress(
+                    job, self.journal.begin, job, index, source, started
+                )
 
                 async def invoke_and_retain():
-                    result = await self.sandbox.invoke(job, attempt)
-                    await run_owned_thread(self.journal.observe, job, attempt, result)
+                    result = await await_progress(
+                        self.sandbox.invoke(job, attempt),
+                        stage="execution_sandbox",
+                        cohort=job.round.cohort_sha256,
+                    )
+                    await self._journal_progress(job, self.journal.observe, job, attempt, result)
 
-                # The signed per-inference limit is enforced by the sandbox. This
-                # outer transport/cleanup allowance never expires the whole job.
+                # Restoration and shared cache queues precede inference. Give
+                # them the configured read budget without consuming the signed
+                # inference limit, which the sandbox enforces independently.
                 await wait_for_owned(invoke_and_retain(), timeout=job_policy_timeout(self.journal))
             _, finished = await self.current(assignment)
-            await run_owned_thread(self.journal.finish, job, attempt, finished)
-            return await run_owned_thread(self.journal.evidence, slot)
+            await self._journal_progress(job, self.journal.finish, job, attempt, finished)
+            return await self._journal_progress(job, self.journal.evidence, slot)
 
 
 def job_policy_timeout(journal: CohortExecutionJournal) -> float:
-    return journal.policy.maximum_inference_ms / 1000 + 60
+    return journal.config.read_timeout_seconds + journal.policy.maximum_inference_ms / 1000 + 60
 
 
 class CohortExecutionWorker:
@@ -245,6 +376,33 @@ class CohortExecutionWorker:
         self.inbox_reads = asyncio.Lock()
         self.serial = asyncio.Lock()
         self.source_priority_due = True
+        self.resume_priority_due = True
+
+    def _startup_resume(self):
+        if not self.resume_priority_due:
+            return ()
+        try:
+            inventory = getattr(self.executor.sandbox, "resume_model_revisions", None)
+            revisions = () if inventory is None else inventory()
+            slots = (
+                self.inbox.assignments_for_models(
+                    revisions,
+                    limit=min(self.concurrency, self.batch_size),
+                    preferred=self.executor.journal.recent_assignment_slots(),
+                )
+                if revisions
+                else ()
+            )
+        except (OSError, ValueError, sqlite3.Error) as error:
+            # Hints cannot suppress ordinary acknowledged work. Surface the
+            # inventory issue; normal execution still enforces all cache and
+            # journal checks rather than treating it as successful verification.
+            report_execution_retry(slot=None, error=error)
+            slots = ()
+        # Give preserved work one turn. A failing hint cannot monopolize later
+        # batches, and an out-of-order resume never advances the ordinary cursor.
+        self.resume_priority_due = False
+        return slots
 
     async def poll_once(self):
         async with self.serial:
@@ -257,15 +415,16 @@ class CohortExecutionWorker:
                         raise ValueError("execution cursor is invalid")
                     return rows[0][0] if rows else ""
 
+            resumed = await run_owned_thread(self._startup_resume)
             after = await run_owned_thread(cursor)
-            slots = await run_owned_thread(
+            slots = resumed or await run_owned_thread(
                 lambda: self.inbox.assignments(after=after, limit=self.batch_size)
             )
             if not slots and after:
                 slots = await run_owned_thread(
                     lambda: self.inbox.assignments(limit=self.batch_size)
                 )
-            if slots:
+            if slots and not resumed:
 
                 def advance():
                     with journal.transaction() as db:
@@ -319,7 +478,8 @@ class CohortExecutionWorker:
                         # request become terminal before beginning a long local
                         # inference so the two workers cannot starve each other.
                         return slot, "deferred", "endpoint_terminal_pending"
-                result = await self.executor.advance(assignment)
+                advance = getattr(self.executor, "advance_batch", self.executor.advance)
+                result = await advance(assignment)
                 return slot, "complete" if result is not None else "progress", ""
             except (
                 OSError,
@@ -328,6 +488,7 @@ class CohortExecutionWorker:
                 sqlite3.Error,
                 asyncio.TimeoutError,
             ) as error:
+                report_execution_retry(slot=slot, error=error)
                 return slot, "pending", type(error).__name__
 
     async def _rolling_poll(self, active):
@@ -346,20 +507,22 @@ class CohortExecutionWorker:
                         raise ValueError("execution cursor is invalid")
                     after = rows[0][0] if rows else ""
                 available = self.concurrency - len(active)
-                chosen = []
+                chosen = [slot for slot in self._startup_resume() if slot not in active][:available]
                 # One fixed source unlocks many consumers. Revisit it promptly
                 # rather than putting each of its steps behind the whole roster.
                 # Keep peer capacity; a single-slot host alternates with normal
                 # work even if this source is repeatedly unavailable.
-                if self.concurrency > 1 or self.source_priority_due:
+                if len(chosen) < available and (self.concurrency > 1 or self.source_priority_due):
                     sources = self.executor.journal.unfinished_incumbent_sources()
-                    chosen = [slot for slot in sources if slot not in active][:1]
+                    chosen.extend(
+                        [slot for slot in sources if slot not in active and slot not in chosen][:1]
+                    )
                 self.source_priority_due = not bool(chosen)
-                slots = self.inbox.assignments(after=after, limit=self.batch_size)
-                if not slots and after:
-                    slots = self.inbox.assignments(limit=self.batch_size)
                 last = None
                 if len(chosen) < available:
+                    slots = self.inbox.assignments(after=after, limit=self.batch_size)
+                    if not slots and after:
+                        slots = self.inbox.assignments(limit=self.batch_size)
                     for slot in slots:
                         last = slot
                         if slot not in active and slot not in chosen:

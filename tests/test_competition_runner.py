@@ -10,6 +10,7 @@ import pytest
 from tests.test_open_competition import policy as competition_policy_fixture
 from umi import competition_runner as runner
 from umi.open_competition import BundleFile, ModelBundle, digest
+from umi.protocol import canonical_json_bytes
 
 policy = competition_policy_fixture
 
@@ -60,6 +61,18 @@ def test_cpu_command_has_no_network_wallet_or_writable_model(runtime):
     assert command[-3:] == (runtime.image, "/model/infer.py", "/input/video.mp4")
     temporary = [command[i + 1] for i, arg in enumerate(command) if arg == "--tmpfs"]
     assert temporary == [f"/tmp:rw,nosuid,nodev,noexec,size={runtime.scratch_bytes},mode=1777"]
+
+
+def test_new_cpu_runtime_defaults_to_256_pids_without_rewriting_explicit_history(runtime):
+    fields = runtime.model_dump(mode="json", by_alias=True)
+    del fields["pids_limit"]
+    assert runner.OfflineCpuRuntime.model_validate(fields).pids_limit == 256
+    historical = runtime.model_copy(update={"pids_limit": 128})
+    raw = canonical_json_bytes(historical)
+    assert b'"pids_limit":128' in raw
+    restored = runner.OfflineCpuRuntime.model_validate_json(raw)
+    assert canonical_json_bytes(restored) == raw
+    assert digest(restored) == digest(historical)
 
 
 @pytest.mark.asyncio
@@ -133,11 +146,12 @@ def test_mount_injection_is_rejected(runtime, path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("routed", [False, True])
 @pytest.mark.parametrize(
     "mode", ["success", "timeout", "overflow", "runtime_failure", "cleanup_failure"]
 )
 async def test_bounded_execution_removes_only_its_case_container(
-    runtime, policy, tmp_path, monkeypatch, mode
+    runtime, policy, tmp_path, monkeypatch, mode, routed
 ):
     policy = policy.model_copy(update={"evaluation_runtime_sha256": digest(runtime)})
     records = []
@@ -151,6 +165,11 @@ async def test_bounded_execution_removes_only_its_case_container(
         "provenance",
     ):
         records.append(BundleFile(path=f"{role}.py", role=role, sha256="ab" * 32, size_bytes=0))
+    if routed:
+        records.extend(
+            BundleFile(path=path, role="inference", sha256="cd" * 32, size_bytes=0)
+            for path in ("fs/route_child.py", "umi_inference.py")
+        )
     bundle = ModelBundle(
         schema="umi-model-bundle/1",
         profile="offline_bundle/1",
@@ -159,7 +178,7 @@ async def test_bounded_execution_removes_only_its_case_container(
         files=tuple(sorted(records, key=lambda x: x.path)),
     )
 
-    async def verified(*args):
+    async def verified(*args, **kwargs):
         pass
 
     monkeypatch.setattr(runner, "verify_runtime", verified)
@@ -214,6 +233,7 @@ async def test_bounded_execution_removes_only_its_case_container(
         assert result.status == ("ok" if mode == "success" else "miner_failure")
         assert result.hypothesis == ("hello" if mode == "success" else "")
     name = calls[0][calls[0].index("--name") + 1]
+    assert calls[0][-2] == ("/model/umi_inference.py" if routed else "/model/inference.py")
     assert calls[-1] == ("/usr/bin/podman", "rm", "--force", "--ignore", "--time=0", name)
     assert "--all" not in calls[-1]
     assert not list(tmp_path.glob("umi-evaluation-input-*"))

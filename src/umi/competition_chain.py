@@ -31,6 +31,7 @@ from .competition_chain_resources import CompetitionChainResources
 from .competition_historical_blocks import HistoricalRequestBlocks
 from .competition_policy_lineage import admitted_policy_sha256s
 from .competition_proof_rpc import FailoverProofRpc
+from .competition_transport_verification import TransferProgress
 from .concurrency import await_owned_task, run_owned_thread
 from .encoding import account_id32
 from .finalized_ancestry import MAXIMUM_DISTANCE, HeaderPathCache, recover_header_path
@@ -145,7 +146,8 @@ class CompetitionChainConfig(StrictProtocolModel):
     collection_timeout_seconds: Annotated[int, Field(ge=1, le=600)] = 120
     startup_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 1800
     finality_segment_startup_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] | None = None
-    maximum_cache_bytes: Annotated[int, Field(ge=1024, le=20 * 1024**3)] = 256 * 1024**2
+    maximum_cache_bytes: Annotated[int, Field(ge=1024, le=2**53 - 1)] = 256 * 1024**2
+    previous_maximum_cache_bytes: Annotated[int, Field(ge=1024, le=2**53 - 1)] | None = None
     storage_codec_metadata_path: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
     runtime_metadata_binary: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
     runtime_metadata_binary_sha256: Hex32 | None = None
@@ -164,6 +166,8 @@ class CompetitionChainConfig(StrictProtocolModel):
             value.pop("finality_segment_startup_timeout_seconds", None)
         if not self.proof_rpc_fallback_urls:
             value.pop("proof_rpc_fallback_urls", None)
+        if self.previous_maximum_cache_bytes is None:
+            value.pop("previous_maximum_cache_bytes", None)
         return value
 
     @field_validator("storage_codec_metadata_path", "runtime_metadata_binary")
@@ -578,6 +582,7 @@ class FinalizedRegistrationProvider:
                 startup_timeout_seconds=segment_startup_timeout,
                 limits=self._finality_storage_limits(),
                 storage_limits=self._finality_operational_limits(),
+                accepted_predecessor_capacity_limits=self._predecessor_finality_storage_limits(),
             )
             head = finality.persisted_head()
             self._startup_floor = (
@@ -677,6 +682,7 @@ class FinalizedRegistrationProvider:
             "collection_timeout_seconds",
             "startup_timeout_seconds",
             "finality_segment_startup_timeout_seconds",
+            "previous_maximum_cache_bytes",
         ):
             body.pop(field, None)
         return digest({"chain_config_without_policy": body})
@@ -685,6 +691,7 @@ class FinalizedRegistrationProvider:
     def _legacy_policy_free_config_binding_hash(config: CompetitionChainConfig) -> str:
         body = config.model_dump(mode="json", by_alias=True)
         body.pop("policy_sha256", None)
+        body.pop("previous_maximum_cache_bytes", None)
         return digest({"chain_config_without_policy": body})
 
     def _legacy_operational_profiles(
@@ -732,6 +739,15 @@ class FinalizedRegistrationProvider:
         have carried under the live policy or any honored predecessor."""
         accepted = {self._cache_binding_hash()}
         configs = [self.config]
+        if self.config.previous_maximum_cache_bytes is not None:
+            previous = self.config.model_copy(
+                update={
+                    "maximum_cache_bytes": self.config.previous_maximum_cache_bytes,
+                    "previous_maximum_cache_bytes": None,
+                }
+            )
+            configs.append(previous)
+            accepted.add(self._config_binding_hash(previous))
         if self.config.proof_rpc_fallback_urls:
             # Explicit addition only: preserve the original primary RPC, every
             # chain/proof pin and every other field. Never adopt another primary.
@@ -747,6 +763,9 @@ class FinalizedRegistrationProvider:
         return frozenset(accepted)
 
     def _finality_storage_limits(self):
+        return None
+
+    def _predecessor_finality_storage_limits(self):
         return None
 
     def _finality_operational_limits(self):
@@ -813,6 +832,22 @@ class FinalizedRegistrationProvider:
             from .competition_chain_capacity import verify_cache_capacity_history
 
             verify_cache_capacity_history(connection, self.config, expected_binding=expected)
+            index = "CREATE INDEX captures_evidence_lengths ON captures(block,length(evidence))"
+            retained_index = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' "
+                "AND name='captures_evidence_lengths'"
+            ).fetchone()
+            if retained_index is None:
+                with TransferProgress(
+                    "registration_capacity_index",
+                    1,
+                    unit="indexes",
+                    planning_unit_seconds=(0.01, 300.0),
+                ) as progress:
+                    connection.execute(index)
+                    progress.advance(1)
+            elif retained_index != (index,):
+                raise ValueError("registration capacity index differs; repair required")
             connection.commit()
         finally:
             connection.close()

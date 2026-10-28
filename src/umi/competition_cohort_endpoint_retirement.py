@@ -104,7 +104,12 @@ class CohortEndpointRetirement:
 
     def retained(self, slot: str, case_id: str) -> CohortRetiredEndpointCase | None:
         recovery = self.recovery
-        selected, assignment, job = recovery.selection(slot)
+        return recovery._project_selection(
+            slot, lambda result: self._retained_selection(*result, case_id)
+        )
+
+    def _retained_selection(self, selected, assignment, job, case_id):
+        recovery = self.recovery
         recovery._case(selected, job, case_id)
         raw = recovery.journal.journal.get(
             "endpoint_retired_case", case_record_key(selected, case_id)

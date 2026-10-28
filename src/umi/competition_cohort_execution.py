@@ -24,6 +24,7 @@ from .competition_cohort_participation import (
     AttestedCohortParticipantAdmission,
     SignedCohortParticipationConsent,
 )
+from .competition_evaluation_runtime import prepared_runtime_authorization
 from .competition_evidence import EvaluatorRunRecord
 from .competition_execution import ExecutionBoundary, ExecutionCase, ExecutionStep
 from .competition_runner import OfflineRuntime, validate_case_execution
@@ -120,6 +121,7 @@ def replay_execution_steps(
     This verifies retained observations; it does not attest physical execution.
     """
     width = 2 if job.mode == "paired_model" else 1
+    runtime_authorization = prepared_runtime_authorization(job.round, policy)
     previous = None
     outputs: dict[str, list[CaseOutput]] = {"candidate": [], "incumbent": []}
     for index, raw in zip(range(width * len(job.cases)), steps, strict=True):
@@ -138,7 +140,9 @@ def replay_execution_steps(
             or step.execution.model_sha256 != model
         ):
             raise ValueError("recoverable execution step assignment/model binding differs")
-        validate_case_execution(step.execution, policy)
+        if step.execution.runtime_sha256 != digest(job.runtime):
+            raise ValueError("recoverable execution step runtime differs from its job")
+        validate_case_execution(step.execution, policy, runtime_authorization=runtime_authorization)
         for boundary in (step.started, step.finished):
             _ordered(
                 boundary,

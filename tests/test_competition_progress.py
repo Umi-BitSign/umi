@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import sqlite3
 
 import pytest
 
@@ -199,6 +200,34 @@ def test_logger_setup_is_idempotent_and_does_not_enable_http_logging(monkeypatch
     assert len([json.loads(line) for line in captured.err.splitlines()]) == 2
 
 
+def test_model_export_reuse_counters_emit_with_actual_cli_logging_setup(
+    monkeypatch, capsys, tmp_path
+):
+    from umi.competition_cohort_request_files import RequestCompletionFiles
+
+    logger = logging.getLogger("umi.competition.progress")
+    monkeypatch.setattr(progress, "_LOG", logger)
+    monkeypatch.setattr(logger, "handlers", [])
+    monkeypatch.setattr(logger, "level", logging.WARNING)
+    monkeypatch.setattr(logger, "propagate", True)
+    monkeypatch.setattr(logging.getLogger(), "level", logging.WARNING)
+    progress.configure_progress_logging()
+    try:
+        files = RequestCompletionFiles(tmp_path / "exports")
+        for _ in range(64):
+            files._partial_reuse_event("hits")
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        event = json.loads(captured.err)
+        assert event["schema"] == "umi-model-partial-export-reuse/1"
+        assert event["stage"] == "model_partial_export_source_reuse"
+        assert event["lookups"] == event["hits"] == 64
+        assert event["certification_authority"] is False
+    finally:
+        for handler in logger.handlers:
+            handler.close()
+
+
 def test_unrecognized_phase_cannot_be_used_to_log_arbitrary_text(progress_events):
     with pytest.raises(ValueError, match="unknown competition diagnostic phase"):
         progress.log_phase("secret capability")
@@ -266,6 +295,75 @@ def test_settlement_retry_reports_bounded_causes_without_inputs(progress_events)
     assert progress_events[-1]["cohort_sha256"] is None
     assert progress_events[-1]["role"] == progress_events[-1]["stage"] == "unknown"
     assert secret not in json.dumps(progress_events)
+
+
+def test_settlement_reports_actual_sqlite_contention_without_database_path(
+    tmp_path, progress_events
+):
+    path = tmp_path / "private-journal-identity.sqlite3"
+    first = sqlite3.connect(path)
+    second = sqlite3.connect(path, timeout=0)
+    try:
+        first.execute("BEGIN IMMEDIATE")
+        with pytest.raises(sqlite3.OperationalError) as raised:
+            second.execute("BEGIN IMMEDIATE")
+        progress.report_settlement_retry(
+            cohort="b" * 64, role="coordinator", stage="tick", error=raised.value
+        )
+    finally:
+        second.close()
+        first.close()
+    event = progress_events[-1]
+    cause = event["causes"][0]
+    if hasattr(raised.value, "sqlite_errorcode"):
+        assert event["reason_code"] == cause["reason_code"] == "sqlite_busy"
+        assert cause["sqlite_errorcode"] == sqlite3.SQLITE_BUSY
+        assert cause["sqlite_errorname"] == "SQLITE_BUSY"
+    else:
+        assert cause["reason_code"] == "sqlite_error"
+        assert "sqlite_errorcode" not in cause
+    assert str(path) not in json.dumps(event)
+    assert "database is locked" not in json.dumps(event)
+
+
+def test_sqlite_failure_diagnostics_omit_sql_and_private_names(progress_events):
+    db = sqlite3.connect(":memory:")
+    try:
+        with pytest.raises(sqlite3.OperationalError) as raised:
+            db.execute("SELECT * FROM private_reference_secret")
+        progress.report_settlement_retry(
+            cohort="b" * 64, role="reviewer", stage="tick", error=raised.value
+        )
+    finally:
+        db.close()
+    assert progress_events[-1]["reason_code"] == "sqlite_error"
+    assert "private_reference_secret" not in json.dumps(progress_events)
+    assert "SELECT" not in json.dumps(progress_events)
+
+
+@pytest.mark.parametrize("code", [None, True, "secret", -1, 65536])
+def test_sqlite_failure_diagnostics_support_missing_or_invalid_codes(code, progress_events):
+    error = sqlite3.OperationalError("private reference secret")
+    if code is not None:
+        error.sqlite_errorcode = code
+    error.sqlite_errorname = "private_reference_secret"
+    progress.report_settlement_retry(cohort="b" * 64, role="reviewer", stage="tick", error=error)
+    cause = progress_events[-1]["causes"][0]
+    assert cause["reason_code"] == "sqlite_error"
+    assert "sqlite_errorcode" not in cause and "sqlite_errorname" not in cause
+    assert "secret" not in json.dumps(progress_events)
+
+
+def test_sqlite_failure_diagnostics_do_not_echo_unknown_names(progress_events):
+    error = sqlite3.OperationalError("private reference secret")
+    error.sqlite_errorcode = 5
+    error.sqlite_errorname = "SQLITE_PRIVATE_REFERENCE_SECRET"
+    progress.report_settlement_retry(cohort="b" * 64, role="reviewer", stage="tick", error=error)
+    cause = progress_events[-1]["causes"][0]
+    assert cause["reason_code"] == "sqlite_busy"
+    assert cause["sqlite_errorcode"] == 5
+    assert "sqlite_errorname" not in cause
+    assert "SECRET" not in json.dumps(progress_events)
 
 
 async def test_settlement_retry_keeps_scheduler_status_and_releases_error_frames(

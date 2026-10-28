@@ -14,6 +14,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import stat
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -275,6 +276,10 @@ class HostMemoryAdmission:
             from .host_memory_requests import RequestsStageMemoryPolicy
 
             self.policy = RequestsStageMemoryPolicy.model_validate_json(raw)
+        elif schema == "umi-host-model-execution-admission/1":
+            from .host_model_execution import ModelExecutionMemoryPolicy
+
+            self.policy = ModelExecutionMemoryPolicy.model_validate_json(raw)
         else:
             self.policy = HostMemoryAdmissionPolicy.model_validate_json(raw)
         self.policy_sha256 = expected_sha256
@@ -283,13 +288,17 @@ class HostMemoryAdmission:
         self._validate_all()
         # Startup and every later grant remeasure current memory. Idle Python
         # heaps remain in MemAvailable accounting after logical leases close.
-        if (
+        if not self.model_execution_stage and (
             _available_memory()
             < self.policy.minimum_available_bytes
             + self.policy.reserved_bytes
             + self.policy.background_reservation_bytes
         ):
             raise OSError("host memory admission startup awaits qualified headroom")
+
+    @property
+    def model_execution_stage(self) -> bool:
+        return self.policy.schema_ == "umi-host-model-execution-admission/1"
 
     @property
     def requests_stage(self) -> bool:
@@ -348,7 +357,7 @@ class HostMemoryAdmission:
         parent = self._open_root()
         try:
             files = (*self.policy.slots, self.policy.transaction_lock)
-            if not self.requests_stage:
+            if not self.requests_stage and not self.model_execution_stage:
                 files += (self.policy.settlement_gate, *self.policy.settlement_signals)
             for slot in files:
                 os.close(self._open_slot(parent, slot))
@@ -395,6 +404,7 @@ class HostMemoryAdmission:
                 < self.policy.minimum_available_bytes
                 + pending
                 + self.policy.background_reservation_bytes
+                + self._model_container_reservations()
             ):
                 return None
             lease = HostMemoryLease(descriptor, selected)
@@ -403,6 +413,49 @@ class HostMemoryAdmission:
         finally:
             if descriptor is not None:
                 os.close(descriptor)
+
+    def _model_container_reservations(self) -> int:
+        """Charge native ceilings too, including children of a dead reviewer.
+
+        Rootless containers can outlive their caller in a separate systemd
+        scope. A released flock alone therefore never establishes free native
+        capacity. Count every populated selected container conservatively in
+        addition to still-held job reservations; do not infer it is accounted
+        from its current RSS or an owner's PID.
+        """
+        if not self.model_execution_stage:
+            return 0
+        total = 0
+        for value in self.policy.container_cgroup_roots:
+            root = Path(value)
+            try:
+                entries = tuple(root.iterdir())
+            except FileNotFoundError:
+                continue
+            if len(entries) > 4096:
+                raise AdmissionBindingError("native container inventory exceeds its bounded root")
+            for entry in entries:
+                if re.fullmatch(r"libpod-[0-9a-f]{64}\.scope", entry.name) is None:
+                    continue
+                target = entry / "container"
+                try:
+                    if entry.is_symlink() or target.is_symlink():
+                        raise AdmissionBindingError("native container cgroup changed its identity")
+                    events = dict(
+                        line.split() for line in (target / "cgroup.events").read_text().splitlines()
+                    )
+                    if events.get("populated") != "1":
+                        continue
+                    limit = (target / "memory.max").read_text().strip()
+                    if not limit.isdecimal() or not 0 < int(limit) <= 1024**4:
+                        raise AdmissionBindingError(
+                            "native container has no bounded memory ceiling"
+                        )
+                    total += int(limit)
+                except FileNotFoundError:
+                    # A deleted scope cannot allocate another native byte.
+                    continue
+        return total
 
     def try_acquire(
         self, lane: Lane, *, operation=None, cohort=None, phase=None
@@ -428,7 +481,7 @@ class HostMemoryAdmission:
             os.close(parent)
 
     def try_settlement(self, cohort: str, role: str) -> HostMemoryLease | None:
-        if self.requests_stage:
+        if self.requests_stage or self.model_execution_stage:
             raise AdmissionBindingError("settlement is outside requests-stage qualification")
         if role not in {"coordinator", "reviewer"}:
             raise ValueError("settlement capacity requires a configured replica")
@@ -469,6 +522,36 @@ class HostMemoryAdmission:
             for descriptor in (marker, gate, transaction, parent):
                 if descriptor is not None:
                     os.close(descriptor)
+
+    def try_acquire_group(self, lane: Lane, count: int) -> HostMemoryLease | None:
+        """Atomically reserve model slots; never retain a partial acquisition."""
+        if not self.model_execution_stage or lane not in {"owner_export", "transient"}:
+            raise AdmissionBindingError("group acquisition requires model execution capacity")
+        slots = tuple(slot for slot in self.policy.slots if slot.lane == lane)
+        if type(count) is not int or not 1 <= count <= len(slots):
+            raise ValueError("model execution slot count is outside its qualified capacity")
+        parent, transaction, leases = self._open_root(), None, []
+        try:
+            transaction = self._transaction(parent)
+            if transaction is None:
+                return None
+            for slot in slots:
+                lease = self._reserve(parent, slot)
+                if lease is not None:
+                    leases.append(lease)
+                if len(leases) == count:
+                    result = leases.pop(0)
+                    result._group = tuple(lease._descriptor for lease in leases)
+                    for lease in leases:
+                        lease._descriptor = None
+                    return result
+            return None
+        finally:
+            for lease in leases:
+                lease.close()
+            if transaction is not None:
+                os.close(transaction)
+            os.close(parent)
 
     async def acquire(
         self, lane: Lane, *, operation=None, cohort=None, phase=None

@@ -4,6 +4,7 @@ import json
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import HTTPException
 
@@ -273,7 +274,7 @@ async def test_retained_preparation_republication_is_allowed_and_leased(stage, m
     from umi import competition_cohort_preparation_publisher as module
 
     history = SimpleNamespace(plan=object())
-    prepared = SimpleNamespace(roster=SimpleNamespace(round=object()))
+    prepared = SimpleNamespace(round_sha256="4" * 64)
     calls = []
 
     class Intake:
@@ -284,11 +285,14 @@ async def test_retained_preparation_republication_is_allowed_and_leased(stage, m
     class Owner:
         queue = SimpleNamespace(intake=Intake(), policy=object())
 
-        def retained(self, cohort, **kwargs):
+        def retained_publication(self, cohort, **kwargs):
             assert runtime._active.get() is not None
             assert cohort == C5
             calls.append("retained")
             return prepared
+
+        def retained(self, *args, **kwargs):
+            pytest.fail("internal publication reconstructed the public prepared graph")
 
         def prepare(self, *args, **kwargs):
             pytest.fail("retained publication started fresh preparation")
@@ -470,6 +474,34 @@ async def test_stage_private_scope_enters_native_route(stage, role, path):
     assert seen == [stage[0]]
 
 
+async def test_stage_allows_only_cached_reviewer_epoch_get_without_admission_work(stage):
+    from fastapi import FastAPI
+
+    from umi.competition_cohort_producer_epoch import producer_epoch_routes
+
+    from .test_open_competition import wallet
+
+    app = FastAPI()
+    app.include_router(
+        producer_epoch_routes(
+            wallet("Charlie").hotkey.ss58_address,
+            token="s" * 32,
+            enabled=True,
+        )
+    )
+    wrapped = runtime.RequestsStageASGIBinding(
+        app, controller=stage[0], private_role="phase_reviewer"
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=wrapped), base_url="https://review.example"
+    ) as client:
+        path = "/internal/cohorts/execution-producer"
+        assert (await client.get(path)).status_code == 401
+        response = await client.get(path, headers={"authorization": "Bearer " + "s" * 32})
+        assert response.status_code == 200
+        assert (await client.post(path, json={})).status_code == 503
+
+
 async def test_no_lane_unknown_route_refuses_before_body_parse(stage):
     exporter = Exporter()
     with bind(stage):
@@ -552,4 +584,46 @@ async def test_public_reads_are_refused_before_native_graphs(stage, path):
 
     wrapped = runtime.RequestsStageASGIBinding(forbidden, controller=stage[0])
     await wrapped({"type": "http", "method": "GET", "path": path}, forbidden, send)
+    assert messages[0]["status"] == 503
+
+
+async def test_cached_public_progress_remains_visible_during_request_stage(stage):
+    seen = []
+
+    async def application(scope, receive, send):
+        assert runtime.selected_memory() is stage[0]
+        seen.append(scope["path"])
+
+    async def forbidden(*args):
+        pytest.fail("cache-only diagnostics must not consume a body or enter native reads")
+
+    wrapped = runtime.RequestsStageASGIBinding(application, controller=stage[0])
+    path = "/v1/competition/cohorts/" + "c" * 64 + "/progress"
+    await wrapped({"type": "http", "method": "GET", "path": path}, forbidden, forbidden)
+    assert seen == [path]
+    assert runtime.selected_memory() is None
+
+
+@pytest.mark.parametrize(
+    "method,suffix",
+    [
+        ("POST", "/progress"),
+        ("HEAD", "/progress"),
+        ("GET", "/progress/"),
+        ("GET", "/history"),
+        ("GET", "/progress/extra"),
+    ],
+)
+async def test_request_stage_progress_exception_cannot_admit_other_work(stage, method, suffix):
+    messages = []
+
+    async def forbidden(*args):
+        pytest.fail("diagnostic exception admitted a native operation")
+
+    async def send(message):
+        messages.append(message)
+
+    path = "/v1/competition/cohorts/" + "c" * 64 + suffix
+    wrapped = runtime.RequestsStageASGIBinding(forbidden, controller=stage[0])
+    await wrapped({"type": "http", "method": method, "path": path}, forbidden, send)
     assert messages[0]["status"] == 503

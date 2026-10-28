@@ -103,3 +103,10 @@ The `sp-core` and `sp-trie` sources are pinned to Polkadot SDK revision
 `cacb4310f20c7cac83eb3ccd8ed5a5ad4212608a`, the revision selected by Subtensor
 `da06f033663896ef2fdbbfc3ecc68ca908fba0f5` (runtime spec 452 at implementation
 time). `Cargo.lock` fixes every remaining dependency.
+
+The locked `sp-core` graph pulls in `k256` 0.13 and `crypto-bigint` 0.5.5.
+RUSTSEC-2026-0387 describes timing leakage from operations on secret integers;
+this verifier processes only public proof nodes, roots and extrinsics and has no
+signing or private-key interface. CI excludes that advisory for this lockfile
+alone while continuing to audit every other advisory. Remove the exception when
+the pinned SDK graph supports `crypto-bigint` 0.7.6 or newer.

@@ -118,14 +118,23 @@ class RequestExportWorker:
                 )
         return tuple(r[0] for r in rows)
 
-    async def _partial(self, owner, slot, block):
-        manifest_key = await run_owned_thread(
-            partial(self.files.publish_partial, owner, slot, completed_by_block=block)
-        )
+    async def _partial(self, owner, slot, block, *, manifest_key=None):
+        if manifest_key is None:
+            manifest_key = await run_owned_thread(
+                partial(self.files.publish_partial, owner, slot, completed_by_block=block)
+            )
         if self.publish_inventory_proof is None or self.inventory_cutoff is None:
             return
-        assignment = await run_owned_thread(owner.assignment, slot)
-        cohort = assignment.certificate.order.round.cohort_sha256
+        selected_cohort = getattr(self.files, "model_partial_cohort", None)
+        cohort = (
+            None
+            if selected_cohort is None
+            else await run_owned_thread(selected_cohort, owner, slot)
+        )
+        assignment = None
+        if cohort is None:
+            assignment = await run_owned_thread(owner.assignment, slot)
+            cohort = assignment.certificate.order.round.cohort_sha256
         if self.inventory_needed is not None and not self.inventory_needed(cohort):
             return
         cutoff = await run_owned_thread(self.inventory_cutoff, cohort)
@@ -136,6 +145,8 @@ class RequestExportWorker:
             raise ValueError("inventory cutoff changed its original cohort or policy")
         if block <= cutoff.observation.block:
             return
+        if assignment is None:
+            assignment = await run_owned_thread(owner.assignment, slot)
         # One immutable advisory cutoff and one observation per actual manifest:
         # elapsed time alone never grows signed state, even through long stalls.
         await run_owned_thread(self.journal.put, "request_inventory_cutoff", cohort, cutoff)
@@ -209,6 +220,19 @@ class RequestExportWorker:
         objects = JournalEndpointObjects(owner.journal)
         retained = await run_owned_thread(owner.journal.get, "request_terminal", slot)
         if retained is None:
+            # Changed source steps and fresh conflict holds are checked natively;
+            # an unchanged unfinished model must not walk/re-digest every prior
+            # step or copy its large assignment on every export poll. Inventory
+            # continuation remains active even when its manifest is unchanged.
+            current = getattr(self.files, "current_model_partial", None)
+            manifest_key = (
+                None
+                if current is None
+                else await run_owned_thread(partial(current, owner, slot, completed_by_block=block))
+            )
+            if manifest_key is not None:
+                await self._partial(owner, slot, block, manifest_key=manifest_key)
+                return False
             # Waiting for execution/endpoint work needs no writer lock. Taking
             # that lock on every pending poll can starve the producer we await.
             evidence = await run_owned_thread(owner.evidence, slot)

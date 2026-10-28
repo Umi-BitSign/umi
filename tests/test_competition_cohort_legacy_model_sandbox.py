@@ -211,7 +211,7 @@ def cpu_readback(port, installed, monkeypatch):
 
     async def invoke(job, selected, archive):
         _, role, bundle = case_role_model(job, selected.step_index)
-        assert archive == port.cache / "archive"
+        assert archive in (port.cache / "archive", port.cache / "standby")
         assert archive != port.archive
         assert verify_preserved_bundle(bundle, archive, installed.case.policy) == digest(bundle)
         root = archive / digest(bundle) / "model"
@@ -293,12 +293,116 @@ async def test_restart_keeps_current_cache_without_get_and_eviction_keeps_durabl
     assert durable <= {
         p.relative_to(installed.verification) for p in installed.verification.rglob("*")
     }
-    assert not (restarted.cache / "archive" / installed.case.subs[0].model_revision).exists()
+    assert (restarted.cache / "archive" / installed.case.subs[0].model_revision).exists()
     before = len(installed.remote.reads)
     await restarted.invoke(job, attempt(job))
-    assert set(installed.remote.reads[before:]) == {
-        "chunks/sha256/" + f.sha256 for f in installed.case.subs[0].model_bundle.files
-    }
+    assert len(installed.remote.reads) == before
+
+
+async def test_alternating_pair_keeps_both_models_without_repeated_remote_reads(
+    installed, monkeypatch
+):
+    port = sandbox(installed)
+    seen = cpu_readback(port, installed, monkeypatch)
+    job = installed.job
+    await port.invoke(job, attempt(job))
+    await port.invoke(job, attempt(job, 1))
+    reads = tuple(installed.remote.reads)
+    for number in (2, 3):
+        await port.invoke(job, attempt(job, number=number))
+        await port.invoke(job, attempt(job, 1, number=number))
+    assert len(seen) == 6 and tuple(installed.remote.reads) == reads
+    assert (port.cache / "archive" / digest(job.submission.submission.model_bundle)).is_dir()
+    assert (port.cache / "standby" / digest(job.incumbent)).is_dir()
+    restarted = sandbox(installed)
+    cpu_readback(restarted, installed, monkeypatch)
+    await restarted.invoke(job, attempt(job, number=4))
+    await restarted.invoke(job, attempt(job, 1, number=4))
+    assert tuple(installed.remote.reads) == reads
+
+
+async def test_managed_legacy_cache_uses_path_accounting_and_retains_original_bytes(
+    installed, monkeypatch
+):
+    used = []
+    original = BootDiskModelCache.check_file_write
+
+    def check(cache, path, size):
+        original(cache, path, size)
+        used.append(cache.incremental)
+
+    monkeypatch.setattr(BootDiskModelCache, "check_file_write", check)
+    port = DirectCohortCpuSandbox(
+        installed.case.policy,
+        archive=installed.case.owner.archive,
+        videos=installed.root / "videos",
+        workspace=installed.root / "separate-cpu",
+        artifacts=installed.artifacts,
+        request=lambda _: installed.request,
+        legacy_artifacts=LegacyCohortModelCache(installed.artifacts, installed.sources),
+    )
+    cpu_readback(port, installed, monkeypatch)
+    job = installed.job
+    await port.invoke(job, attempt(job))
+    await port.invoke(job, attempt(job, 1))
+    assert used and all(used)
+    reads = tuple(installed.remote.reads)
+    await port.invoke(job, attempt(job, number=2))
+    await port.invoke(job, attempt(job, 1, number=2))
+    assert tuple(installed.remote.reads) == reads
+
+
+async def test_restart_lru_retains_round_reference_when_selecting_new_candidate(installed):
+    port = sandbox(installed)
+    reference = port.cache / "archive"
+    candidate = port.cache / "standby"
+    # Existing slot names and signed model identities survive a process restart;
+    # an empty in-memory LRU must not evict the shared reference first.
+    for path, model in (
+        (reference, installed.job.incumbent),
+        (candidate, installed.job.submission.submission.model_bundle),
+    ):
+        path.mkdir(mode=0o700)
+        (path / digest(model)).mkdir(mode=0o700)
+
+    class NewSource:
+        async def resumable(self, request, archive):
+            return False
+
+    assert (
+        await port._select_archive(
+            None, installed.incumbent, NewSource(), "new-source", digest(installed.job.incumbent)
+        )
+        == candidate
+    )
+
+
+async def test_pair_capacity_releases_only_idle_managed_slot(installed, monkeypatch):
+    port = sandbox(installed)
+    cpu_readback(port, installed, monkeypatch)
+    job = installed.job
+    await port.invoke(job, attempt(job))
+    config = installed.artifacts.config
+    budget = BootDiskModelCache(config.materialization_boot_disk_cache, reserve_bytes=0)
+    archive = port.cache / "standby"
+    allocated, unit = budget._allocation()
+    expected = budget._metadata_bytes(job.incumbent, unit) + sum(
+        ((f.size_bytes + unit - 1) // unit) * unit for f in job.incumbent.files
+    )
+    # Leave enough space for the new model alone but not its current peer.
+    sentinel = budget.root / "unrelated-consumer"
+    sentinel.write_bytes(b"preserve")
+    sentinel.chmod(0o600)
+    sentinel_size = (budget.maximum_bytes - expected - allocated // 2) // unit * unit
+    with sentinel.open("r+b") as stream:
+        stream.truncate(sentinel_size)
+    assert not budget.fits_materialization(job.incumbent, archive)
+    await port.invoke(job, attempt(job, 1))
+    assert not (port.cache / "archive").exists()
+    assert (archive / digest(job.incumbent)).is_dir()
+    assert sentinel.stat().st_size == sentinel_size
+    assert sentinel.read_bytes()[:8] == b"preserve"
+    assert budget._allocation()[0] < budget.maximum_bytes
 
 
 async def test_interrupted_materialization_resumes_completed_files(installed, monkeypatch):
@@ -512,3 +616,87 @@ async def test_original_admission_without_old_intent_can_use_new_post_adoption_a
     assert installed.case.objects == originals
     assert installed.request.acceptance.schema_ == "umi-cohort-model-artifact-acceptance/1"
     assert installed.request.direct_artifact is None
+
+
+@pytest.mark.parametrize("authorized", [True, False, "damaged_receipt"])
+async def test_new_reference_requires_explicit_independent_baseline_authority(
+    installed, monkeypatch, authorized
+):
+    from umi.competition_cohort_sandbox import CohortCpuSandbox
+
+    port = sandbox(installed)
+    bundle = installed.case.subs[0].model_bundle
+    job = installed.job.model_copy(
+        update={
+            "incumbent": bundle,
+            "round": installed.job.round.model_copy(
+                update={"incumbent_model_sha256": digest(bundle)}
+            ),
+        }
+    )
+    references, calls = [], []
+
+    def authorize(selected, model):
+        assert selected == job and model == bundle
+        calls.append(digest(model))
+        if authorized == "damaged_receipt":
+            raise ValueError("certified baseline receipt needs repair")
+        return authorized
+
+    port.legacy_artifacts.reference_authorized = authorize
+    if authorized is True:
+        # Publishing a baseline did not provision these canonical local bytes.
+        # The supported sandbox must recover from its authenticated R2 source.
+        import shutil
+
+        shutil.rmtree(port.archive / digest(bundle))
+        cpu_readback(port, installed, monkeypatch)
+
+    async def native_reference(self, selected, invocation):
+        assert self is port and selected == job
+        assert invocation.step_index == 1
+        verify_preserved_bundle(bundle, port.archive, installed.case.policy)
+        references.append(digest(bundle))
+        return "native-preserved-reference"
+
+    monkeypatch.setattr(CohortCpuSandbox, "invoke", native_reference)
+    if authorized is True:
+        assert await port.invoke(job, attempt(job, 1)) == "inert-cpu-result"
+        assert not references
+        assert not (port.archive / digest(bundle)).exists()
+        first_reads = list(installed.remote.reads)
+        reopened = sandbox(installed)
+        reopened.legacy_artifacts.reference_authorized = authorize
+        cpu_readback(reopened, installed, monkeypatch)
+        assert await reopened.invoke(job, attempt(job, 1, 2)) == "inert-cpu-result"
+        assert installed.remote.reads == first_reads
+    else:
+        with pytest.raises(ValueError, match=r"incumbent|repair"):
+            await port.invoke(job, attempt(job, 1))
+        assert not references
+    assert calls == [digest(bundle)] * (2 if authorized is True else 1)
+    if authorized is not True:
+        assert not installed.remote.reads
+
+
+async def test_certified_reference_missing_original_requires_repair(installed, monkeypatch):
+    port = sandbox(installed)
+    bundle = installed.case.subs[0].model_bundle
+    job = installed.job.model_copy(
+        update={
+            "incumbent": bundle,
+            "round": installed.job.round.model_copy(
+                update={"incumbent_model_sha256": digest(bundle)}
+            ),
+        }
+    )
+    port.legacy_artifacts.reference_authorized = lambda *_: True
+    selected = next(
+        e
+        for e in installed.sources.authenticated[installed.case.cohort].legacy.entries
+        if e.model_sha256 == digest(bundle) and e.payload_state == "preserved"
+    )
+    del installed.case.objects[selected.request_raw_sha256]
+    with pytest.raises((ValueError, KeyError), match=r"original|repair|[0-9a-f]{64}"):
+        await port.invoke(job, attempt(job, 1))
+    assert not installed.remote.reads

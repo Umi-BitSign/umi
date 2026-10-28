@@ -33,7 +33,9 @@ from .competition_cohort_roster import RecoverableRosterParticipant
 from .competition_geometric_rewards import (
     GEOMETRIC_MODEL_REWARD_RULE,
     GeometricRewardParameters,
+    baseline_eligibility_threshold,
     normalized_geometric_weights,
+    validate_cohort_reward_parameters,
 )
 from .competition_work_progress import WorkProgress
 from .open_competition import Hotkey, digest, model_content_digest
@@ -309,8 +311,16 @@ def geometric_model_credits(
         ):
             raise ValueError("geometric model candidate is not canonical")
         canonical.setdefault(candidate.content_sha256, candidate)
+    # Preserve the original strict eligibility fact above. A signed prospective
+    # grace changes reward qualification only, never its paired baseline score
+    # or successor reference selection.
     ranked = sorted(
-        (candidate for candidate in canonical.values() if candidate.eligible),
+        (
+            candidate
+            for candidate in canonical.values()
+            if _fraction(candidate.aggregate)
+            >= baseline_eligibility_threshold(_fraction(candidate.baseline_aggregate), parameters)
+        ),
         key=lambda c: (
             -_fraction(c.aggregate),
             ordinals[c.submission_sha256],
@@ -443,6 +453,10 @@ def build_model_award(
     authority = review.history.authority.authority
     if not isinstance(authority, ModelRewardCohortAuthority) or view.state.phase == "revoked":
         raise ValueError("model awards require the selected model reward cohort authority")
+    if isinstance(authority, GeometricModelRewardCohortAuthority):
+        validate_cohort_reward_parameters(
+            authority.model_reward_parameters, review.history.plan.sequence
+        )
     outcomes = review_quality_manifest(benchmark, review)
     models = tuple(r for r in outcomes if r.track == "model")
     accepted = tuple(

@@ -20,7 +20,7 @@ from .competition_cohort_baseline_review import (
 )
 from .competition_cohort_recovery import Block
 from .competition_runtime_port import baseline_record_digest
-from .competition_runtime_port_history import _require_between_rounds
+from .competition_runtime_port_history import _require_no_retained_round_activity
 from .competition_transport_verification import TransferProgress
 from .open_competition import digest, identity, model_content_digest
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -260,7 +260,11 @@ def apply_cohort_baseline(
             ).fetchone()
             if previous_block and block < int(previous_block[0]):
                 raise ValueError("competition state cannot move to an earlier finalized block")
-            _require_between_rounds(store, connection, block)
+            # A certified cohort winner advances the reference for future work.
+            # An unused cycle of the legacy continuous calendar is not a retained
+            # round; it must not indefinitely block the cohort's reviewed winner.
+            # Actual retained rounds and disputed history still fence the append.
+            _require_no_retained_round_activity(connection, block)
             _read_parent(connection, review)
             head = connection.execute(
                 "SELECT digest FROM promotions ORDER BY sequence DESC LIMIT 1"

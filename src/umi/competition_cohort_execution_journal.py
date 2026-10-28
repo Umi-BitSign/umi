@@ -8,6 +8,8 @@ this local journal does not fence a migrated host or authorize reward weights.
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,6 +20,7 @@ from pydantic import Field
 from .canonical_reuse import canonical_json_reuse
 from .competition_assignment_reuse import AssignmentVerificationReuse, assignment_reuse_key
 from .competition_cohort_execution import RecoverableExecutionEvidence, RecoverableExecutionJob
+from .competition_cohort_export_checkpoint import PartialExportCheckpoint
 from .competition_cohort_order_queue import SignedOrderDeliveryReceipt, check_delivery_receipt
 from .competition_cohort_order_signer import (
     CohortOrderHistory,
@@ -34,9 +37,42 @@ from .competition_cohort_recovery import verify_recovery_quorum
 from .competition_execution import ExecutionBoundary, ExecutionStep, PendingExecutionStep
 from .competition_round_journal import RecordReservation, RoundJournal
 from .competition_runner import OfflineCaseExecution, validate_case_execution
-from .open_competition import CompetitionPolicy, digest, identity
+from .competition_verification_rules import runtime_identity
+from .open_competition import CompetitionPolicy, digest, digest_canonical_bytes, identity
 from .private_files import ensure_private_directory, lock_private_file
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+
+
+class PartialExportSourceRepairRequired(ValueError):
+    """A previously verified immutable source disappeared or changed."""
+
+
+def _partial_export_source_repair(checkpoint, reason, index=None):
+    logging.getLogger("umi.competition.progress").warning(
+        json.dumps(
+            dict(
+                schema="umi-model-partial-export-source-repair/1",
+                stage="model_partial_export_source_repair",
+                status="repair_required",
+                cohort_sha256=checkpoint.cohort_sha256,
+                slot=checkpoint.slot,
+                reason=reason,
+                step_index=index,
+                completed=0,
+                total=1,
+                unit="source_records",
+                elapsed_seconds=0,
+                eta_seconds=None,
+                eta_basis="restore_exact_retained_native_source_record",
+                stalled_or_retrying=True,
+                certification_authority=False,
+            ),
+            separators=(",", ":"),
+        )
+    )
+    raise PartialExportSourceRepairRequired(
+        "immutable completed source record requires native repair: " + reason
+    )
 
 
 def control_exchange_timeout_seconds(config: CohortExecutionConfig) -> int:
@@ -155,8 +191,19 @@ class CohortExecutionJournal:
         if identity(self.config.signer) not in {identity(e.hotkey) for e in self.policy.evaluators}:
             raise ValueError("execution journal evaluator is not in its policy")
         self.cohorts = {c.cohort_sha256: c.authority_sha256 for c in self.config.cohorts}
-        self._assignment_reuse = AssignmentVerificationReuse()
-        self._supplied_assignment_reuse = AssignmentVerificationReuse()
+        self._partial_export_context = digest(
+            {
+                "schema": "umi-model-partial-export-context/1",
+                "policy": digest(self.policy),
+                "cohorts": self.cohorts,
+                "signer": identity(self.config.signer),
+                "verification_semantics": runtime_identity(),
+            }
+        )
+        self._assignment_reuse = AssignmentVerificationReuse.for_execution("execution_retained")
+        self._supplied_assignment_reuse = AssignmentVerificationReuse.for_execution(
+            "execution_supplied"
+        )
         self.journal = RoundJournal(
             Path(self.config.directory),
             self.config.model_dump(
@@ -196,6 +243,88 @@ class CohortExecutionJournal:
         finally:
             os.close(fd)
 
+    def partial_export_context_matches(self, checkpoint: PartialExportCheckpoint) -> bool:
+        """Bind the local completed source fact to this actual native owner."""
+        info = self.journal.path.stat()
+        return (
+            checkpoint.context_sha256 == self._partial_export_context
+            and checkpoint.owner_path == str(self.journal.path)
+            and (checkpoint.owner_device, checkpoint.owner_inode)
+            == (str(info.st_dev), str(info.st_ino))
+        )
+
+    def partial_export_projection(self, slot):
+        """Project existing signed metadata for an upgrade receipt, without replay."""
+        raw = self.journal.get_raw("assignment", slot)
+        if raw is None:
+            return None
+        value = json.loads(raw)
+        if value["certificate"]["order"]["submission"]["submission"]["track"] != "model":
+            return None
+        assignment = CohortExecutionAssignment.model_validate_json(raw)
+        job = recoverable_order_job(assignment.certificate.order, self.config.signer)
+        return assignment, job
+
+    def partial_export_unchanged(self, checkpoint: PartialExportCheckpoint) -> bool:
+        """Fresh exact source reads; never cache conflict holds or new steps."""
+        if not self.partial_export_context_matches(checkpoint):
+            return False
+        with self.journal.read_transaction() as db:
+            raw = self.journal.get_raw("assignment", checkpoint.slot, db=db)
+            if raw is None:
+                _partial_export_source_repair(checkpoint, "assignment_missing")
+            if digest_canonical_bytes(raw) != checkpoint.assignment_sha256:
+                _partial_export_source_repair(checkpoint, "assignment_changed")
+            for index, (key, expected) in enumerate(
+                zip(checkpoint.step_keys, checkpoint.step_sha256s, strict=True)
+            ):
+                raw = self.journal.get_raw("step", key, db=db)
+                if (None if raw is None else digest_canonical_bytes(raw)) != expected:
+                    if expected is not None:
+                        _partial_export_source_repair(
+                            checkpoint,
+                            "completed_step_missing" if raw is None else "completed_step_changed",
+                            index,
+                        )
+                    return False
+        return True
+
+    def partial_export_checkpoint(
+        self, slot, assignment, job, manifest, manifest_sha256, *, maximum_bytes, completed_by_block
+    ):
+        """Derive small reusable keys once, after the native partial was reviewed."""
+        if job.mode != "paired_model" or len(manifest.steps) == step_count(job):
+            return None
+        if manifest.assignment_sha256 != digest(assignment):
+            raise ValueError("partial export checkpoint changed its reviewed assignment")
+        info = self.journal.path.stat()
+        job_sha = digest(job)
+        keys = tuple(
+            digest(dict(schema="umi-cohort-execution-step/1", job=job_sha, index=index))
+            for index in range(step_count(job))
+        )
+        steps = {step.index: step.sha256 for step in manifest.steps}
+        checkpoint = PartialExportCheckpoint(
+            schema="umi-private-model-partial-export/1",
+            context_sha256=self._partial_export_context,
+            owner_path=str(self.journal.path),
+            owner_device=str(info.st_dev),
+            owner_inode=str(info.st_ino),
+            slot=slot,
+            assignment_sha256=manifest.assignment_sha256,
+            job_sha256=job_sha,
+            cohort_sha256=job.round.cohort_sha256,
+            step_keys=keys,
+            step_sha256s=tuple(steps.get(index) for index in range(len(keys))),
+            manifest_sha256=manifest_sha256,
+            maximum_bytes=maximum_bytes,
+            completed_by_block=completed_by_block,
+        )
+        # This describes exactly the prefix already collected and reviewed.
+        # A concurrent new step need not be reread here: every future reuse
+        # freshly compares all source records and rejects a changed prefix.
+        return checkpoint
+
     @canonical_json_reuse()
     def validate_assignment(self, value: CohortExecutionAssignment) -> RecoverableExecutionJob:
         """Check static supplied proofs; this does not grant execution authority."""
@@ -204,23 +333,22 @@ class CohortExecutionJournal:
         key = assignment_reuse_key(
             self.journal, slot, (raw,), self.config, self.policy, self.cohorts
         )
-        cached = self._supplied_assignment_reuse.lookup(slot, key)
-        if cached is not None:
-            return cached
-        value = CohortExecutionAssignment.model_validate_json(raw)
-        order = value.certificate.order
-        verify_recovery_quorum(order, value.certificate.signatures, self.policy)
-        if any(
-            identity(s.hotkey) == identity(order.submission.submission.hotkey)
-            for s in value.certificate.signatures
-        ):
-            raise ValueError("miner cannot authorize its own execution")
-        receipt = check_delivery_receipt(value.certificate, value.delivery)
-        if identity(receipt.receipt.evaluator_hotkey) != identity(self.config.signer):
-            raise ValueError("execution delivery belongs to another evaluator")
-        job = recoverable_order_job(order, self.config.signer)
-        self._supplied_assignment_reuse.remember(slot, key, job)
-        return job
+
+        def calculate():
+            value = CohortExecutionAssignment.model_validate_json(raw)
+            order = value.certificate.order
+            verify_recovery_quorum(order, value.certificate.signatures, self.policy)
+            if any(
+                identity(s.hotkey) == identity(order.submission.submission.hotkey)
+                for s in value.certificate.signatures
+            ):
+                raise ValueError("miner cannot authorize its own execution")
+            receipt = check_delivery_receipt(value.certificate, value.delivery)
+            if identity(receipt.receipt.evaluator_hotkey) != identity(self.config.signer):
+                raise ValueError("execution delivery belongs to another evaluator")
+            return recoverable_order_job(order, self.config.signer)
+
+        return self._supplied_assignment_reuse.resolve(slot, key, calculate)
 
     def retain(self, value: CohortExecutionAssignment, source: CohortOrderHistory, block: int):
         job = self.validate_assignment(value)
@@ -244,7 +372,7 @@ class CohortExecutionJournal:
         self.journal.put_many((("assignment", slot, value),), index=index)
         return job
 
-    def _validated_assignment(self, slot: str):
+    def _validated_assignment(self, slot: str, *, project=None):
         # Read exact bytes and current conflict holds in one short snapshot.
         # Static proof verification must not reserve the journal writer or keep
         # unrelated reads waiting on its process lock. This read grants no
@@ -256,15 +384,21 @@ class CohortExecutionJournal:
         key = assignment_reuse_key(
             self.journal, slot, (raw,), self.config, self.policy, self.cohorts
         )
-        cached = self._assignment_reuse.lookup(slot, key)
-        if cached is not None:
-            return cached
-        saved = CohortExecutionAssignment.model_validate_json(raw)
-        job = self.validate_assignment(saved)
-        if order_slot(saved.certificate.order) != slot:
-            raise ValueError("retained execution assignment changed its slot")
-        self._assignment_reuse.remember(slot, key, (saved, job))
-        return saved, job
+
+        def calculate():
+            saved = CohortExecutionAssignment.model_validate_json(raw)
+            job = self.validate_assignment(saved)
+            if order_slot(saved.certificate.order) != slot:
+                raise ValueError("retained execution assignment changed its slot")
+            return saved, job
+
+        if project is not None:
+            return self._assignment_reuse._project(slot, key, calculate, project)
+        return self._assignment_reuse.resolve(slot, key, calculate)
+
+    def _project_assignment(self, slot: str, project):
+        """Owned read-only projection after fresh assignment/conflict reads."""
+        return self._validated_assignment(slot, project=project)
 
     @canonical_json_reuse()
     def assignment(self, slot: str) -> CohortExecutionAssignment:
@@ -390,6 +524,39 @@ class CohortExecutionJournal:
             schema="umi-recoverable-execution-evidence/1", job=job, steps=evidence.steps
         )
 
+    def checkpoint_count(self, job: RecoverableExecutionJob) -> int:
+        """Metadata-only progress; execution still validates each retained step."""
+        job_sha256 = digest(job)
+        keys = [
+            digest({"schema": "umi-cohort-execution-step/1", "job": job_sha256, "index": i})
+            for i in range(step_count(job))
+        ]
+        completed = 0
+        with self.journal.read_transaction() as db:
+            for offset in range(0, len(keys), 128):
+                batch = keys[offset : offset + 128]
+                placeholders = ",".join("?" for _ in batch)
+                completed += db.execute(
+                    "SELECT COUNT(*) FROM records WHERE kind='step' AND id IN ("
+                    + placeholders
+                    + ")",
+                    batch,
+                ).fetchone()[0]
+        return completed
+
+    def recent_assignment_slots(self, *, limit=32):
+        """Small startup scheduling hints; no evidence is read or authorized."""
+        if type(limit) is not int or not 1 <= limit <= 32:
+            raise ValueError("invalid execution startup hint bound")
+        with self.journal.read_transaction() as db:
+            return tuple(
+                row[0]
+                for row in db.execute(
+                    "SELECT id FROM records WHERE kind='assignment' ORDER BY rowid DESC LIMIT ?",
+                    (limit,),
+                )
+            )
+
     def step(self, job: RecoverableExecutionJob, index: int, *, db=None) -> ExecutionStep | None:
         if db is None:
             with self.journal.read_transaction() as db:
@@ -459,7 +626,13 @@ class CohortExecutionJournal:
             or result.output.case_id != case.case_id
         ):
             raise ValueError("invocation result differs from its assigned model or case")
-        validate_case_execution(result, self.policy)
+        from .competition_evaluation_runtime import prepared_runtime_authorization
+
+        validate_case_execution(
+            result,
+            self.policy,
+            runtime_authorization=prepared_runtime_authorization(job.round, self.policy),
+        )
         return result
 
     def stopped(self, attempt: CohortExecutionAttempt):

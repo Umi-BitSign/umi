@@ -9,6 +9,9 @@ evidence before authorizing a transition.
 
 from __future__ import annotations
 
+import json
+import logging
+import time
 from dataclasses import dataclass
 
 from .competition_chain import RegistrationCapture
@@ -39,6 +42,8 @@ from .competition_store import AdmissionCapacityError
 from .open_competition import digest
 from .protocol import canonical_json_bytes
 
+_LOG = logging.getLogger("umi.competition.progress")
+
 
 @dataclass(frozen=True)
 class NativeIntakeProgress:
@@ -67,6 +72,13 @@ class CohortIntakePhaseObserver:
             maximum_bytes=self.maximum_bytes,
             epoch=self.epoch,
         )
+
+    def _certification_report(self, inventory):
+        report = self.intake.model_certification_progress.report(inventory)
+        _LOG.info(
+            "cohort_model_certification_progress %s", json.dumps(report, separators=(",", ":"))
+        )
+        return report
 
     def sample_service(
         self, state: CohortRecoveryState, capture: RegistrationCapture, *, serving: bool
@@ -108,6 +120,7 @@ class CohortIntakePhaseObserver:
         serving: bool,
         expected_tip_sha256: str,
     ) -> NativeIntakeProgress:
+        started = time.monotonic()
         if type(serving) is not bool:
             raise ValueError("intake readiness must be an actual boolean")
         self.epoch.identity()  # Forked workers must own a new observer lifetime.
@@ -218,8 +231,42 @@ class CohortIntakePhaseObserver:
                         history,
                         self.intake.policy,
                         self.intake._records(db, history, track="model"),
+                        report=self._certification_report,
                     )
-                except (EmptyCohortIntake, PendingModelArtifacts):
+                except (EmptyCohortIntake, PendingModelArtifacts) as error:
+                    _LOG.info(
+                        "cohort_intake_wait %s",
+                        json.dumps(
+                            {
+                                "schema": "umi-cohort-intake-wait/1",
+                                "cohort_sha256": cohort,
+                                "reason_code": (
+                                    "selected_model_artifact_acceptance_pending"
+                                    if isinstance(error, PendingModelArtifacts)
+                                    else "empty_selected_roster"
+                                ),
+                                "pending_submission_sha256": getattr(
+                                    error, "submission_sha256", None
+                                ),
+                                "serving": service.serving,
+                                "observed_at_block": observation.block,
+                                "earliest_seal_block": earliest,
+                                "completed": getattr(error, "inventory", {}).get("completed", 0),
+                                "total": getattr(error, "inventory", {}).get("total", 1),
+                                "percent": (
+                                    100 * error.inventory["completed"] / error.inventory["total"]
+                                    if getattr(error, "inventory", {}).get("total")
+                                    else 0
+                                ),
+                                "elapsed_seconds": round(time.monotonic() - started, 3),
+                                "eta_seconds": None,
+                                "eta_basis": "awaiting_required_intake_evidence",
+                                "stalled_or_retrying": True,
+                                "certification_authority": False,
+                            },
+                            separators=(",", ":"),
+                        ),
+                    )
                     return NativeIntakeProgress(
                         pending_availability_progress(state, service), service, None
                     )

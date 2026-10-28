@@ -1694,6 +1694,11 @@ and retain the host's operational storage guards.
 
 The admission worker can also prepare rounds automatically. Set its optional
 `preparation` object to select `promotion_directory` and `output_directory`.
+Set `objects_directory` to the benchmark scheduler's configured evidence-object
+directory so certified successor baseline declarations are published with their
+rounds. The integrated lifecycle selects its existing `sources.objects_directory`
+automatically. Older standalone configurations remain readable; add this explicit
+directory when upgrading their successor publication path.
 These directories must be disjoint from each other, the intake, signer and
 finality stores, and the wallet directory. `maximum_bytes` defaults to 64 MiB
 per prepared round; `maximum_promotion_bytes` defaults to 16 MiB per promotion

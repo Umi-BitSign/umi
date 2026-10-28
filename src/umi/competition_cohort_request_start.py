@@ -40,6 +40,14 @@ def _compatible_head_ages(value: int) -> tuple[int, ...]:
     return _REVIEWED_HEAD_AGE_MS if value in _REVIEWED_HEAD_AGE_MS else (value,)
 
 
+class CohortCutoverObservation(StrictProtocolModel):
+    schema_: Literal["umi-cohort-cutover-observation/1"] = Field(alias="schema")
+    cohort_sha256: Hex32
+    cutover_unix_ms: Timestamp
+    observed: ExecutionBoundary | None = None
+    source_sha256: Hex32 | None = None
+
+
 class RequestStartConfig(StrictProtocolModel):
     schema_: Literal["umi-cohort-request-start-config/1", "umi-cohort-request-start-config/2"] = (
         Field(alias="schema")
@@ -48,6 +56,8 @@ class RequestStartConfig(StrictProtocolModel):
     first_cohort_not_before_unix_ms: Timestamp
     predecessor_plan: RecoverableCohortPlan | None = None
     predecessor_recovery: SignedCohortRecoveryAuthority | None = None
+    rest_clock: Literal["predecessor_certification", "cohort_cutover"] = "predecessor_certification"
+    cutover_overrides: Annotated[tuple[CohortCutoverObservation, ...], Field(max_length=512)] = ()
 
     @model_serializer(mode="wrap")
     def preserve_initial_series_bytes(self, handler):
@@ -56,6 +66,10 @@ class RequestStartConfig(StrictProtocolModel):
             value.pop("predecessor_plan", None)
         if self.predecessor_recovery is None:
             value.pop("predecessor_recovery", None)
+        if self.rest_clock == "predecessor_certification":
+            value.pop("rest_clock", None)
+        if not self.cutover_overrides:
+            value.pop("cutover_overrides", None)
         return value
 
     @model_validator(mode="after")
@@ -65,6 +79,13 @@ class RequestStartConfig(StrictProtocolModel):
             self.predecessor_recovery is not None
         ):
             raise ValueError("successor request start requires its complete predecessor inputs")
+        keys = [v.cohort_sha256 for v in self.cutover_overrides]
+        if keys != sorted(set(keys)) or (keys and self.rest_clock != "cohort_cutover"):
+            raise ValueError(
+                "cutover overrides need the selected cutover clock and unique ordering"
+            )
+        if any(v.source_sha256 is None for v in self.cutover_overrides):
+            raise ValueError("an explicit historical cutover needs its retained source identity")
         return self
 
 
@@ -130,7 +151,53 @@ class SeriesRequestStart:
             maximum_rounds=len(self.cohorts),
             compatible_bindings=compatible,
         )
+        if any(v.cohort_sha256 not in self.cohorts for v in self.config.cutover_overrides):
+            raise ValueError("configured cutover is outside the selected series")
+        self.cutover_journal = (
+            RoundJournal(
+                Path(config.directory) / "cutovers-v1",
+                {
+                    "schema": "umi-cohort-cutover-clock-owner/1",
+                    "series": digest(series),
+                    "minimum_rest_ms": REST_MS,
+                },
+                maximum_rounds=len(self.cohorts),
+            )
+            if self.config.rest_clock == "cohort_cutover"
+            else None
+        )
         self.serial = asyncio.Lock()
+
+    async def observe_cutover(self, cohort: str):
+        """Record release during intake, before artifact/roster work can delay it."""
+        if self.cutover_journal is None:
+            return
+        async with self.serial:
+            return await self._observe_cutover(cohort)
+
+    async def _observe_cutover(self, cohort):
+        if cohort not in self.cohorts or self.cutover_journal is None:
+            raise ValueError("cutover observation is outside the selected series/rule")
+        configured = next(
+            (v for v in self.config.cutover_overrides if v.cohort_sha256 == cohort), None
+        )
+        old = await run_owned_thread(self.cutover_journal.get, "cutover", cohort)
+        if old is not None:
+            saved = CohortCutoverObservation.model_validate(old)
+            if configured is not None and saved != configured:
+                raise ValueError("configured cutover conflicts with its retained observation")
+            return saved
+        if configured is None:
+            capture = await self.provider.collect()
+            timestamp = capture.provenance.get("timestamp_ms")
+            configured = CohortCutoverObservation(
+                schema="umi-cohort-cutover-observation/1",
+                cohort_sha256=cohort,
+                cutover_unix_ms=timestamp,
+                observed=execution_boundary(capture),
+            )
+        await run_owned_thread(self.cutover_journal.put, "cutover", cohort, configured)
+        return configured
 
     def _closure(self, source: CohortOrderHistory, plan, authority):
         source = CohortOrderHistory.model_validate_json(canonical_json_bytes(source))
@@ -198,6 +265,7 @@ class SeriesRequestStart:
         if type(timestamp) is not int or not 0 < timestamp < 2**53:
             raise ValueError("request start needs the verified chain timestamp")
         floor = self.config.first_cohort_not_before_unix_ms
+        cutover = None
         if closure is not None:
             if observed.block < closure.observed_at_block:
                 raise ValueError("request start observation precedes certified closure")
@@ -209,34 +277,24 @@ class SeriesRequestStart:
                 != closure
             ):
                 raise OSError("request start predecessor changed during observation")
-            old = await run_owned_thread(self.journal.get, "request_rest", cohort)
-            if old is None:
-                # Add the admitted maximum head age so a lagging finalized head
-                # cannot backdate certification. Subtract future skew below.
-                saved = RequestRestObservation(
-                    schema="umi-cohort-request-rest-observation/1",
-                    predecessor_closure_sha256=digest(closure),
-                    observed=observed,
-                    chain_timestamp_ms=timestamp,
-                    not_before_unix_ms=timestamp + self.head_age + REST_MS,
-                )
-                await run_owned_thread(self.journal.put, "request_rest", cohort, saved)
+            if self.cutover_journal is not None:
+                saved_cutover = await run_owned_thread(self.cutover_journal.get, "cutover", cohort)
+                if saved_cutover is None and not any(
+                    v.cohort_sha256 == cohort for v in self.config.cutover_overrides
+                ):
+                    return dict(report, status="waiting_cutover_observation")
+                cutover = await self._observe_cutover(cohort)
+                if cutover.cutover_unix_ms > timestamp + self.future_skew:
+                    raise ValueError("cohort cutover is ahead of verified chain time")
+                floor = max(floor, cutover.cutover_unix_ms + self.head_age + REST_MS)
             else:
-                saved = RequestRestObservation.model_validate(old)
-            if (
-                saved.predecessor_closure_sha256 != digest(closure)
-                or saved.not_before_unix_ms
-                not in {
-                    saved.chain_timestamp_ms + age + REST_MS
-                    for age in _compatible_head_ages(self.head_age)
-                }
-                or observed.block < saved.observed.block
-                or timestamp < saved.chain_timestamp_ms
-                or (observed.block == saved.observed.block and observed != saved.observed)
-            ):
-                raise ValueError("request rest changed or its observation regressed")
-            floor = max(floor, saved.not_before_unix_ms)
+                floor = max(
+                    floor, await self._legacy_rest_floor(cohort, closure, observed, timestamp)
+                )
         ready = timestamp - self.future_skew >= floor
+        remaining = max(0, (floor + self.future_skew - timestamp) / 1000)
+        total = (REST_MS + self.head_age + self.future_skew) / 1000 if closure else remaining
+        completed = max(0, total - remaining)
         return dict(
             report,
             status="request_start_ready" if ready else "waiting_request_rest",
@@ -244,4 +302,46 @@ class SeriesRequestStart:
             not_before_unix_ms=floor,
             observed_at_block=observed.block,
             chain_timestamp_ms=timestamp,
+            rest_clock=self.config.rest_clock,
+            cutover_unix_ms=None if cutover is None else cutover.cutover_unix_ms,
+            stage="request_start_ready" if ready else "waiting_request_rest",
+            completed=completed,
+            total=total,
+            unit="seconds",
+            percent=100 * completed / total if total else 100,
+            elapsed_seconds=completed,
+            eta_seconds=remaining,
+            eta_basis="verified_chain_time_until_request_start_floor",
+            eta_scope="request_rest_wait_only; preparation, evaluation and activation separate",
+            eta_assumptions="verified chain time continues advancing; no additional owner retry",
+            stalled_or_retrying=False,
         )
+
+    async def _legacy_rest_floor(self, cohort, closure, observed, timestamp):
+        old = await run_owned_thread(self.journal.get, "request_rest", cohort)
+        if old is None:
+            # Add the admitted maximum head age so a lagging finalized head
+            # cannot backdate certification. Subtract future skew below.
+            saved = RequestRestObservation(
+                schema="umi-cohort-request-rest-observation/1",
+                predecessor_closure_sha256=digest(closure),
+                observed=observed,
+                chain_timestamp_ms=timestamp,
+                not_before_unix_ms=timestamp + self.head_age + REST_MS,
+            )
+            await run_owned_thread(self.journal.put, "request_rest", cohort, saved)
+        else:
+            saved = RequestRestObservation.model_validate(old)
+        if (
+            saved.predecessor_closure_sha256 != digest(closure)
+            or saved.not_before_unix_ms
+            not in {
+                saved.chain_timestamp_ms + age + REST_MS
+                for age in _compatible_head_ages(self.head_age)
+            }
+            or observed.block < saved.observed.block
+            or timestamp < saved.chain_timestamp_ms
+            or (observed.block == saved.observed.block and observed != saved.observed)
+        ):
+            raise ValueError("request rest changed or its observation regressed")
+        return saved.not_before_unix_ms

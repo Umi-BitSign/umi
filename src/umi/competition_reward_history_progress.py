@@ -36,6 +36,7 @@ class HistoryProgress:
         self.inventory_completed = 0
         self.restored_completed = 0
         self.completed_admission_through = first_block - 1
+        self.completed_tip_refreshes = 0
         self.target = None
         self.state = "pending"
         self.stage = "native_history"
@@ -51,6 +52,8 @@ class HistoryProgress:
         self.latest = {}
         self.remote_export_selected = False
         self.local_release = None
+        self.archive_delivery = None
+        self.frontier_reuse = None
         self.preparation = None
         self.restoration = None
         self.ancestry_progress = None
@@ -58,6 +61,7 @@ class HistoryProgress:
         self._ancestry_sample = None
         self.forecast = None
         self.forecast_health = None
+        self.shutdown_started = None
 
     def start(self, target, next_block, *, repair=False):
         now = time.monotonic()
@@ -73,6 +77,7 @@ class HistoryProgress:
             )
             self.native_elapsed = 0.0
             self.native_completed = self.restored_completed = self.native_applied = 0
+            self.completed_tip_refreshes = 0
             self._new_native.clear()
             self.elapsed = 0.0
             self.wall_started, self.wall_finished = now, None
@@ -131,6 +136,32 @@ class HistoryProgress:
                 if self.target is not None and height <= self.target:
                     self.counts[stage] -= 1
 
+    def restore_folded_inventory(self, reader, through, export_ranges):
+        """Reuse owner-produced counted facts, never query old per-block aliases."""
+        identity = None if reader.export_archive is None else reader._export_identity()
+        if identity != self.export_identity:
+            self.export_identity = identity
+            self.durable["exported"].clear()
+            self.retained_local_exports.clear()
+        self.durable["captured"].update(range(self.first_block, through + 1))
+        self.durable["verified"].update(
+            range(max(self.first_block, self.completed_admission_through + 1), through + 1)
+        )
+        for low, high in export_ranges.get(identity, []):
+            self.durable["exported"].update(range(low, min(high, through) + 1))
+        if reader.export_archive is not None and reader.export_archive.remote is not None:
+            for low, high in export_ranges.get(reader._export_identity(local_only=True), []):
+                self.retained_local_exports.update(range(low, min(high, through) + 1))
+        self.retained_local_exports.difference_update(self.durable["exported"])
+        self.counts = {
+            stage: sum(height <= self.target for height in heights)
+            for stage, heights in self.durable.items()
+        }
+        self.retained_local_export_count = sum(
+            height <= self.target for height in self.retained_local_exports
+        )
+        self.inventory_through = max(self.inventory_through, through)
+
     async def inventory(self, reader):
         identity = None if reader.export_archive is None else reader._export_identity()
         if identity != self.export_identity:
@@ -148,6 +179,9 @@ class HistoryProgress:
         prior_stage = self.stage
         self.stage = "history_progress_inventory"
         for low in range(first, self.target + 1, 512):
+            shutdown = getattr(reader, "shutdown_event", None)
+            if shutdown is not None and shutdown.is_set():
+                break
             high = min(low + 511, self.target)
             rows = await run_owned_thread(reader.checkpoints.progress_rows, low, high, identity)
             for stage, heights in zip(self.durable, rows, strict=True):
@@ -265,6 +299,10 @@ class HistoryProgress:
         # A broken diagnostics sink must never change a native result or error.
         try:
             now = time.monotonic()
+            shutdown = getattr(reader, "shutdown_event", None)
+            stopping = shutdown is not None and shutdown.is_set()
+            if stopping and self.shutdown_started is None:
+                self.shutdown_started = now
             if ancestry_progress is None and self._ancestry_watch is not None:
                 telemetry, target = self._ancestry_watch
                 if telemetry.active and telemetry.latest.get("target_block") == target:
@@ -377,6 +415,13 @@ class HistoryProgress:
                 basis = "waiting_for_retained_history_preparation"
             elif self.ancestry_progress is not None:
                 basis = "waiting_for_owned_historical_ancestry"
+            elif (
+                self.counts["verified"]
+                + max(0, min(self.target, self.completed_admission_through) - self.first_block + 1)
+                - len(self._new_native)
+                > done
+            ):
+                basis = "waiting_for_retained_history_metadata_application"
             elif sampled >= 3 and native_wall_elapsed >= 1.0:
                 rate = sampled / native_wall_elapsed
                 eta, basis = (
@@ -438,8 +483,11 @@ class HistoryProgress:
                 if self.remote_export_selected
                 else "remote_delivery_receipts_not_available_to_history_owner",
                 "local_release": self.local_release,
+                "archive_delivery": self.archive_delivery,
+                "frontier_reuse": self.frontier_reuse,
                 "applied_blocks": done,
                 "restored_completed": self.restored_completed,
+                "completed_tip_finality_refreshes": self.completed_tip_refreshes,
                 "elapsed_seconds": elapsed,
                 "active_elapsed_seconds": self.elapsed
                 + (now - self.started if self.active else 0.0),
@@ -469,6 +517,24 @@ class HistoryProgress:
                     if unavailable
                     else ancestry.get("eta_basis"),
                     stage_eta_scope=ancestry.get("eta_scope"),
+                )
+            if stopping:
+                self.latest.update(
+                    shutdown_requested=True,
+                    shutdown_elapsed_seconds=now - self.shutdown_started,
+                    shutdown_state="draining" if self.active else "drained",
+                    shutdown_eta_seconds=None if self.active else 0,
+                    shutdown_eta_basis="finish_owned_native_and_durable_operations"
+                    if self.active
+                    else "owned_history_operations_drained",
+                    eta_seconds=0 if state == "completed" else None,
+                    planning_eta_seconds=None,
+                    eta_basis="complete_selected_history_interval"
+                    if state == "completed"
+                    else "withdrawn_shutdown_requested",
+                    stage_eta_seconds=None,
+                    stage_planning_eta_seconds=None,
+                    stage_eta_basis="withdrawn_shutdown_requested",
                 )
             if force or state != "running" or now - self.last_emitted >= self.heartbeat_seconds:
                 self.last_emitted = now

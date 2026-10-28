@@ -32,6 +32,7 @@ from .competition_cohort_model_review import ModelArtifactReviewer
 from .competition_cohort_model_review_http import model_review_routes
 from .competition_cohort_origin import CohortEndpointFinalityProvider
 from .competition_cohort_phase_vote_http import phase_vote_routes
+from .competition_cohort_producer_epoch import producer_epoch_routes
 from .competition_cohort_progress_signer import CohortProgressSigner
 from .competition_cohort_request_probe import evaluator_request_readiness_routes
 from .competition_cohort_request_rule_api import request_tail_adoption_vote_routes
@@ -41,6 +42,7 @@ from .competition_cohort_review_selection import SelectedPhaseReviewer
 from .competition_cohort_service_selection import SelectedServiceReviewer
 from .competition_cohort_service_vote_http import service_vote_routes
 from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
+from .competition_cohort_suite_adoption_api import evaluation_suite_adoption_vote_routes
 from .competition_cohort_window_http import RemoteWindowClient
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_host_activation import _read_root_control_path
@@ -112,6 +114,8 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
             series=config.series,
             policy=config.policy,
             model_delivery_adoptions=config.model_delivery_adoptions,
+            original_verification_directory=Path(config.signing.directory)
+            / "legacy-original-verification",
         )
     )
     root = Path(config.signing.directory)
@@ -143,6 +147,21 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
         async def sign(body):
             return await run_owned_thread(sign_object, body, key)
 
+        if config.model_storage_consumer is not None:
+            from .competition_model_storage_leases import model_storage_consumer
+
+            await resources.enter_async_context(
+                model_storage_consumer(
+                    config.model_storage_consumer,
+                    kind="reviewer",
+                    hotkey=config.signing.signer,
+                    policy=config.policy,
+                    series=config.series,
+                    sources=legacy_metadata,
+                    sign=sign,
+                )
+            )
+
         client = await resources.enter_async_context(
             httpx.AsyncClient(
                 trust_env=False,
@@ -159,13 +178,20 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
         async def archive(observation):
             return await run_owned_thread(SettlementRegistrationFiles._read, proofs, observation)
 
+        promotion_store = CompetitionStore(Path(config.promotion_directory), config.policy)
+        admission = (
+            None
+            if config.admission_signing is None
+            else CohortAdmissionJournal(config.admission_signing, config.policy)
+        )
         reviewer = SelectedPhaseReviewer(
             config,
             provider,
             client,
             owner_token,
             archive,
-            CompetitionStore(Path(config.promotion_directory), config.policy),
+            promotion_store,
+            admission=admission,
         )
         signer = CohortProgressSigner(config.signing, reviewer, sign)
         # Capacity, credentials and network placement can change on recovery;
@@ -209,6 +235,15 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 budget=config.phase_review_budget,
             )
         )
+        app.include_router(
+            evaluation_suite_adoption_vote_routes(
+                signer,
+                config.series,
+                token=vote_token,
+                timeout_seconds=config.review_timeout_seconds,
+                budget=config.phase_review_budget,
+            )
+        )
         for phase in ("intake", "preparation", "requests"):
             app.include_router(
                 phase_vote_routes(
@@ -230,7 +265,7 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 )
             )
         if config.admission_signing is not None:
-            admission = CohortAdmissionJournal(config.admission_signing, config.policy)
+            assert admission is not None
             await run_owned_thread(
                 admission.journal.put,
                 "admission_review_host",
@@ -282,6 +317,11 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                     sign,
                     direct_review=(None if direct_artifacts is None else direct_artifacts.review),
                     legacy_readers=legacy_readers,
+                    legacy_standing_policy=(
+                        config.direct_model_review.standing_review_policy
+                        if legacy_readers is not None and config.direct_model_review is not None
+                        else None
+                    ),
                 )
                 await run_owned_thread(
                     models.journal.put,
@@ -315,6 +355,7 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 model_reviewer=models,
                 direct_artifacts=direct_artifacts,
                 legacy_readers=legacy_readers,
+                promotion_store=promotion_store,
             )
             app.include_router(benchmark.routes)
             app.state.benchmark = benchmark
@@ -363,6 +404,17 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 )
                 app.state.endpoint = endpoint
                 await origins.start()
+        app.include_router(
+            producer_epoch_routes(
+                config.signing.signer,
+                token=vote_token,
+                enabled=app.state.benchmark is not None,
+                cohorts=tuple(binding.cohort_sha256 for binding in config.signing.cohorts),
+                settlement=None
+                if app.state.benchmark is None
+                else app.state.benchmark.settlement_progress,
+            )
+        )
         await provider.start()
         logger.info("phase_review_ready config_sha256=%s", digest(config))
         yield app

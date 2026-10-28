@@ -36,6 +36,8 @@ from .competition_cohort_model_static_review import (
     StandingModelReviewPolicy,
     StaticModelReviewHeld,
     build_standing_model_review,
+    obsolete_empty_document_hold,
+    review_hold_key,
     verify_standing_review_policy,
 )
 from .competition_cohort_model_transport import authenticated_model_delivery
@@ -43,8 +45,12 @@ from .competition_cohort_participation import (
     CohortParticipationRequest,
     admit_recovery_participant,
 )
+from .competition_cohort_upload_references import UploadModelReferences
 from .competition_execution import execution_boundary
+from .competition_model_interface import model_python_entrypoint
+from .competition_model_storage_leases import ModelUploadRetirementConfig
 from .competition_round_journal import RoundJournal
+from .competition_transport_verification import TransferProgress
 from .open_competition import (
     ModelBundle,
     Signature,
@@ -66,6 +72,7 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 class ModelUploadConfig(StrictProtocolModel):
     directory: Directory
+    retirement: ModelUploadRetirementConfig | None = None
     admission_reviews_directory: Directory | None = None
     standing_review_policy: StandingModelReviewPolicy | None = None
     maximum_models: Annotated[int, Field(ge=1, le=4096)] = 1024
@@ -78,6 +85,8 @@ class ModelUploadConfig(StrictProtocolModel):
     @model_serializer(mode="wrap")
     def serialize(self, handler):
         value = handler(self)
+        if self.retirement is None:
+            value.pop("retirement", None)
         if self.admission_reviews_directory is None:
             value.pop("admission_reviews_directory", None)
         if self.standing_review_policy is None:
@@ -165,6 +174,7 @@ def _authorized_model_delivery(intake, request, capture, *, mechanism=None):
     cohort = request.consent.consent.cohort_sha256
     intake._allowed(cohort)
     validate_bundle_policy(sub.model_bundle, intake.policy)
+    model_python_entrypoint(sub.model_bundle)
     # Validation alone: do not add an incomplete model to the roster.
     with intake._connection() as (db, store):
         history = store.published_history(cohort)
@@ -240,19 +250,23 @@ class CohortModelUploads:
             ensure_private_directory(review_root)
         if self.config.standing_review_policy is not None:
             verify_standing_review_policy(self.config.standing_review_policy, intake.policy)
+        binding = {
+            "schema": "umi-cohort-model-delivery/1",
+            "policy_sha256": digest(intake.policy),
+            "cohorts": [b.model_dump(mode="json") for b in intake.config.cohorts],
+            "archive": str(archive),
+        }
         self.journal = RoundJournal(
             self.root / "journal",
-            {
-                "schema": "umi-cohort-model-delivery/1",
-                "policy_sha256": digest(intake.policy),
-                "cohorts": [b.model_dump(mode="json") for b in intake.config.cohorts],
-                "archive": str(archive),
-            },
+            binding,
             maximum_bytes=config.maximum_metadata_bytes,
         )
         ensure_private_directory(self.root / "files")
         self._retained_reuse = AssignmentVerificationReuse()
-        self.allocations = ModelReservationLedger(self.journal)
+        self._model_references = UploadModelReferences(self.journal, binding)
+        self.allocations = ModelReservationLedger(
+            self.journal, versions=self._model_references.versions
+        )
 
     def reserve(self, request: CohortParticipationRequest, capture) -> str:
         request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(request))
@@ -299,12 +313,20 @@ class CohortModelUploads:
     def retained(self, key: str) -> CohortParticipationRequest:
         if len(key) != 64 or any(c not in "0123456789abcdef" for c in key):
             raise ValueError("invalid model delivery identity")
-        # Read current bytes and the journal conflict fence on every call. Only
-        # successful static decoding and its exact request identity are reusable;
-        # admission, capacity, payload and current authority remain separate.
-        raw = self.journal.get_raw("upload", key)
-        if raw is None:
-            raise FileNotFoundError("model delivery is not reserved")
+        with self.journal.read_transaction() as db:
+            token = bytes.fromhex(self._model_references.versions.identity("upload", key, db=db))
+            cached = self._retained_reuse.lookup(key, token)
+            if cached is not None:
+                return cached
+            raw = self.journal.get_raw("upload", key, db=db)
+            if raw is None:
+                raise FileNotFoundError("model delivery is not reserved")
+            request = self._decode_retained(key, raw)
+            self._retained_reuse.remember(key, token, request)
+            return request
+
+    @canonical_json_reuse()
+    def _decode_retained(self, key: str, raw: bytes) -> CohortParticipationRequest:
         identity = hashlib.sha256(raw).digest()
         cached = self._retained_reuse.lookup(key, identity)
         if cached is not None:
@@ -314,6 +336,35 @@ class CohortModelUploads:
             raise ValueError("retained model delivery changed")
         self._retained_reuse.remember(key, identity, request)
         return request
+
+    def retained_model(self, key: str) -> str:
+        """Resolve exact current model identity without loading a full request."""
+        if len(key) != 64 or any(c not in "0123456789abcdef" for c in key):
+            raise ValueError("invalid model delivery identity")
+        model, _ = self._model_references.retained(key, self._decode_retained)
+        return model
+
+    def repair_retained_references(self, *, report=None):
+        """Repair only derived references; preserve signed rows and allocations."""
+        keys = self.journal.keys("upload")
+        repaired = 0
+        with TransferProgress(
+            "upload_model_references_repair",
+            len(keys),
+            report,
+            unit="requests",
+            planning_unit_seconds=(0.001, 2.0),
+        ) as progress:
+            for key in keys:
+                _, changed = self._model_references.retained(
+                    key,
+                    self._decode_retained,
+                    repair=True,
+                    report=report,
+                )
+                repaired += int(changed)
+                progress.advance(1)
+        return {"status": "completed", "verification_receipts_repaired": repaired}
 
     def retry(self, request: CohortParticipationRequest) -> str | None:
         key = digest(request)
@@ -504,23 +555,34 @@ class CohortModelUploads:
         finally:
             os.close(lease)
 
-    def poll_once(self, *, remote_payloads=None, remote_review=None):
+    def poll_once(self, *, remote_payloads=None, remote_review=None, report=None):
         """Finalize delivery in the service worker, outside HTTP request deadlines."""
         if remote_payloads is not None and remote_payloads.intake is not self.intake:
             raise ValueError("remote model polling requires the same native intake owner")
+        keys = self.journal.keys("upload")
+        with TransferProgress(
+            "native_model_upload_poll", len(keys), report, unit="requests"
+        ) as progress:
+            return self._poll_once_keys(keys, remote_payloads, remote_review, progress)
+
+    def _poll_once_keys(self, keys, remote_payloads, remote_review, progress):
         ready = pending = 0
         reviews_ready = reviews_pending = reviews_held = 0
         review_hold_reason = ""
         error_type = ""
         seen = set()
-        for key in self.journal.keys("upload"):
+        for key in keys:
+            duplicate = False
             try:
-                request = self.retained(key)
-                bundle = request.signed_submission.submission.model_bundle
-                model = digest(bundle)
+                # Current mutation/conflict fences precede reuse; unchanged
+                # duplicate rows need neither a payload read nor another hash.
+                model = self.retained_model(key)
                 if model in seen:
+                    duplicate = True
                     continue
                 seen.add(model)
+                request = self.retained(key)
+                bundle = request.signed_submission.submission.model_bundle
                 if self.allocations.state(model) in {"release_prepared", "released"}:
                     if remote_payloads is None:
                         raise OSError("released model awaits its authenticated remote poll owner")
@@ -574,6 +636,8 @@ class CohortModelUploads:
             except (OSError, ValueError, sqlite3.Error) as error:
                 pending += 1
                 error_type = type(error).__name__
+            finally:
+                progress.advance(1, restored=duplicate)
         return {
             "models_preserved": ready,
             "models_pending": pending,
@@ -613,8 +677,11 @@ class CohortModelUploads:
         if standing is None:
             return "pending", ""
         review_policy_sha256 = digest(standing)
-        hold_key = model + "-" + review_policy_sha256
+        hold_key = review_hold_key(model, standing)
         hold = self.journal.get("review_hold", hold_key)
+        legacy_hold = hold is None
+        if hold is None:
+            hold = self.journal.get("review_hold", model + "-" + review_policy_sha256)
         if hold is not None:
             if (
                 not isinstance(hold, dict)
@@ -624,7 +691,10 @@ class CohortModelUploads:
                 or not isinstance(hold.get("reason_code"), str)
             ):
                 raise ValueError("retained model review hold differs")
-            return "held", hold["reason_code"]
+            if not legacy_hold or not obsolete_empty_document_hold(
+                bundle, standing, hold["reason_code"]
+            ):
+                return "held", hold["reason_code"]
         try:
             review = build_standing_model_review(bundle, self.archive, self.intake.policy, standing)
         except StaticModelReviewHeld as error:
@@ -700,7 +770,17 @@ class CohortModelUploads:
             reason = ""
             standing = self.config.standing_review_policy
             if standing is not None:
-                hold = self.journal.get("review_hold", sub.model_revision + "-" + digest(standing))
+                hold = self.journal.get(
+                    "review_hold", review_hold_key(sub.model_revision, standing)
+                )
+                if hold is None:
+                    hold = self.journal.get(
+                        "review_hold", sub.model_revision + "-" + digest(standing)
+                    )
+                    if isinstance(hold, dict) and obsolete_empty_document_hold(
+                        sub.model_bundle, standing, hold.get("reason_code")
+                    ):
+                        hold = None
                 if isinstance(hold, dict) and isinstance(hold.get("reason_code"), str):
                     reason = ": " + hold["reason_code"]
             raise PendingModelReview(

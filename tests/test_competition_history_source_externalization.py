@@ -1,8 +1,10 @@
 """Original native verdicts survive remote payload eviction, restart and repair."""
 
+import asyncio
 import json
 import sqlite3
 from contextlib import contextmanager
+from threading import Barrier, Lock
 
 import pytest
 
@@ -12,7 +14,7 @@ from umi.competition_history_source_externalization import (
     HEX_OBJECT_ENCODING,
     MARKER_TABLE,
 )
-from umi.competition_remote_proof_store import RemoteProofStore
+from umi.competition_remote_proof_store import ProofArchiveR2Config, RemoteProofStore
 from umi.competition_reward_history import RewardControlHistoryReader
 from umi.competition_reward_history_checkpoint import SOURCE_KINDS, HistoryCheckpointRepairRequired
 from umi.competition_reward_history_workers import HistoryVerificationProfile
@@ -73,6 +75,32 @@ def fresh_remote(reader, remote, root):
         maximum_bytes=reader.journal.maximum_bytes,
         remote_store=remote,
     )
+
+
+async def test_shutdown_does_not_admit_another_source_replication_batch(
+    history_case, tmp_path, monkeypatch
+):
+    h = history_case
+    stop = asyncio.Event()
+    remote = store(tmp_path / "shutdown-remote", EvidenceServer())
+    h.reader = reopen(h.reader, remote)
+    h.reader.shutdown_event = stop
+    externalize = h.reader._externalize_sources
+    batches = []
+
+    def finish_owned_batch(maximum_records):
+        result = externalize(maximum_records)
+        batches.append(result)
+        # A stop during the first owned replication must not start capture or
+        # another replication batch, even though the caller wasn't cancelled.
+        stop.set()
+        return result
+
+    monkeypatch.setattr(h.reader, "_externalize_sources", finish_owned_batch)
+    result = await h.reader.advance(h.item.provider, through_block=h.end)
+    assert result.history is None and result.next_block == h.reader.first_block
+    assert len(batches) == 1 and not h.body_requests
+    assert h.reader.progress.latest["shutdown_state"] == "drained"
 
 
 async def test_read_through_keeps_original_local_delivery_without_claiming_r2_replication(
@@ -620,8 +648,117 @@ async def test_full_owner_bounded_replication_reclaims_payload_before_small_fram
     assert result["released_logical_bytes"] > 0
 
 
-async def test_advance_reclaims_full_owner_before_capturing_next_native_block(
+async def test_source_publication_overlaps_four_transfers_and_restart_reuses_each_alias(
     history_case, tmp_path, monkeypatch
+):
+    h = history_case
+    expected = await h.reader.advance(h.item.provider, through_block=h.end)
+    successes = retained(h.reader.journal)
+    server = EvidenceServer()
+    remote = store(tmp_path / "remote", server)
+    h.reader = reopen(h.reader, remote)
+    keys = [("control_history_object", digest(["bounded-source", i])) for i in range(9)]
+    for i, (kind, key) in enumerate(keys):
+        h.reader.journal.put(kind, key, {"hex": f"{i:02x}" * (9000 if i == 0 else 8000)})
+    with h.reader.journal.read_transaction() as db:
+        tokens = {key: h.reader.remote_sources.source_token(*key, db) for key in keys}
+
+    barrier, lock = Barrier(4, timeout=10), Lock()
+    active = peak = 0
+    publish = remote.put_bytes
+
+    def concurrent(raw):
+        nonlocal active, peak
+        # The largest record is deliberately committed before concurrent work.
+        if b'"00' in raw:
+            assert active == 0
+            return publish(raw)
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            barrier.wait()
+            return publish(raw)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(remote, "put_bytes", concurrent)
+    result = h.reader.remote_sources.externalize_many(keys)
+    assert peak == 4 and active == 0
+    assert result["replicated_records"] == 9 and result["released_logical_bytes"] > 0
+    assert retained(h.reader.journal) == successes
+    with h.reader.journal.read_transaction() as db:
+        assert {key: h.reader.remote_sources.source_token(*key, db) for key in keys} == tokens
+
+    remote.evict_cache()
+    server.calls.clear()
+    selected = remote.config.model_copy(
+        update={"schema_": "umi-r2-proof-archive/2", "legacy_read_through": True}
+    )
+    h.reader = reopen(
+        h.reader, RemoteProofStore(tmp_path / "remote", selected, client=server.client())
+    )
+    read = h.reader.journal.get_raw
+
+    def no_repeated_payload(kind, key, **kwargs):
+        assert (kind, key) not in keys, "completed source payload was read again"
+        return read(kind, key, **kwargs)
+
+    monkeypatch.setattr(h.reader.journal, "get_raw", no_repeated_payload)
+    assert h.reader.remote_sources.externalize_many(keys)["restored_records"] == 9
+    prohibit_proof_replay(monkeypatch, h.reader)
+    assert await h.reader.advance(h.item.provider, through_block=h.end) == expected
+    assert not server.calls
+
+
+async def test_parallel_source_failure_drains_workers_and_reuses_completed_publication(
+    history_case, tmp_path, monkeypatch
+):
+    h = history_case
+    await h.reader.advance(h.item.provider, through_block=h.end)
+    successes = retained(h.reader.journal)
+    server = EvidenceServer()
+    remote = store(tmp_path / "remote", server)
+    h.reader = reopen(h.reader, remote)
+    keys = [("control_history_object", digest(["interrupted-source", i])) for i in range(9)]
+    for i, (kind, key) in enumerate(keys):
+        h.reader.journal.put(kind, key, {"hex": f"{i:02x}" * (9000 if i == 0 else 8000)})
+    barrier = Barrier(4, timeout=10)
+    publish = remote.put_bytes
+
+    def interrupted(raw):
+        if b'"00' not in raw:
+            barrier.wait()
+        result = publish(raw)
+        if b'"01' in raw:
+            raise OSError("lost one parallel source acknowledgement")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(remote, "put_bytes", interrupted)
+        with pytest.raises(OSError, match="parallel source acknowledgement"):
+            h.reader.remote_sources.externalize_many(keys[:5])
+    published = set(server.objects)
+    with h.reader.journal.read_transaction() as db:
+        remaining = [key for key in keys[:5] if h.reader.journal.get_raw(*key, db=db)]
+    assert 1 <= len(remaining) < 5
+    assert retained(h.reader.journal) == successes
+    server.calls.clear()
+    h.reader = reopen(h.reader, store(tmp_path / "remote", server))
+    result = h.reader.remote_sources.externalize_many(keys[:5])
+    assert result["replicated_records"] == 5
+    assert all(
+        path.removeprefix("/umi-proof-artifacts/") not in published
+        for method, path in server.calls
+        if method == "PUT"
+    )
+    assert retained(h.reader.journal) == successes
+
+
+@pytest.mark.parametrize("retained_local", [False, True])
+async def test_advance_reclaims_full_owner_before_capturing_next_native_block(
+    history_case, tmp_path, monkeypatch, retained_local
 ):
     h = history_case
     await h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=1)
@@ -632,7 +769,20 @@ async def test_advance_reclaims_full_owner_before_capturing_next_native_block(
     with h.reader.journal.read_transaction() as db:
         _, used, _ = h.reader.journal._record_capacity(db)
     h.reader.journal.maximum_bytes = used
-    h.reader = reopen(h.reader, store(tmp_path / "remote", EvidenceServer()))
+    server = EvidenceServer()
+    selected_config = config(tmp_path)
+    if retained_local:
+        selected_config = ProofArchiveR2Config.model_validate(
+            selected_config.model_dump(mode="json", by_alias=True)
+            | {
+                "schema": "umi-r2-proof-archive/2",
+                "legacy_read_through": True,
+                "source_release_batch_records": 256,
+            }
+        )
+    h.reader = reopen(
+        h.reader, RemoteProofStore(tmp_path / "remote", selected_config, client=server.client())
+    )
     save = h.reader._save_fields
     captures = []
 
@@ -644,6 +794,8 @@ async def test_advance_reclaims_full_owner_before_capturing_next_native_block(
 
     monkeypatch.setattr(h.reader, "_save_fields", assert_reclaimed)
     result = await h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=2)
+    # A newly selected remote input dependency receives its first metadata
+    # adoption; later unchanged restarts use the guarded constant-size fold.
     assert result.next_block == h.reader.first_block + 2
     assert captures == [h.reader.first_block + 1]
     assert h.reader.checkpoints.load(h.reader.first_block) == original

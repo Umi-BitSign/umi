@@ -4,11 +4,13 @@ import json
 
 import pytest
 
-from umi.competition_geometric_rewards import GeometricRewardParameters
+from umi.competition_geometric_rewards import GeometricRewardParameters, cohort_reward_parameters
 from umi.competition_reward_adoption import (
     RewardAdoptionSelection,
+    RewardEarlyRelease,
     RewardModelAdoption,
     SignedRewardModelAdoption,
+    select_signed_initial_reward_adoption,
     verify_adoption_selection,
     verify_reward_adoption,
 )
@@ -114,6 +116,61 @@ def test_legacy_signed_serialization_is_unchanged(series_case):
     )
 
 
+def test_early_release_requires_versioned_quorum_and_exact_package(series_case):
+    c = series_case
+    successor = c.series.cohorts[1]
+    release = RewardEarlyRelease(
+        schema="umi-reward-early-release/1",
+        predecessor_decision_sha256="10" * 32,
+        predecessor_activation_sha256="11" * 32,
+        successor_cohort_sha256=digest(successor),
+        successor_package_sha256="12" * 32,
+        manifest_sha256=c.series.manifest_sha256,
+        reason="Operator authorized release before the coverage minimum",
+    )
+    _, source = adoption_case(c, revisions=1)
+    body = source.adoptions[0].adoption.model_copy(
+        update={
+            "schema_": "umi-standing-model-reward-adoption/5",
+            "cohort_sha256": digest(successor),
+            "package_sha256": release.successor_package_sha256,
+            "early_release": release,
+        }
+    )
+    body = RewardModelAdoption.model_validate_json(canonical_json_bytes(body))
+    signed_release = SignedRewardModelAdoption(adoption=body, signatures=signatures(body))
+    selection = RewardAdoptionSelection(
+        schema="umi-standing-reward-adoption-selection/1", adoptions=(signed_release,)
+    )
+    assert verify_adoption_selection(selection, c.series, c.control.policy) == selection
+    with pytest.raises(ValueError):
+        verify_adoption_selection(
+            selection.model_copy(
+                update={
+                    "adoptions": (
+                        signed_release.model_copy(
+                            update={
+                                "adoption": body.model_copy(
+                                    update={
+                                        "early_release": release.model_copy(
+                                            update={"reason": "Changed"}
+                                        )
+                                    }
+                                )
+                            }
+                        ),
+                    )
+                }
+            ),
+            c.series,
+            c.control.policy,
+        )
+    with pytest.raises(ValueError, match="successor package"):
+        RewardModelAdoption.model_validate_json(
+            canonical_json_bytes(body.model_copy(update={"package_sha256": "13" * 32}))
+        )
+
+
 def test_independent_parameters_are_authenticated_and_original_evidence_is_fixed(series_case):
     c = series_case
     original, selection = adoption_case(c)
@@ -146,6 +203,65 @@ def test_independent_parameters_are_authenticated_and_original_evidence_is_fixed
             series=c.series,
             policy=c.control.policy,
             current_block=180,
+        )
+
+
+def test_signed_baseline_grace_is_prospective_and_authenticated(series_case):
+    c = series_case
+    _, original = adoption_case(c, revisions=1)
+    original_bytes = canonical_json_bytes(original)
+    for sequence in (6, 7):
+        cohort = next(plan for plan in c.series.cohorts if plan.sequence == sequence)
+        body = original.adoptions[0].adoption.model_copy(
+            update={
+                "cohort_sha256": digest(cohort),
+                "parameters": cohort_reward_parameters(7),
+            }
+        )
+        signed_grace = SignedRewardModelAdoption(adoption=body, signatures=signatures(body))
+        selection = RewardAdoptionSelection(schema=original.schema_, adoptions=(signed_grace,))
+        if sequence == 6:
+            with pytest.raises(ValueError, match="C7"):
+                verify_adoption_selection(selection, c.series, c.control.policy)
+            continue
+        assert verify_adoption_selection(selection, c.series, c.control.policy) == selection
+        altered = signed_grace.model_copy(
+            update={
+                "adoption": body.model_copy(
+                    update={
+                        "parameters": body.parameters.model_copy(update={"baseline_grace_bps": 0})
+                    }
+                )
+            }
+        )
+        with pytest.raises(ValueError):
+            verify_adoption_selection(
+                selection.model_copy(update={"adoptions": (altered,)}), c.series, c.control.policy
+            )
+    assert canonical_json_bytes(original) == original_bytes
+
+
+def test_signed_initial_selection_is_idempotent_and_refuses_replacement(series_case):
+    c = series_case
+    _, source = adoption_case(c, revisions=1)
+    signed = source.adoptions[0]
+    chosen = select_signed_initial_reward_adoption(
+        None, signed, series=c.series, policy=c.control.policy
+    )
+    assert chosen == source
+    assert (
+        select_signed_initial_reward_adoption(
+            chosen, signed, series=c.series, policy=c.control.policy
+        )
+        == chosen
+    )
+    changed = signed.adoption.model_copy(
+        update={"parameters": GeometricRewardParameters(band_width_bps=250)}
+    )
+    replacement = SignedRewardModelAdoption(adoption=changed, signatures=signatures(changed))
+    with pytest.raises(ValueError, match="different signed bytes"):
+        select_signed_initial_reward_adoption(
+            chosen, replacement, series=c.series, policy=c.control.policy
         )
 
 

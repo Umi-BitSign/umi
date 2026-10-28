@@ -738,6 +738,8 @@ async def test_held_cohort_never_constructs_controller_and_other_cohort_runs(
             config=SimpleNamespace(series=SimpleNamespace(cohorts=(held, active)))
         ),
         last_reports={},
+        requests={},
+        execution_progress={},
         node=node,
     )
     task = asyncio.create_task(module.LifecycleHost.run(host, stop))
@@ -751,3 +753,64 @@ async def test_held_cohort_never_constructs_controller_and_other_cohort_runs(
     await asyncio.wait_for(task, timeout=1)
     assert node_stopped.is_set()
     assert host.last_reports[active] == {"status": "stopped"}
+
+
+async def test_older_lifecycle_boot_owns_separate_epoch_client_until_shutdown(host):
+    o = host
+    async with o.open() as app:
+        lifecycle = app.state.lifecycle
+        advisory = lifecycle.producer_epochs.client
+        assert advisory is not lifecycle.client and not advisory.is_closed
+    assert advisory.is_closed
+
+
+def test_optional_suite_adoption_config_preserves_legacy_and_protects_installed_paths(
+    lifecycle, tmp_path
+):
+    from umi.competition_cohort_suite_adoption_candidate import (
+        EvaluationSuiteAdoptionCandidateConfig,
+    )
+
+    c = configured(lifecycle, tmp_path / "host")
+    original = canonical_json_bytes(c)
+    assert b"evaluation_suite" not in original
+    root = tmp_path / "private-suite"
+    candidate = EvaluationSuiteAdoptionCandidateConfig(
+        schema="umi-evaluation-suite-adoption-candidate/1",
+        cohort_sha256=digest(c.series.cohorts[0]),
+        verification_owner_hotkey=c.admission_owner.owner_hotkey,
+        **{
+            name: str(root / name)
+            for name in (
+                "suite_file",
+                "selection_manifest_file",
+                "inventory_file",
+                "exclusions_file",
+                "selection_key_file",
+                "reference_qa_directory",
+                "videos_directory",
+                "verification_directory",
+                "ffmpeg_binary",
+                "ffprobe_binary",
+            )
+        },
+        ffmpeg_sha256="a1" * 32,
+        ffprobe_sha256="a2" * 32,
+    )
+    selected = c.lifecycle.model_copy(update={"evaluation_suite_adoption_candidates": (candidate,)})
+    with pytest.raises(ValueError, match="separate operator credential"):
+        LifecycleHostConfig.model_validate_json(canonical_json_bytes(selected))
+    selected = LifecycleHostConfig.model_validate_json(
+        canonical_json_bytes(
+            selected.model_copy(
+                update={"evaluation_suite_operator_token_file": str(root / "operator-token")}
+            )
+        )
+    )
+    config = ServiceAdmissionHostConfig.model_validate_json(
+        canonical_json_bytes(c.model_copy(update={"lifecycle": selected}))
+    )
+    assert set(candidate.stores()) <= set(config.stores())
+    assert Path(selected.evaluation_suite_operator_token_file) in config.stores()
+    assert canonical_json_bytes(config.series) == canonical_json_bytes(c.series)
+    assert canonical_json_bytes(c) == original

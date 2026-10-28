@@ -75,10 +75,22 @@ def transfer(tmp_path, monkeypatch):
     reserve = 64
     monkeypatch.setattr(materialization, "MAXIMUM_RANGE_BYTES", 16)
 
-    async def run(*, available=None, selected_source=None, check_write=None):
-        with TransferProgress("model_materialization", len(body), events.append) as progress:
-            return await materialization.materialize_model_files(
-                archive=archive,
+    async def run(
+        *,
+        available=None,
+        selected_source=None,
+        check_write=None,
+        check_file_write=None,
+        selected_archive=None,
+    ):
+        with TransferProgress(
+            "model_materialization",
+            len(body),
+            events.append,
+            total_operations=len(bundle.files) + 1,
+        ) as progress:
+            result = await materialization.materialize_model_files(
+                archive=archive if selected_archive is None else selected_archive,
                 bundle=bundle,
                 payload=payload,
                 multipart=multipart,
@@ -95,7 +107,10 @@ def transfer(tmp_path, monkeypatch):
                 available_bytes=(lambda: 1024**3) if available is None else available,
                 reserve_bytes=reserve,
                 check_write=check_write,
+                check_file_write=check_file_write,
             )
+            progress.advance_operations(1)
+            return result
 
     model = archive / digest(bundle) / "model"
 
@@ -272,6 +287,43 @@ async def test_boot_cache_restarts_partial_transfer_evicts_and_restores_without_
     )
 
 
+async def test_managed_path_accounting_runs_actual_direct_restoration_and_resumes(transfer):
+    from umi.private_files import ensure_private_directory
+
+    archive = transfer.archive.parent / "direct-model-cache" / "archive"
+    ensure_private_directory(archive.parent.parent)
+    ensure_private_directory(archive.parent)
+    config = BootDiskModelCacheConfig(
+        schema="umi-boot-disk-model-cache/1",
+        directory=str(archive.parent.parent),
+        maximum_allocated_bytes=2 * 1024**2,
+    )
+    counts = []
+
+    async def restore():
+        budget = BootDiskModelCache(config, reserve_bytes=transfer.reserve)
+        calls = []
+        with budget.allocation_lease():
+            budget.prepare(transfer.bundle, archive=archive)
+
+            def check(path, size):
+                calls.append((path, size))
+                budget.check_file_write(path, size)
+
+            result = await transfer.run(
+                available=budget.available_bytes, check_file_write=check, selected_archive=archive
+            )
+            assert budget.incremental
+            counts.append(len(calls))
+            return result
+
+    await restore()
+    before = tuple(transfer.multipart.reads)
+    await restore()
+    assert tuple(transfer.multipart.reads) == before
+    assert counts[0] > 0 and counts[1] == 0
+
+
 async def test_boot_reserve_exhaustion_retains_checkpoint_and_resumes_only_affected_file(transfer):
     first = transfer.bundle.files[0]
     interrupted = False
@@ -288,3 +340,81 @@ async def test_boot_reserve_exhaustion_retains_checkpoint_and_resumes_only_affec
     transfer.multipart.reads.clear()
     await transfer.run()
     assert all(offset >= first.size_bytes for offset, _ in transfer.multipart.reads)
+
+
+@pytest.mark.parametrize("range_bytes", [15, 70, 1024])
+async def test_adjacent_files_share_bounded_ranges_without_changing_bytes(
+    transfer, monkeypatch, range_bytes
+):
+    monkeypatch.setattr(materialization, "MAXIMUM_RANGE_BYTES", range_bytes)
+    target, documents, written = await transfer.run()
+    total = transfer.payload.total_bytes
+    assert transfer.multipart.reads == [
+        (offset, min(range_bytes, total - offset)) for offset in range(0, total, range_bytes)
+    ]
+    assert all(
+        (target / "model" / name).read_bytes() == expected
+        for name, expected in transfer.contents.items()
+    )
+    assert set(documents) == {
+        record.path for record in transfer.bundle.files if record.role in {"license", "provenance"}
+    }
+    assert len(written) == len(transfer.bundle.files)
+    terminal = transfer.events[-1]
+    assert terminal["status"] == "completed"
+    assert terminal["completed_operations"] == terminal["total_operations"] == len(written) + 1
+
+
+async def test_coalesced_repair_skips_retained_files_between_missing_runs(transfer, monkeypatch):
+    await transfer.run()
+    missing = [transfer.bundle.files[index] for index in (1, 2, 4)]
+    for record in missing:
+        (transfer.model / record.path).unlink()
+    transfer.multipart.reads.clear()
+    monkeypatch.setattr(materialization, "MAXIMUM_RANGE_BYTES", 1024)
+    await transfer.run(available=transfer.bounded_free)
+    assert transfer.multipart.reads == [(64, 128), (256, 64)]
+    assert all(
+        (transfer.model / name).read_bytes() == expected
+        for name, expected in transfer.contents.items()
+    )
+    assert transfer.events[-1]["restored_units"] == 4 * 64
+    assert transfer.events[-1]["native_operations"] == 4  # Three files and finalization.
+
+
+async def test_corruption_later_in_coalesced_range_is_refused(transfer, monkeypatch):
+    monkeypatch.setattr(materialization, "MAXIMUM_RANGE_BYTES", 1024)
+    original = transfer.multipart.read_range
+
+    async def corrupt(key, *, offset, size_bytes):
+        data = bytearray(await original(key, offset=offset, size_bytes=size_bytes))
+        data[65] ^= 1
+        return bytes(data)
+
+    monkeypatch.setattr(transfer.multipart, "read_range", corrupt)
+    with pytest.raises(ValueError, match="file differs"):
+        await transfer.run()
+    assert not (transfer.model.parent / "manifest.json").exists()
+    assert transfer.events[-1]["status"] == "retrying"
+    assert transfer.events[-1]["completed_operations"] == 1
+
+
+async def test_bytes_complete_still_reports_unfinished_finalization(transfer, monkeypatch):
+    original = materialization.publish_private_model
+    seen = []
+
+    def inspect_finalization(path, value):
+        if path.name == "manifest.json":
+            from umi.competition_transport_verification import current_progress
+
+            progress = current_progress()
+            progress.emit("running")
+            seen.append(transfer.events[-1])
+        return original(path, value)
+
+    monkeypatch.setattr(materialization, "publish_private_model", inspect_finalization)
+    await transfer.run()
+    assert len(seen) == 1
+    assert seen[0]["completed_units"] == seen[0]["total_units"]
+    assert seen[0]["completed_operations"] + 1 == seen[0]["total_operations"]
+    assert seen[0]["status"] != "completed" and seen[0]["percent"] < 100

@@ -159,7 +159,12 @@ class SettlementArtifactPreparation:
         ):
             if verifier is None:
                 raise OSError("direct model preparation requires the selected R2 verifier")
-            await verifier.ensure(participant, certificate)
+            # This advisory lane prepares immutable byte facts. Final settlement
+            # and coverage restore retain their fresh remote-generation checks.
+            if await run_owned_thread(verifier._path(certificate).exists):
+                await run_owned_thread(verifier.verify_candidate, certificate, participant)
+            else:
+                await verifier.ensure(participant, certificate)
         else:
             await run_owned_thread(
                 verify_preserved_bundle,

@@ -17,6 +17,7 @@ from pydantic import Field
 
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
 from .competition_cohort_recovery import (
+    CohortEvaluationSuiteAdoption,
     CohortModelDeliveryAdoption,
     CohortRecoveryGenesis,
     CohortRecoveryState,
@@ -225,6 +226,7 @@ class CohortRecoveryStore:
                 request_tail_sha256=transition.request_tail_sha256,
                 request_tail_adoption=transition.request_tail_adoption,
                 model_delivery_adoption=transition.model_delivery_adoption,
+                evaluation_suite_adoption=transition.evaluation_suite_adoption,
             )
             if sequence != state.sequence + 1 or transition != expected:
                 raise ValueError("retained cohort decision forks its authenticated history")
@@ -501,6 +503,7 @@ class CohortRecoveryStore:
         request_tail_sha256: str | None = None,
         request_tail_adoption: CohortRequestTailAdoption | None = None,
         model_delivery_adoption: CohortModelDeliveryAdoption | None = None,
+        evaluation_suite_adoption: CohortEvaluationSuiteAdoption | None = None,
     ) -> CohortRecoveryTransition:
         """Acknowledge the same decision or return pending bytes before new work.
 
@@ -532,6 +535,7 @@ class CohortRecoveryStore:
                 request_tail_sha256=request_tail_sha256,
                 request_tail_adoption=request_tail_adoption,
                 model_delivery_adoption=model_delivery_adoption,
+                evaluation_suite_adoption=evaluation_suite_adoption,
             )
             raw = canonical_json_bytes(transition)
             _decode(CohortRecoveryTransition, raw, 16 * 1024)
@@ -572,6 +576,7 @@ class CohortRecoveryStore:
                 request_tail_sha256=proposal.request_tail_sha256,
                 request_tail_adoption=proposal.request_tail_adoption,
                 model_delivery_adoption=proposal.model_delivery_adoption,
+                evaluation_suite_adoption=proposal.evaluation_suite_adoption,
             )
             if canonical_json_bytes(expected) != raw:
                 raise ValueError("exact cohort reservation differs from native proposal")

@@ -30,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     port.add_argument("--confirm-quiesced-backup", action="store_true")
     baseline = commands.add_parser("apply-cohort-baseline")
     baseline_config = baseline.add_mutually_exclusive_group(required=True)
-    for name in ("intake-config", "reviewer-config", "evaluator-config"):
+    for name in ("intake-config", "reviewer-config", "settlement-config", "evaluator-config"):
         baseline_config.add_argument("--" + name)
     for name in ("certificate", "chain-config"):
         baseline.add_argument("--" + name, required=True)

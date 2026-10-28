@@ -23,6 +23,7 @@ from .competition_cohort_orders import RecoverableEvaluationOrder
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from .competition_execution import ExecutionCase, execution_boundary
 from .competition_runner import OFFLINE_RUNTIME, OfflineCpuRuntime
+from .competition_work_progress import progress_items
 from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
 from .open_competition import EvaluationSuite, ModelBundle, digest, identity, validate_suite_profile
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -126,7 +127,14 @@ class CohortOrderHost:
         if suite.policy_sha256 != digest(policy):
             raise ValueError("benchmark suite belongs to another policy")
         incumbent = ModelBundle.model_validate_json(self.files(round_.incumbent_model_sha256))
-        runtime = OFFLINE_RUNTIME.validate_json(self.files(round_.runtime_sha256))
+        from .competition_evaluation_runtime import round_runtime_authorization
+
+        authorization = round_runtime_authorization(round_, policy, source.history)
+        runtime = (
+            OFFLINE_RUNTIME.validate_json(self.files(round_.runtime_sha256))
+            if authorization is None
+            else authorization.runtime
+        )
         if not isinstance(runtime, OfflineCpuRuntime):
             raise ValueError("configured benchmark host requires the pinned CPU runtime")
         cases = tuple(
@@ -139,7 +147,12 @@ class CohortOrderHost:
         ):
             raise ValueError("benchmark selection differs from the complete prepared roster")
         slots = []
-        for member in members:
+        for member in progress_items(
+            members,
+            stage="cohort_order_selection",
+            unit="submissions",
+            cohort=cohort,
+        ):
             record = member.record
             miner = identity(record.request.signed_submission.submission.hotkey)
             order = RecoverableEvaluationOrder(

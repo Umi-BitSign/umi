@@ -52,6 +52,7 @@ from .competition_cohort_participation import (
 from .competition_cohort_recovery import CohortRecoveryTransition, ModelRewardCohortAuthority
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_execution import execution_boundary
+from .competition_model_certification_progress import ModelCertificationProgress
 from .competition_store import AdmissionCapacity, AdmissionCapacityError
 from .concurrency import run_owned_thread
 from .host_memory_request_bounds import check_stage_json, stage_count
@@ -181,6 +182,7 @@ class CohortIntake:
         # not consume the external-lock timeout while one sibling owns it.
         self._process_lock = ThreadGate()
         self._seal_reuse = AssignmentVerificationReuse(8 * 1024**2, 64)
+        self.model_certification_progress = ModelCertificationProgress()
         self.bindings = {item.cohort_sha256: item.authority_sha256 for item in config.cohorts}
         if self.directory.resolve() != self.directory:
             raise ValueError("cohort intake state must not traverse symlinks")
@@ -496,9 +498,16 @@ class CohortIntake:
         crash between intake and control reservation retries these same bytes;
         ordinary signed history publication releases the fence after commit.
         """
+        return self._reserve_policy_adoption(proposal, "adopt_request_tail_rule")
+
+    def reserve_evaluation_suite_adoption(self, proposal):
+        """Fence the same original intake while the exact suite intent is pending."""
+        return self._reserve_policy_adoption(proposal, "adopt_evaluation_suite")
+
+    def _reserve_policy_adoption(self, proposal, operation):
         proposal = CohortRecoveryTransition.model_validate_json(canonical_json_bytes(proposal))
-        if proposal.operation != "adopt_request_tail_rule":
-            raise ValueError("intake rule reservation requires an adoption transition")
+        if proposal.operation != operation:
+            raise ValueError("intake reservation requires its exact adoption operation")
         cohort = proposal.cohort_sha256
         self._allowed(cohort)
         with self._connection() as (db, store):
@@ -668,7 +677,8 @@ class CohortIntake:
     def _parsed_records(self, db, history, *, track: str | None = None, hotkey: str | None = None):
         tips = {digest(history.genesis), *(digest(s.transition) for s in history.transitions)}
         clauses = ["cohort=?"]
-        parameters = [digest(history.plan)]
+        cohort = digest(history.plan)
+        parameters = [cohort]
         if track is not None:
             clauses.append("track=?")
             parameters.append(track)
@@ -688,7 +698,7 @@ class CohortIntake:
             retained = read_participation(raw)
             if (
                 retained.proposed_admission.recovery_tip_sha256 != tip
-                or retained.proposed_admission.cohort_sha256 != digest(history.plan)
+                or retained.proposed_admission.cohort_sha256 != cohort
                 or (
                     track is not None
                     and retained.request.signed_submission.submission.track != track

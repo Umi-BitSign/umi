@@ -10,6 +10,7 @@ from functools import wraps
 _declarations = ContextVar("requests_stage_declarations", default=None)
 _object_bytes = ContextVar("requests_stage_object_bytes", default=None)
 _evidence_values = ContextVar("requests_stage_evidence_values", default=None)
+_shape_capture = ContextVar("requests_stage_shape_capture", default=None)
 
 _PUNCTUATION = b'{}[],:"'
 _SCALAR_END = re.compile(rb'[\s{}\[\],:"]')
@@ -99,6 +100,30 @@ def stage_shape_identity():
     return hashlib.sha256(b"umi-verified-json-shape-v1\0" + raw).hexdigest()
 
 
+@contextmanager
+def capture_stage_json_shapes():
+    """Retain the accounting from the first native read, without a second scan."""
+    values = {}
+    token = _shape_capture.set(values)
+    try:
+        yield values
+    finally:
+        _shape_capture.reset(token)
+
+
+def _capture_shape(raw, kind, values, fingerprint=None):
+    captured = _shape_capture.get()
+    if captured is not None:
+        sha = (fingerprint or hashlib.sha256(raw).digest()).hex()
+        captured[sha, kind] = dict(
+            byte_sha256=sha,
+            size=len(raw),
+            values=values,
+            bounds_sha256=stage_shape_identity(),
+            kind=kind,
+        )
+
+
 def replay_stage_json_shape(
     *, byte_sha256, size, values, bounds_sha256, maximum_bytes, kind="object"
 ):
@@ -180,13 +205,16 @@ def check_stage_json(raw, *, kind="input"):
     """
     bounds = stage_bounds()
     if bounds is None:
+        _capture_shape(raw, kind, None)
         return
     if len(raw) > getattr(bounds, "maximum_" + kind + "_bytes"):
         raise ValueError("requests-stage JSON exceeds its qualified byte bound")
     aggregate = _evidence_values.get()
     fingerprint = None if aggregate is None else hashlib.sha256(raw).digest()
     if aggregate is not None and fingerprint in aggregate["seen"]:
-        return aggregate["seen"][fingerprint]
+        values = aggregate["seen"][fingerprint]
+        _capture_shape(raw, kind, values, fingerprint)
+        return values
     value_limit = (
         bounds.maximum_json_values
         if aggregate is None
@@ -283,4 +311,5 @@ def check_stage_json(raw, *, kind="input"):
     if aggregate is not None:
         aggregate["seen"][fingerprint] = values
         aggregate["remaining"] -= values
+    _capture_shape(raw, kind, values, fingerprint)
     return values

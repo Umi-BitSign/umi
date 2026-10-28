@@ -475,7 +475,7 @@ async def test_slow_model_work_does_not_block_uploads_or_native_catalog(
     prepared = await prepare(h)
     entered, release = asyncio.Event(), asyncio.Event()
     thread_entered, thread_release = Event(), Event()
-    calls = {name: 0 for name in ("models", "direct_uploads", "legacy_uploads")}
+    calls = {name: 0 for name in ("models", "model_inventory", "direct_uploads", "legacy_uploads")}
     active = {name: 0 for name in calls}
     peak = {name: 0 for name in calls}
 
@@ -506,7 +506,10 @@ async def test_slow_model_work_does_not_block_uploads_or_native_catalog(
 
     host.uploads = SimpleNamespace(poll_once=legacy)
     host.direct_uploads = SimpleNamespace(poll_once=lambda: asynchronous("direct_uploads"))
-    host.models = SimpleNamespace(poll_once=lambda: asynchronous("models"))
+    host.models = SimpleNamespace(
+        poll_once=lambda: asynchronous("models"),
+        report_inventory_once=lambda _cohorts: asynchronous("model_inventory"),
+    )
     stop = asyncio.Event()
     polling = asyncio.create_task(host._poll(stop))
     try:
@@ -564,7 +567,10 @@ async def test_reconciliation_cancellation_drains_owned_upload_thread(lifecycle,
             model_closed.set()
 
     host.uploads = SimpleNamespace(poll_once=upload)
-    host.models = SimpleNamespace(poll_once=model)
+    host.models = SimpleNamespace(
+        poll_once=model,
+        report_inventory_once=lambda _cohorts: asyncio.sleep(0, result={"status": "inventory"}),
+    )
     task = asyncio.create_task(host._poll(asyncio.Event()))
     try:
 
@@ -586,7 +592,9 @@ async def test_reconciliation_cancellation_drains_owned_upload_thread(lifecycle,
     assert finished.is_set() and model_closed.is_set()
 
 
-@pytest.mark.parametrize("failed", ["catalogs", "models", "legacy_uploads", "direct_uploads"])
+@pytest.mark.parametrize(
+    "failed", ["catalogs", "models", "model_inventory_00", "legacy_uploads", "direct_uploads"]
+)
 async def test_reconciliation_failure_stops_every_other_owner(lifecycle, tmp_path, failed):
     from types import SimpleNamespace
 
@@ -598,7 +606,7 @@ async def test_reconciliation_failure_stops_every_other_owner(lifecycle, tmp_pat
         h.provider.collect,
         h.provider.retained_archive,
     )
-    names = ("catalogs", "models", "legacy_uploads", "direct_uploads")
+    names = ("catalogs", "models", "model_inventory_00", "legacy_uploads", "direct_uploads")
     entered = {name: asyncio.Event() for name in names}
     closed = {name: asyncio.Event() for name in names}
 
@@ -617,10 +625,93 @@ async def test_reconciliation_failure_stops_every_other_owner(lifecycle, tmp_pat
     for name, method in (
         ("catalogs", "_poll_catalogs"),
         ("models", "_poll_models"),
+        ("model_inventory_00", "_poll_model_inventory"),
         ("legacy_uploads", "_poll_legacy_uploads"),
         ("direct_uploads", "_poll_direct_uploads"),
     ):
-        setattr(host, method, lambda name=name: reconcile(name))
+        setattr(host, method, lambda *_args, name=name: reconcile(name))
     with pytest.raises(RuntimeError, match="reconciliation failed"):
         await asyncio.wait_for(host._poll(asyncio.Event()), 120)
     assert all(event.is_set() for event in closed.values())
+
+
+async def test_successor_inventory_keeps_refreshing_while_older_cohort_read_waits(
+    lifecycle_before_intake,
+):
+    from types import SimpleNamespace
+
+    old, successor = "a" * 64, "b" * 64
+    host = object.__new__(ServiceAdmissionHost)
+    host.intake = SimpleNamespace(
+        config=SimpleNamespace(
+            cohorts=(SimpleNamespace(cohort_sha256=old), SimpleNamespace(cohort_sha256=successor))
+        )
+    )
+    host.models = SimpleNamespace()
+    host.uploads = host.direct_uploads = None
+    host.config = SimpleNamespace(poll_seconds=0.01)
+    old_entered, old_release = asyncio.Event(), asyncio.Event()
+    successor_repeated = asyncio.Event()
+    waiting = asyncio.Event()
+    successor_calls = 0
+
+    async def blocked():
+        await waiting.wait()
+        return {"status": "current"}
+
+    async def inventory(group):
+        nonlocal successor_calls
+        assert len(group) == 1
+        if group[0] == old:
+            old_entered.set()
+            await old_release.wait()
+        else:
+            successor_calls += 1
+            if successor_calls >= 2:
+                successor_repeated.set()
+        return {"status": "completed", "completed": 1, "total": 1}
+
+    host._poll_catalogs = host._poll_models = blocked
+    host._poll_model_inventory = inventory
+    stop = asyncio.Event()
+    task = asyncio.create_task(host._poll(stop))
+    try:
+        await asyncio.wait_for(old_entered.wait(), 5)
+        await asyncio.wait_for(successor_repeated.wait(), 5)
+        assert not old_release.is_set()
+    finally:
+        stop.set()
+        old_release.set()
+        waiting.set()
+        await asyncio.wait_for(task, 5)
+
+
+async def test_reconciliation_mutex_contention_retries_without_restarting_owner(
+    lifecycle, tmp_path, caplog
+):
+    from umi.private_files import PrivateStateBusyError
+
+    h = lifecycle
+    host = ServiceAdmissionHost(
+        host_config(h, tmp_path / "host"),
+        h.intake,
+        h.owner.promotion,
+        h.provider.collect,
+        h.provider.retained_archive,
+    )
+    stop = asyncio.Event()
+    calls = 0
+
+    async def callback():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PrivateStateBusyError("round_journal_lock", "a" * 64, 11)
+        stop.set()
+        return {"status": "resumed_from_checkpoint"}
+
+    with caplog.at_level("INFO"):
+        await asyncio.wait_for(host._poll_component(stop, "models", callback), timeout=30)
+    assert calls == 2
+    assert "service_reconciliation_retry" in caplog.text
+    assert "resumed_from_checkpoint" in caplog.text

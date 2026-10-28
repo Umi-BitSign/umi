@@ -13,6 +13,8 @@ import pytest
 
 from umi.competition_artifacts import preserve_bundle
 from umi.competition_cohort_coordinator import CohortProgressIntent
+from umi.competition_cohort_model_transport_selection import retained_model_delivery_adoption
+from umi.competition_cohort_recovery import cohort_service_pool
 from umi.competition_cohort_reward_package import CohortRewardPackage
 from umi.competition_cohort_settlement_boot import settlement_store
 from umi.competition_cohort_settlement_config import SettlementServiceConfig
@@ -27,7 +29,12 @@ from .test_open_competition import wallet
 
 def copy_originals(origin, target):
     for path in origin.rglob("*.json"):
-        destination = target / path.relative_to(origin)
+        relative = path.relative_to(origin)
+        # Local byte-verification receipts bind the producer's inode. Only
+        # immutable protocol exports cross an independent owner boundary.
+        if any(part.startswith(".") for part in relative.parts):
+            continue
+        destination = target / relative
         ensure_private_directory(destination.parent)
         if destination.exists():
             assert destination.read_bytes() == path.read_bytes()
@@ -210,7 +217,12 @@ async def run_settlement(
         original = output.read_bytes()
         package = CohortRewardPackage.model_validate_json(original)
         service, allocation = package.service.statement.allocation, package.allocation
-        expected_budgets = (0, 65535) if plan.service_pool_bps == 0 else (32767, 32768)
+        effective_pool = cohort_service_pool(
+            plan,
+            package.inputs.terms.service_pool_bps,
+            adoption=retained_model_delivery_adoption(package.inputs.history),
+        )
+        expected_budgets = (0, 65535) if effective_pool == 0 else (32767, 32768)
         assert (service.service_budget, service.model_budget) == expected_budgets
         assert bool(service.recipients) == mixed
         assert allocation.burn_weight == service.burn_weight

@@ -16,6 +16,7 @@ from .competition_cohort_model_upload_continuation import (
     LegacyModelUploadContinuation,
     owned_upload_continuation,
 )
+from .competition_cohort_preserved_upload_payloads import PreservedModelUploadPayloads
 from .competition_transport_verification import TransferProgress
 from .concurrency import run_owned_thread
 from .open_competition import digest
@@ -41,9 +42,18 @@ class ModelUploadDelivery:
         for owner in (remote_payloads, continued_payloads):
             if owner is not None and owner.intake is not self.intake:
                 raise ValueError("remote model retries require the same native intake owner")
+        source = remote_payloads or continued_payloads
+        self.preserved = (
+            None if source is None else PreservedModelUploadPayloads(uploads, source.sources)
+        )
+        self.retirement = None
 
     def _payload_owner(self, request):
-        for owner in (self.remote, self.continued):
+        if self.remote is not None and self.remote.contains(request):
+            return self.remote
+        if self.continued is not None and self.continued.has_owned_selection(request):
+            return self.continued
+        for owner in (self.preserved, self.continued):
             if owner is not None and owner.contains(request):
                 return owner
         raise OSError("released model awaits its authenticated remote retry owner")
@@ -62,11 +72,16 @@ class ModelUploadDelivery:
             request.signed_submission.submission.model_bundle, allow_local=False
         )
 
-    def _remote_request(self, key: str) -> CohortParticipationRequest | None:
-        request = self.uploads.retained(key)
-        model = request.signed_submission.submission.model_revision
+    def _remote_request(self, key: str, *, model=None) -> CohortParticipationRequest | None:
+        # Local allocations need only the exact model reference and fresh
+        # allocation fence. Decode the complete request only for remote work.
+        # The recurring poll already resolved this immutable upload reference.
+        # Allocation state and owned authority are still checked after retirement.
+        if model is None:
+            model = self.uploads.retained_model(key)
         if self.uploads.allocations.state(model) not in {"release_prepared", "released"}:
             return None
+        request = self.uploads.retained(key)
         self._payload_owner(request)
         return request
 
@@ -120,26 +135,78 @@ class ModelUploadDelivery:
         capacity nor creates local payloads, and the synchronous poll rechecks
         current owned authority before counting a model as preserved.
         """
+        generation = (
+            None
+            if self.retirement is None
+            else await run_owned_thread(self.uploads._model_references.versions.inventory_identity)
+        )
         keys = await run_owned_thread(self.uploads.journal.keys, "upload")
+        groups = {}
+        models = {}
+        grouped_all = True
+        retired = None
+        if self.retirement is not None:
+            # Build the complete local reference inventory before remote retries.
+            # Retirement owns its required remote checks for the selected batch;
+            # an unrelated released upload must not postpone local reclamation.
+            with TransferProgress(
+                "local_model_retirement_inventory", len(keys), report, unit="requests"
+            ) as progress:
+                for key in keys:
+                    try:
+                        model = await run_owned_thread(self.uploads.retained_model, key)
+                        models[key] = model
+                        groups.setdefault(model, []).append(key)
+                    except (OSError, ValueError, sqlite3.Error):
+                        grouped_all = False
+                        progress.emit("retrying", reason="original_upload_inventory_incomplete")
+                    progress.advance(1)
+            retired = (
+                await self.retirement.poll_once(groups, generation)
+                if grouped_all
+                else self.retirement.blocked_inventory(groups)
+            )
         with TransferProgress(
             "legacy_model_remote_reconciliation", len(keys), report, unit="requests"
         ) as progress:
+            reconciled_models = set()
             for key in keys:
                 try:
-                    request = await run_owned_thread(self._remote_request, key)
+                    model = models.get(key)
+                    if model is not None and model in reconciled_models:
+                        # The native poll below handles one representative per
+                        # model too. HTTP retries still verify their exact
+                        # request at the request boundary.
+                        progress.advance(1, restored=True)
+                        continue
+                    request = await run_owned_thread(
+                        partial(self._remote_request, key, model=model)
+                    )
                     if request is not None:
-                        await self.status(key)
+                        owner = self._payload_owner(request)
+                        if digest(request) in owner.verified:
+                            await run_owned_thread(owner.require_owned_payload, request)
+                        else:
+                            await owner.ensure_owned(request)
+                    if model is not None:
+                        reconciled_models.add(model)
                     progress.advance(1)
                 except (OSError, ValueError, sqlite3.Error):
                     # Missing/damaged storage retains a pending model in the
                     # native poll below. Do not turn a failed check into a
                     # success, and continue independent models in this cycle.
                     progress.emit("retrying", reason="remote_model_storage_repair_required")
-            return await run_owned_thread(
+            result = await run_owned_thread(
                 partial(
-                    self.uploads.poll_once, remote_payloads=self, remote_review=self._remote_review
+                    self.uploads.poll_once,
+                    remote_payloads=self,
+                    remote_review=self._remote_review,
+                    report=report,
                 )
             )
+        if retired is not None:
+            result["local_retirement"] = retired
+        return result
 
     async def put_chunk(
         self, chunk: ModelUploadChunk, signature: Signature, data: bytes

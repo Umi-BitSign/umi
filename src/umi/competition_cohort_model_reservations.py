@@ -5,20 +5,27 @@ The small derived state index is checked against immutable transition records;
 missing or damaged accounting is an explicit repair, never free capacity.
 
 This module does not authorize remote adoption, consumer release, or deletion.
-Its release transitions are private integration ports for a future qualified
-consumer-release owner. No configured runtime currently invokes those ports.
+Its private release transitions are used by the configured native upload-retirement
+owner only while holding remote ownership and every consumer/transfer lease.
 The full two-copy charge survives qualification, preparation and partial unlink.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
+from typing import Annotated, Literal
+
+from pydantic import Field
 
 from .competition_artifacts import _directory
 from .competition_transport_verification import TransferProgress
+from .competition_upload_record_versions import UploadRecordRepairRequired, UploadRecordVersions
+from .competition_verification_reuse import VerificationReuse, metadata_completion
 from .open_competition import ModelBundle, digest
+from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 _SCHEMA = {
     "model_allocation_identity": (
@@ -43,6 +50,12 @@ class ModelAllocationRepairRequired(OSError):
     """Allocation metadata must be repaired before any local write or refund."""
 
 
+class _VerifiedAllocation(StrictProtocolModel):
+    schema_: Literal["umi-cohort-model-allocation/1"] = Field(alias="schema")
+    model_sha256: Hex32
+    reserved_bytes: Annotated[int, Field(ge=0, le=2**53 - 1)]
+
+
 def _allocation(bundle):
     return {
         "schema": _VERSION,
@@ -52,13 +65,23 @@ def _allocation(bundle):
 
 
 class ModelReservationLedger:
-    def __init__(self, journal, *, report=None):
+    def __init__(self, journal, *, report=None, repair_bundle_verification=False, versions=None):
+        if type(repair_bundle_verification) is not bool:
+            raise ValueError("allocation verification repair requires an explicit boolean")
         self.journal, self.report = journal, report
+        self._repair_bundle_verification = repair_bundle_verification
+        self._verification_repairs = 0
+        with journal.read_transaction() as db:
+            binding = json.loads(bytes(db.execute("SELECT body FROM binding").fetchone()[0]))
+        if binding.get("schema") != "umi-cohort-model-delivery/1":
+            raise ValueError("model allocations require the native upload journal")
+        self.versions = versions or UploadRecordVersions(journal, binding, report=report)
         with journal.locked():
             with journal.read_transaction() as db:
-                binding = json.loads(bytes(db.execute("SELECT body FROM binding").fetchone()[0]))
-                if binding.get("schema") != "umi-cohort-model-delivery/1":
-                    raise ValueError("model allocations require the native upload journal")
+                self._bundle_verification = VerificationReuse(
+                    journal.root / "model-allocation-verification",
+                    owner={"schema": "umi-model-allocation-bundle-facts/1", "binding": binding},
+                )
                 self.archive = Path(binding["archive"])
                 self.files = journal.root.parent / "files"
                 names = {
@@ -87,8 +110,7 @@ class ModelReservationLedger:
             ) as progress:
                 records = []
                 for model in models:
-                    bundle = self._bundle(model)
-                    records.append(("model_allocation", model, _allocation(bundle)))
+                    records.append(("model_allocation", model, self._original_allocation(model)))
                     progress.advance(1)
 
                 def initialize(db):
@@ -120,14 +142,91 @@ class ModelReservationLedger:
         if rows != [(1, _VERSION)]:
             self._repair("model allocation version requires repair")
 
-    def _bundle(self, model, db=None):
+    def _original_allocation(self, model, db=None):
+        if db is None:
+            with self.journal.read_transaction() as db:
+                return self._original_allocation(model, db)
+
+        def validate(raw):
+            if _VerifiedAllocation.model_validate_json(raw).model_sha256 != model:
+                raise ValueError("model allocation verification binding requires repair")
+
+        try:
+            raw, repaired = self.versions.result(
+                "bundle",
+                model,
+                "umi-model-allocation-bundle-facts/1",
+                lambda snapshot: canonical_json_bytes(
+                    self._checked_original_allocation(model, snapshot)
+                ).decode(),
+                db=db,
+                validate=validate,
+                repair=self._repair_bundle_verification,
+                report=self.report,
+            )
+            value = _VerifiedAllocation.model_validate_json(raw)
+            if value.model_sha256 != model:
+                self._repair("model allocation verification binding requires repair")
+            self._verification_repairs += int(repaired)
+            return value.model_dump(mode="json", by_alias=True)
+        except UploadRecordRepairRequired as error:
+            self._repair(str(error))
+
+    def _checked_original_allocation(self, model, db=None):
+        """Reuse static bundle validation; fresh accounting/fences stay in _state.
+
+        Every lookup reads the current native canonical row and conflict fence.
+        Its exact byte identity, bound owner and verifier ABI scope the receipt.
+        No model payload files are read and no release authority is cached.
+        """
         raw = self.journal.get_raw("bundle", model, db=db)
         if raw is None:
             self._repair("model allocation lost its original bundle")
-        bundle = ModelBundle.model_validate_json(raw)
-        if digest(bundle) != model:
-            self._repair("model allocation original bundle changed")
-        return bundle
+        reuse = self._bundle_verification
+        key = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "owner": reuse.owner,
+                    "runtime": reuse.runtime,
+                    "profile": "umi-model-allocation-bundle-facts/1",
+                    "model_sha256": model,
+                    "canonical_bundle_sha256": hashlib.sha256(raw).hexdigest(),
+                }
+            )
+        ).hexdigest()
+        with reuse.exclusive():
+            path = reuse.directory / (key + ".json")
+            existed = os.path.lexists(path) or metadata_completion(path).exists()
+            receipt = reuse.load(key)
+            if receipt is not None:
+                try:
+                    value = _VerifiedAllocation.model_validate_json(receipt.result_json)
+                except ValueError:
+                    self._repair("model allocation verification result requires repair")
+                if receipt.dependencies or value.model_sha256 != model:
+                    self._repair("model allocation verification binding requires repair")
+                return value.model_dump(mode="json", by_alias=True)
+            if existed and not self._repair_bundle_verification:
+                self._repair("completed model allocation verification requires repair")
+            with TransferProgress(
+                "model_allocation_bundle_verification_repair"
+                if existed
+                else "model_allocation_bundle_verification",
+                1,
+                self.report,
+                unit="models",
+                planning_unit_seconds=(0.01, 2.0),
+            ) as progress:
+                bundle = ModelBundle.model_validate_json(raw)
+                original = _allocation(bundle)
+                if original["model_sha256"] != model:
+                    self._repair("model allocation original bundle changed")
+                # Checkpoint each successful original independently. Interrupted
+                # initial scans retain earlier work for the next startup/retry.
+                reuse.remember(key, (), canonical_json_bytes(original).decode())
+                self._verification_repairs += int(existed)
+                progress.advance(1)
+            return original
 
     def _state(self, model, db):
         self._schema(db)
@@ -136,8 +235,7 @@ class ModelReservationLedger:
         ).fetchone()
         if row is None or row[0] not in _KINDS:
             self._repair("model allocation state requires repair")
-        bundle = self._bundle(model, db)
-        original = _allocation(bundle)
+        original = self._original_allocation(model, db)
         if self.journal.get("model_allocation", model, db=db) != original:
             self._repair("model allocation reservation requires repair")
         phases = list(_KINDS)
@@ -192,7 +290,7 @@ class ModelReservationLedger:
                 "active_reserved_bytes": reserved,
                 "released_reserved_bytes": released,
                 "states": counts,
-                "archive_release_authority": "not_configured",
+                "archive_release_authority": "separate_native_consumer_leases_required",
             }
 
     def reservation_record(self, bundle):
@@ -215,8 +313,8 @@ class ModelReservationLedger:
     def _transition(self, model, phase, *, evidence):
         """Private accounting port; evidence pins do not issue deletion authority.
 
-        Its future owner must hold the upload journal, model transfer and complete
-        consumer-release leases. There is deliberately no configured caller yet.
+        The configured retirement owner holds the upload journal, model transfer
+        and complete consumer-release leases. This port alone grants no release.
         """
         with self.journal.read_transaction() as db:
             before, prior, _ = self._state(model, db)
@@ -281,6 +379,17 @@ class ModelReservationLedger:
             "released",
             evidence={"archive": str(archive), "staging": str(staging), "payload_absent": True},
         )
+
+
+def repair_model_allocation_verification(journal, *, report=None):
+    """Explicitly restore only damaged derived bundle-verification receipts.
+
+    The constructor's owned snapshot verifies original allocations and all
+    current transitions. Successful unaffected bundle receipts remain reusable;
+    no signed record, capacity charge, release state or journal is replaced.
+    """
+    ledger = ModelReservationLedger(journal, report=report, repair_bundle_verification=True)
+    return {"status": "completed", "verification_receipts_repaired": ledger._verification_repairs}
 
 
 def repair_model_allocation_index(journal, *, report=None):

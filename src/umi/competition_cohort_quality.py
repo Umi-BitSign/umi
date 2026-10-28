@@ -168,6 +168,7 @@ def quality_totals(
     policy: CompetitionPolicy,
     *,
     incumbent: bool = False,
+    paired_baseline_metric: bool = False,
 ) -> QualityTotals:
     if any(o.status == "infrastructure_failure" for o in observations):
         raise ValueError("infrastructure observations have no quality total")
@@ -178,7 +179,13 @@ def quality_totals(
         )
         for o in observations
     )
-    values = quality_from_hypotheses(hypotheses, suite, policy, incumbent=incumbent)
+    values = quality_from_hypotheses(
+        hypotheses,
+        suite,
+        policy,
+        incumbent=incumbent,
+        paired_baseline_metric=paired_baseline_metric,
+    )
     return QualityTotals(
         strata=tuple(
             StratumQuality(stratum=k, quality=exact_quality(values[k])) for k in sorted(values)
@@ -349,7 +356,7 @@ class ClosedQualityReview:
                     candidate_basis=basis,
                     reason=reason,
                     candidate=quality_totals(
-                        candidate, self.suite, self.policy, incumbent=paired_metric
+                        candidate, self.suite, self.policy, paired_baseline_metric=paired_metric
                     )
                     if reason is None
                     else None,

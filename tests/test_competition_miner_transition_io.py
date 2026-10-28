@@ -41,6 +41,23 @@ def inventory(root):
     }
 
 
+def test_python_310_sqlite_value_bound_rejects_oversized_row(tmp_path):
+    class LegacyConnection(sqlite3.Connection):
+        setlimit = None
+
+    path = tmp_path / "legacy.sqlite3"
+    db = sqlite3.connect(path, factory=LegacyConnection)
+    try:
+        db.execute("CREATE TABLE retained(body BLOB NOT NULL)")
+        db.execute("INSERT INTO retained VALUES (?)", (b"a" * 17,))
+        io._bound_sqlite_values(db, 16)
+        with pytest.raises(io.TransitionPreflightRefused, match="value_exceeds_selected_bound"):
+            db.execute("SELECT body FROM retained").fetchone()
+        assert db.execute("SELECT LENGTH(body) FROM retained").fetchone()[0] == 17
+    finally:
+        db.close()
+
+
 @pytest.mark.parametrize("mode", ["DELETE", "WAL"])
 def test_stopped_database_reads_without_mutation_or_new_sidecars(tmp_path, mode):
     path, lock = database(tmp_path / "owner", mode)
@@ -243,7 +260,10 @@ def test_enrollment_inventory_repeated_then_added_removed_or_replaced(tmp_path):
     added = io.directory_inventory(directory, maximum_entries=3)
     assert added != before and added[1] == ("claim.json", "participation.json")
     (directory / "participation.json").unlink()
-    assert io.directory_inventory(directory, maximum_entries=3) != before
+    # Adding and removing another file can restore the original names and,
+    # on fast filesystems, the same directory timestamp. The separate file
+    # identity check protects each retained enrollment artifact.
+    assert io.directory_inventory(directory, maximum_entries=3)[1] == before[1]
     directory.rename(tmp_path / "old-enrollment")
     directory.mkdir()
     private_file(directory / "claim.json")

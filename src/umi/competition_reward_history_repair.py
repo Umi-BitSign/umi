@@ -256,6 +256,7 @@ async def _run_owned_history_repair(
                     verification_profile=config.service.history_verification,
                     archive=imported,
                     export_archive=exported,
+                    shutdown_event=stop,
                     # The explicit owner repair command may reconstruct damaged
                     # length/count metadata before restoring native verdicts.
                     # Healthy counters are reused, including on repeat repair.

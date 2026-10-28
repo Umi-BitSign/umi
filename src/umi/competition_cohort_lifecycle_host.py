@@ -20,6 +20,7 @@ from pydantic import Field, field_validator, model_serializer, model_validator
 
 from .competition_client import validate_intake_origin
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
+from .competition_cohort_execution_progress import ExecutionExportProgress
 from .competition_cohort_intake import CohortIntakePublisher
 from .competition_cohort_intake_phase import CohortIntakePhaseObserver
 from .competition_cohort_lifecycle import CohortLifecycleService, CohortPhaseDriver
@@ -31,7 +32,9 @@ from .competition_cohort_phase_vote_http import PhaseVotePeer
 from .competition_cohort_preparation import PreparedCohortRound
 from .competition_cohort_preparation_phase import NativePreparationProgressSource
 from .competition_cohort_preparation_publisher import CohortPreparationPublisher
+from .competition_cohort_producer_epoch import ExecutionProducerEpochs
 from .competition_cohort_progress_signer import CertifiedPhaseObserver
+from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
 from .competition_cohort_readiness import LiveIntakePhaseObserver
 from .competition_cohort_reference_preflight import preflight_service_references
 from .competition_cohort_request_export import RequestReviewExporter
@@ -46,15 +49,19 @@ from .competition_cohort_settlement_boot import settlement_store
 from .competition_cohort_settlement_config import SettlementOriginalSources
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
+from .competition_cohort_suite_adoption_candidate import (
+    EvaluationSuiteAdoptionCandidates,
+    validate_suite_adoption_candidates,
+)
 from .competition_execution import execution_boundary
-from .competition_forecast import ForecastCapacityRequired, ForecastLedger
+from .competition_forecast import ForecastAttempt, ForecastCapacityRequired, ForecastLedger
 from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
 from .competition_remote_proof_store import ProofArchiveStores
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread, wait_for_owned
 from .host_memory_request_bounds import bounded_stage_declarations, check_stage_json, stage_count
 from .host_memory_runtime import authorize_memory, requests_stage_policy
-from .open_competition import digest
+from .open_competition import digest, identity
 from .policy import ScoringPolicy, scoring_policy_hash
 from .private_files import Directory, publish_private_model, read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -83,6 +90,8 @@ class LifecycleHostConfig(StrictProtocolModel):
     automatic_progression_hold_cohorts: tuple[Hex32, ...] = ()
     model_delivery_operator_token_file: Directory | None = None
     model_delivery_adoption_candidates: ModelDeliveryAdoptionCandidates = ()
+    evaluation_suite_operator_token_file: Directory | None = None
+    evaluation_suite_adoption_candidates: EvaluationSuiteAdoptionCandidates = ()
 
     @model_serializer(mode="wrap")
     def preserve_legacy(self, handler):
@@ -99,6 +108,10 @@ class LifecycleHostConfig(StrictProtocolModel):
             value.pop("model_delivery_operator_token_file", None)
         if not self.model_delivery_adoption_candidates:
             value.pop("model_delivery_adoption_candidates", None)
+        if self.evaluation_suite_operator_token_file is None:
+            value.pop("evaluation_suite_operator_token_file", None)
+        if not self.evaluation_suite_adoption_candidates:
+            value.pop("evaluation_suite_adoption_candidates", None)
         return value
 
     @model_validator(mode="after")
@@ -121,11 +134,21 @@ class LifecycleHostConfig(StrictProtocolModel):
                     for p in (
                         self.request_tail_operator_token_file,
                         self.model_delivery_operator_token_file,
+                        self.evaluation_suite_operator_token_file,
                     )
                     if p is not None
                 ),
             ),
         )
+        validate_suite_adoption_candidates(
+            self.evaluation_suite_adoption_candidates,
+            (entry.cohort_sha256 for entry in self.sources.intake.cohorts),
+        )
+        if (
+            self.evaluation_suite_adoption_candidates
+            and self.evaluation_suite_operator_token_file is None
+        ):
+            raise ValueError("suite adoption requires a separate operator credential")
         holds = self.automatic_progression_hold_cohorts
         allowed = {entry.cohort_sha256 for entry in self.sources.intake.cohorts}
         if len(holds) != len(set(holds)) or not set(holds) <= allowed:
@@ -144,6 +167,16 @@ class LifecycleHostConfig(StrictProtocolModel):
                         c.source for c in self.model_delivery_adoption_candidates
                     )
                     if include_shared
+                    else ()
+                ),
+                *(
+                    dict.fromkeys(
+                        p for c in self.evaluation_suite_adoption_candidates for p in c.stores()
+                    )
+                ),
+                *(
+                    (self.evaluation_suite_operator_token_file,)
+                    if self.evaluation_suite_operator_token_file is not None
                     else ()
                 ),
                 self.directory,
@@ -168,9 +201,12 @@ class LifecycleHostConfig(StrictProtocolModel):
 
 
 class LifecycleHost:
-    def __init__(self, service: ServiceAdmissionHost, resources, client, credentials, sign):
+    def __init__(
+        self, service: ServiceAdmissionHost, resources, client, credentials, sign, epoch_client=None
+    ):
         self.service, self.resources, self.client = service, resources, client
         self.model_delivery_candidates = {}
+        self.evaluation_suite_candidates = {}
         self.model_delivery_serial = asyncio.Lock()
         self.config = LifecycleHostConfig.model_validate_json(
             canonical_json_bytes(service.config.lifecycle)
@@ -178,8 +214,15 @@ class LifecycleHost:
         c, owner = self.config, service.config.admission_owner
         if owner is None or service.provider is None:
             raise ValueError("cohort lifecycle requires the owned admission runtime")
-        if c.model_delivery_adoption_candidates and owner.phase_review_budget is None:
-            raise ValueError("model delivery adoption requires a selected full phase review budget")
+        if any(
+            identity(c.verification_owner_hotkey) != identity(owner.owner_hotkey)
+            for c in c.evaluation_suite_adoption_candidates
+        ):
+            raise ValueError("suite verification must belong to the selected admission owner")
+        if (
+            c.model_delivery_adoption_candidates or c.evaluation_suite_adoption_candidates
+        ) and owner.phase_review_budget is None:
+            raise ValueError("policy adoption requires a selected full phase review budget")
         if (
             c.sources.intake != service.intake.config
             or c.sources.eligible_tracks != service.intake.tracks
@@ -224,6 +267,10 @@ class LifecycleHost:
         self.stores, self.nodes, self.requests = {}, {}, {}
         self.last_reports = {}
         self.request_opening_clocks = {}
+        self.execution_progress = {}
+        self.producer_epochs = ExecutionProducerEpochs(
+            client if epoch_client is None else epoch_client, owner.reviewers, credentials
+        )
         # A request export can replay every retained service observation and
         # object in a cohort. Use the same operational budget as the configured
         # reviewers instead of cancelling that replay after a fixed 30 seconds.
@@ -286,7 +333,10 @@ class LifecycleHost:
     async def _preparation(self):
         source = NativePreparationProgressSource(self.service.preparation)
         publisher = CohortPreparationPublisher(
-            self.service.preparation, self.provider, Path(self.config.sources.round_directory)
+            self.service.preparation,
+            self.provider,
+            Path(self.config.sources.round_directory),
+            objects=SettlementEvidenceFiles(Path(self.config.sources.objects_directory)),
         )
         return CohortPhaseDriver(
             CertifiedPhaseObserver(source.sample, self._peers("preparation"), self.policy),
@@ -527,6 +577,145 @@ class LifecycleHost:
         return node
 
     async def run(self, stop):
+        async def execution_progress_loop():
+            # Export metadata is sampled independently of long native lifecycle
+            # observations and outside intake/admission database leases. Public
+            # polling never calls this sampler or touches its files.
+            while not stop.is_set():
+                for cohort, source in tuple(self.requests.items()):
+                    meter = self.execution_progress.get(cohort)
+                    if meter is None:
+                        meter = ExecutionExportProgress(self.files.root, source.roster)
+                        self.execution_progress[cohort] = meter
+                    if not meter.selected:
+                        continue
+                    observer = getattr(self, "producer_epochs", None)
+                    epochs = (
+                        {} if observer is None else await observer.sample(meter.required_producers)
+                    )
+                    result = await run_owned_thread(partial(meter.sample, producer_epochs=epochs))
+                    if (
+                        self.forecast_ledger is not None
+                        and not meter.forecast_closed
+                        and (not result["repair_required"] or meter.forecast is not None)
+                    ):
+                        try:
+                            epoch = result.get("rate_epoch_sha256")
+                            if (
+                                meter.forecast is not None
+                                and epoch is not None
+                                and epoch != meter.forecast_epoch
+                            ):
+                                meter.forecast.observe(
+                                    dict(
+                                        result,
+                                        state="interrupted",
+                                        eta_seconds=None,
+                                        eta_basis="execution_producer_epoch_changed_or_unavailable",
+                                        observed_unix_ms=time.time_ns() // 1_000_000,
+                                        eta_samples=0,
+                                        eta_ignored_fast_samples=0,
+                                        eta_assumption="",
+                                    )
+                                )
+                                meter.forecast = None
+                            if meter.forecast is None:
+                                meter.forecast = ForecastAttempt(
+                                    self.forecast_ledger,
+                                    dict(
+                                        cohort_sha256=cohort,
+                                        work_sha256=meter.round,
+                                        operation="model_execution_exports",
+                                    ),
+                                    "model_evaluation",
+                                    "selected_models",
+                                    {},
+                                )
+                                meter.forecast_epoch = epoch
+                            meter.forecast.observe(
+                                dict(
+                                    result,
+                                    state="interrupted"
+                                    if result["repair_required"]
+                                    else result["status"],
+                                    observed_unix_ms=time.time_ns() // 1_000_000,
+                                    eta_samples=result.get("rate_completed_models", 0),
+                                    eta_ignored_fast_samples=0,
+                                    eta_assumption="; ".join(result.get("eta_assumptions", [])),
+                                    forecast_rate_semantics="completed_exports_current_producer_epoch/1",
+                                    forecast_rate_epoch_sha256=epoch
+                                    if epoch is not None
+                                    else meter.forecast_epoch,
+                                )
+                            )
+                            if result["repair_required"]:
+                                meter.forecast = None
+                            elif result["status"] == "completed":
+                                meter.forecast_closed = True
+                        except Exception as error:
+                            # Forecast accounting is advisory and must not stop
+                            # evaluation or turn unknown counts into completion.
+                            result.update(
+                                eta_seconds=None, eta_basis="forecast_accounting_requires_repair"
+                            )
+                            logger.warning(
+                                "cohort_execution_forecast cohort=%s error_type=%s",
+                                cohort,
+                                type(error).__name__,
+                            )
+                    if observer is not None:
+                        result.update(observer.diagnostics(meter.required_producers))
+                        work = getattr(observer, "work", None)
+                        if work is not None:
+                            try:
+                                workers = await work.sample(
+                                    cohort, meter.required_producers, epochs
+                                )
+                                PUBLIC_COHORT_PROGRESS.record(
+                                    "execution_workers",
+                                    dict(
+                                        cohort_sha256=cohort,
+                                        stage="evaluator_work",
+                                        scope="cached_native_evaluator_stages_not_confirmed_exports_or_rewards",
+                                        workers=workers,
+                                    ),
+                                )
+                            except Exception as error:
+                                logger.warning(
+                                    "cohort_evaluator_work_unavailable cohort=%s error_type=%s",
+                                    cohort,
+                                    type(error).__name__,
+                                )
+                    PUBLIC_COHORT_PROGRESS.record("execution", result)
+                    logger.info(
+                        "cohort_execution_progress %s", canonical_json_bytes(result).decode()
+                    )
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=min(30, self.config.poll_seconds))
+
+        async def settlement_progress_loop():
+            from .competition_cohort_settlement_progress import PHASES
+
+            while not stop.is_set():
+                observer = getattr(self, "producer_epochs", None)
+                for cohort, node in tuple(getattr(self, "nodes", {}).items()):
+                    if getattr(node, "phase", None) not in PHASES or not hasattr(
+                        observer, "settlement"
+                    ):
+                        continue
+                    try:
+                        epochs = await observer.sample(tuple(observer.peers))
+                        body = await observer.settlement.sample(
+                            cohort, epochs, series=digest(self.service.config.series)
+                        )
+                    except Exception:
+                        # A diagnostic transport must not stop native lifecycle
+                        # or freshen its previous successful owner observation.
+                        continue
+                    PUBLIC_COHORT_PROGRESS.record("settlement", body)
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=15)
+
         async def cohort_loop(cohort):
             if cohort in self.config.automatic_progression_hold_cohorts:
                 # Do not construct a controller, publish history, sample, seal,
@@ -536,6 +725,7 @@ class LifecycleHost:
                 while not stop.is_set():
                     result = {
                         "status": "automatic_progression_held",
+                        "stage": "automatic_progression_held",
                         "cohort_sha256": cohort,
                         "completed": 0,
                         "total": 1,
@@ -546,6 +736,7 @@ class LifecycleHost:
                         "signed_state_changed": False,
                     }
                     self.last_reports[cohort] = result
+                    PUBLIC_COHORT_PROGRESS.record("lifecycle", result)
                     logger.info("cohort_lifecycle_hold %s", canonical_json_bytes(result).decode())
                     with suppress(asyncio.TimeoutError):
                         await asyncio.wait_for(stop.wait(), timeout=self.config.poll_seconds)
@@ -584,6 +775,8 @@ class LifecycleHost:
             for p in self.service.config.series.cohorts
             if stage is None or digest(p) == stage.cohort_sha256
         ]
+        tasks.append(asyncio.create_task(execution_progress_loop()))
+        tasks.append(asyncio.create_task(settlement_progress_loop()))
         try:
             await asyncio.gather(*tasks)
         finally:

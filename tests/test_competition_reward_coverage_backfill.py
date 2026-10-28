@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from umi import competition_reward_coordinator_cli, competition_supervisor_cli
-from umi.competition_reward_coverage_collector import RewardCoverageCollector
+from umi.competition_reward_coverage_collector import RewardCoverageCollector, _log_retry
 from umi.competition_reward_coverage_intervals import (
     CoveragePoint,
     _issue_retained_coverage,
@@ -19,6 +19,7 @@ from umi.competition_reward_coverage_source import (
 )
 from umi.competition_reward_opportunity import opportunity_rule
 from umi.open_competition import digest, identity
+from umi.r2_evidence import R2EvidenceHTTPError
 
 from .test_competition_reward_opportunity import chain as chain
 from .test_competition_reward_opportunity import chain_config as chain_config
@@ -132,6 +133,23 @@ async def test_new_head_checks_precede_gap_capture_and_never_credit_the_jump(lan
         assert right.block == left.block + 1
 
 
+async def test_successor_boundary_caps_fresh_and_backfill_after_head_advances(lanes):
+    h = lanes
+    h.state.head = 106
+    owner, _ = h.owner()
+    await owner.step()
+    owner.limit_through_block(110)
+    h.state.calls.clear()
+    h.state.head = 132
+    for _ in range(8):
+        await owner.step()
+    assert h.state.calls
+    assert all(block <= 110 for _, block in h.state.calls)
+    assert any(block == 110 for _, block in h.state.calls)
+    with pytest.raises(ValueError, match="boundary changed"):
+        owner.limit_through_block(111)
+
+
 @pytest.mark.parametrize("failure", ["pending", "lost_ack"])
 async def test_failed_gap_block_is_retried_after_new_fresh_checks(lanes, monkeypatch, failure):
     h = lanes
@@ -155,6 +173,8 @@ async def test_failed_gap_block_is_retried_after_new_fresh_checks(lanes, monkeyp
         monkeypatch.setattr(journal, "credit", lost_ack)
     result = await owner.step()
     assert result.errors and not result.immediate
+    if failure == "lost_ack":
+        assert not owner._retained_inventory_drained
     assert owner._backfill_next[hotkey] == 100
     assert coverage_point(owner._backfill_left[hotkey], h.rule).block == 99
     h.state.head = 132
@@ -175,16 +195,92 @@ async def test_restart_replays_intervals_and_recovers_the_missing_lane_boundary(
     assert retained
     restarted, fresh = h.owner()
     assert not any(v for _, v in await restarted._totals())
-    for _ in range(8):
+    expected = {k: 21 * 12_000 for k in h.validators}
+    for _ in range(32):
         await restarted.step()
+        if dict(await restarted._totals()) == expected:
+            break
     # All adjacent intervals in 99..120, including 116->117 between lanes.
-    assert dict(await restarted._totals()) == {k: 21 * 12_000 for k in h.validators}
+    assert dict(await restarted._totals()) == expected
     assert len(await fresh.interval_keys()) == 21 * len(h.validators)
     before = await restarted._totals()
     for _ in range(3):
         await restarted.step()
     assert await restarted._totals() == before
     assert h.state.replays
+
+
+async def test_completed_retained_scan_is_not_repeated_after_new_owned_credit(lanes, monkeypatch):
+    h = lanes
+    owner, journal = h.owner()
+    await owner.step()
+    assert owner._retained_inventory_drained
+    before = len(await journal.interval_keys())
+    assert before
+
+    async def repeated_inventory(*, after=None, limit=256):
+        pytest.fail("completed retained interval inventory was scanned again")
+
+    monkeypatch.setattr(journal, "interval_keys", repeated_inventory)
+    h.state.head = 132
+    await owner.step()
+    assert len(journal.journal.keys("coverage_interval")) > before
+
+
+async def test_failed_retained_scan_retries_before_marking_it_complete(lanes, monkeypatch):
+    h = lanes
+    first, _ = h.owner()
+    await first.step()
+    restarted, _ = h.owner(maximum_replay_intervals=64)
+    replay = restarted.source.replay
+    fail_once = True
+
+    async def interrupted(key):
+        nonlocal fail_once
+        if fail_once:
+            fail_once = False
+            raise OSError("interrupted retained endpoint read")
+        return await replay(key)
+
+    monkeypatch.setattr(restarted.source, "replay", interrupted)
+    assert (await restarted.step()).errors
+    assert not restarted._retained_inventory_drained
+    assert not (await restarted.step()).errors
+    assert restarted._retained_inventory_drained
+
+
+async def test_failed_full_retained_page_prevents_later_clean_drain(lanes, monkeypatch, caplog):
+    h = lanes
+    first, journal = h.owner()
+    await first.step()
+    keys = await journal.interval_keys(limit=4096)
+    assert len(keys) > 2
+    first_interval = await journal.retained_interval(keys[0])
+    restarted, _ = h.owner(maximum_replay_intervals=1)
+    replay = restarted.source.replay
+    fail_once = True
+
+    async def interrupted(key):
+        nonlocal fail_once
+        if fail_once and key == first_interval.left:
+            fail_once = False
+            raise OSError("interrupted retained endpoint read")
+        return await replay(key)
+
+    monkeypatch.setattr(restarted.source, "replay", interrupted)
+    with caplog.at_level("INFO"):
+        assert (await restarted.step()).errors
+    assert any(
+        "coverage_retained_inventory_progress" in record.message
+        and "withdrawn_retrying" in record.message
+        for record in caplog.records
+    )
+    for _ in keys:
+        await restarted.step()
+    assert not restarted._retained_inventory_drained
+    assert restarted._cursor is None
+    await restarted.step()
+    assert keys[0] in restarted._replayed
 
 
 async def test_backfill_progress_withdraws_eta_on_retry_and_separates_credit(lanes, caplog):
@@ -256,6 +352,22 @@ async def test_actual_cli_reports_failed_gap_without_exception_secrets(
     assert coverage_point(owner._backfill_left[hotkey], h.rule).block == 99
 
 
+@pytest.mark.parametrize("status", [429, 503])
+def test_coverage_retry_logs_bounded_r2_http_status_without_response_data(caplog, status):
+    try:
+        raise R2EvidenceHTTPError(status)
+    except R2EvidenceHTTPError as error:
+        with caplog.at_level("INFO", logger="umi.competition_reward_coverage_collector"):
+            _log_retry(error, phase="replay", operation="restore_and_credit_interval")
+    report = [
+        record.args for record in caplog.records if record.msg == "coverage_retry %s"
+    ]
+    assert len(report) == 1
+    assert report[0]["r2_http_status"] == status
+    assert report[0]["reason_codes"] == ["r2_http_failure"]
+    assert "secret" not in caplog.text.lower()
+
+
 async def test_source_capture_restores_exact_owned_history_before_attempting_rpc(monkeypatch):
     from umi.competition_reward_coverage_checkpoint import CoverageCheckpointRepairRequired
 
@@ -317,3 +429,59 @@ async def test_collection_failure_keeps_backoff_despite_discovery_progress(retry
 
     service._collect, service._discover = collection, discovery
     assert await service.step() is (not retrying)
+
+
+async def test_first_adoption_drains_successful_retained_page_before_moving_head(lanes):
+    h = lanes
+    original, _ = h.owner()
+    await original.step()
+    # These intervals have real journal credit but predate native credit facts:
+    # the fixture's private endpoint boundary supplies no checkpoint body.
+    restarted, fresh = h.owner(maximum_replay_intervals=2)
+    h.state.calls.clear()
+    result = await restarted.step()
+    assert result.immediate and not result.errors
+    assert len(h.state.replays) == 4
+    assert not h.state.calls  # No fresh moving-head/history work between pages.
+    assert sum(dict(result.credited_ms).values()) == 24_000
+    assert len(await fresh.interval_keys()) > 2
+    await restarted.step()
+    assert len(h.state.replays) == 8
+    assert not h.state.calls
+
+
+async def test_retained_page_drain_does_not_discover_new_moving_head():
+    from umi.competition_reward_coverage_service import (
+        StandingRewardCoverageService,
+        _CollectionOutcome,
+    )
+
+    service = object.__new__(StandingRewardCoverageService)
+    service._lock = asyncio.Lock()
+
+    async def collection():
+        return _CollectionOutcome(immediate=True, retrying=False, retained_page=True)
+
+    async def discovery():
+        pytest.fail("bounded retained drain must not start fresh discovery")
+
+    service._collect, service._discover = collection, discovery
+    assert await service.step()
+
+
+async def test_mixed_activation_full_inventory_page_still_drains_before_fresh_capture(lanes):
+    h = lanes
+    original, journal = h.owner()
+    await original.step()
+    keys = await journal.interval_keys()
+    first = await journal.retained_interval(keys[0])
+    foreign = first.model_copy(
+        update={"activation_sha256": "f" * 64, "left": "d" * 64, "right": "e" * 64}
+    )
+    journal.journal.put("coverage_interval", foreign.key(), foreign)
+    restarted, _ = h.owner(maximum_replay_intervals=len(keys) + 1)
+    h.state.calls.clear()
+    result = await restarted.step()
+    assert result.retained_page and result.immediate and not result.errors
+    assert not h.state.calls
+    assert len(h.state.replays) == 2 * len(keys)

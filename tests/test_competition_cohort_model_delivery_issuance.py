@@ -23,6 +23,7 @@ from umi.competition_cohort_intake import history_tip
 from umi.competition_cohort_legacy_model_selection import LegacyModelStorageSourceConfig
 from umi.competition_cohort_lifecycle import PHASES, CohortLifecycleService
 from umi.competition_cohort_model_delivery_api import (
+    PREPARE_RESERVED_PATH,
     ROOT,
     ModelDeliveryAdoptionCommit,
     ModelDeliveryAdoptionOwner,
@@ -47,7 +48,7 @@ from umi.competition_cohort_model_delivery_reservation import (
 )
 from umi.competition_cohort_model_upload import CohortModelUploads, ModelUploadConfig
 from umi.competition_cohort_progress_signer import CohortProgressSigner, CohortProgressSignerConfig
-from umi.competition_cohort_recovery import ModelDeliveryProfile
+from umi.competition_cohort_recovery import ModelDeliveryProfile, admit_recoverable_cohort
 from umi.competition_cohort_recovery_store import CohortRecoveryStore
 from umi.competition_cohort_request_rule import prepare_request_tail_adoption_at_block
 from umi.competition_reward_decisions import StandingRewardSeries
@@ -64,9 +65,10 @@ from .test_competition_cohort_legacy_model_storage import legacy_scenario as leg
 from .test_competition_cohort_legacy_model_storage import policy as policy
 from .test_competition_cohort_legacy_model_storage import prepared as prepared
 from .test_competition_cohort_legacy_model_storage import receipt_scenario as receipt_scenario
-from .test_competition_cohort_legacy_model_storage import recovery as recovery
+from .test_competition_cohort_legacy_model_storage import recovery as legacy_recovery
 from .test_competition_cohort_legacy_model_storage import runtime as runtime
 from .test_competition_cohort_model_acceptance import certify
+from .test_competition_cohort_recovery import signatures
 from .test_competition_cohort_request_rule_api import post
 from .test_open_competition import wallet
 
@@ -77,7 +79,31 @@ pytestmark = [
 
 
 @pytest.fixture
-def issuance(case, tmp_path, request):
+def model_only(request):
+    return getattr(request, "param", False)
+
+
+@pytest.fixture
+def recovery(policy, request, model_only):
+    plan, authority, state = legacy_recovery.__wrapped__(policy, request)
+    if not model_only:
+        return plan, authority, state
+    plan = plan.model_copy(
+        update={
+            "schema_": "umi-recoverable-cohort-plan/2",
+            "sequence": 7,
+            "eligible_tracks": ("endpoint", "model"),
+            "service_pool_bps": 5000,
+        }
+    )
+    body = authority.authority.model_copy(update={"cohort_sha256s": (digest(plan),)})
+    authority = authority.__class__(authority=body, signatures=signatures(body))
+    _, state = admit_recoverable_cohort(plan, authority, policy, admitted_at_block=160)
+    return plan, authority, state
+
+
+@pytest.fixture
+def issuance(case, tmp_path, request, model_only):
     c = case
     prefix = getattr(request, "param", "")
     if prefix:
@@ -128,6 +154,7 @@ def issuance(case, tmp_path, request):
         r2_credentials_file=str(tmp_path / "unused-credentials"),
         r2_bucket=remote.signer.bucket,
         verification_directory=str(tmp_path / "byte-receipts"),
+        model_only=model_only,
     )
     candidate = ModelDeliveryAdoptionCandidate(config, c.policy, multipart=remote)
     uploads = CohortModelUploads(
@@ -395,6 +422,59 @@ async def test_normal_owner_routes_review_quorum_commit_and_repeat(owner_api, tm
         assert i.case.cohort in a.host.config.automatic_progression_hold_cohorts
 
 
+@pytest.mark.parametrize("model_only", [True], indirect=True)
+async def test_model_only_owner_routes_quorum_commit_preserve_hold_and_original_plan(
+    owner_api, tmp_path
+):
+    original = canonical_json_bytes(owner_api.i.case.history.plan)
+    await test_normal_owner_routes_review_quorum_commit_and_repeat(owner_api, tmp_path)
+    history = owner_api.i.case.owner.intake.history(owner_api.i.case.cohort)
+    assert canonical_json_bytes(history.plan) == original
+    adoption = history.transitions[-1].transition.model_delivery_adoption
+    assert adoption.schema_ == "umi-cohort-model-delivery-adoption/2"
+    assert adoption.eligible_tracks == ("model",) and adoption.service_pool_bps == 0
+
+
+@pytest.mark.parametrize("model_only", [True], indirect=True)
+async def test_catalog_follows_signed_model_only_profile(owner_api, tmp_path):
+    from umi.competition_cohort_api import cohort_routes
+
+    await test_normal_owner_routes_review_quorum_commit_and_repeat(owner_api, tmp_path)
+    intake = owner_api.i.case.owner.intake
+
+    async def capture():
+        raise AssertionError("catalog discovery must not request fresh chain state")
+
+    app = FastAPI()
+    app.include_router(cohort_routes(intake, capture, maximum_body_bytes=4 * 1024**2))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+        response = await client.get("http://test/v1/competition/cohorts")
+    assert response.status_code == 200, response.text
+    entry = next(
+        item
+        for item in response.json()["cohorts"]
+        if item["cohort_sha256"] == owner_api.i.case.cohort
+    )
+    assert entry["effective_eligible_tracks"] == ["model"]
+    assert entry["effective_service_pool_bps"] == 0
+    assert entry["profile_source"] == "signed_model_delivery_adoption"
+
+
+@pytest.mark.parametrize("model_only", [True, False], indirect=True)
+def test_independent_candidate_rejects_unselected_reward_profile(issuance):
+    i = issuance
+    assert i.candidate.authenticate(i.case.history, i.transition).legacy == i.case.legacy
+    other = ModelDeliveryAdoptionCandidate(
+        i.config.model_copy(update={"model_only": not i.config.model_only}),
+        i.case.policy,
+        multipart=i.remote,
+    )
+    with pytest.raises(ValueError, match="cohort reward profile"):
+        other.authenticate(i.case.history, i.transition)
+    if not i.config.model_only:
+        assert "model_only" not in i.config.model_dump(by_alias=True)
+
+
 async def test_explicit_held_owner_initialization_does_not_tick(owner_api):
     a, i = owner_api, owner_api.i
     calls = []
@@ -437,6 +517,190 @@ async def test_challenge_proof_requires_dual_reservation_and_refuses_replay(owne
     reader._verify(raw, request, i.case.history)
     with pytest.raises(ValueError, match="challenge"):
         reader._verify(raw, request.model_copy(update={"challenge": "13" * 32}), i.case.history)
+
+
+async def test_held_reservation_proof_reopens_owner_once_after_restart(owner_api):
+    a, i = owner_api, owner_api.i
+    census(i, reserve=True)
+    a.store.reserve_exact(i.transition)
+    a.host.nodes.clear()
+    calls = []
+
+    async def reopen(cohort):
+        calls.append(cohort)
+        await asyncio.sleep(0)
+        assert a.store.status(cohort)[1] == i.transition
+        assert i.case.owner.intake.pending_policy_adoption(cohort) == i.transition
+        a.host.nodes[cohort] = a.node
+        return a.node
+
+    a.host.node = reopen
+    requests = tuple(
+        ModelDeliveryReservationRequest(
+            schema="umi-model-delivery-reservation-request/1",
+            transition=i.transition,
+            challenge=value * 32,
+        )
+        for value in ("12", "13")
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=a.app), base_url="https://owner.example"
+    ) as client:
+        responses = await asyncio.gather(
+            *(post(client, ROOT + "/reservation", request, "h" * 32) for request in requests)
+        )
+    reader = ModelDeliveryReservationReader(
+        None, "https://owner.example", token="h" * 32, owner=wallet("Charlie").hotkey.ss58_address
+    )
+    for request, response in zip(requests, responses, strict=True):
+        assert response.status_code == 200
+        reader._verify(response.content, request, i.case.history)
+    assert calls == [i.case.cohort]
+    assert a.host.config.automatic_progression_hold_cohorts == (i.case.cohort,)
+    assert a.store.status(i.case.cohort)[1] == i.transition
+
+
+async def test_reservation_proof_cannot_open_unheld_missing_owner(owner_api):
+    a, i = owner_api, owner_api.i
+    a.host.nodes.clear()
+    a.host.config.automatic_progression_hold_cohorts = ()
+    request = ModelDeliveryReservationRequest(
+        schema="umi-model-delivery-reservation-request/1",
+        transition=i.transition,
+        challenge="12" * 32,
+    )
+    with pytest.raises(OSError, match="awaits existing lifecycle owner"):
+        await ModelDeliveryReservationExporter(a.host).respond(request)
+
+
+async def test_exact_pending_reserve_reuses_completed_remote_work(owner_api, monkeypatch):
+    a, i = owner_api, owner_api.i
+    census(i, reserve=True)
+    a.store.reserve_exact(i.transition)
+
+    async def forbidden(*_):
+        pytest.fail("saved exact reservation repeated completed remote model checks")
+
+    monkeypatch.setattr(i.candidate, "verify", forbidden)
+    proposal = ModelDeliveryAdoptionProposal(
+        schema="umi-model-delivery-adoption-proposal/1",
+        series_sha256=digest(a.series),
+        transition=i.transition,
+    )
+    raw = await ModelDeliveryAdoptionOwner(a.host, "reserve").respond(proposal)
+    assert raw == canonical_json_bytes(proposal)
+    assert a.store.status(i.case.cohort)[1] == i.transition
+    assert i.case.owner.intake.pending_policy_adoption(i.case.cohort) == i.transition
+    assert a.host.config.automatic_progression_hold_cohorts == (i.case.cohort,)
+
+
+def prepare_request(a):
+    return ModelDeliveryAdoptionPrepare(
+        schema="umi-model-delivery-adoption-prepare/1",
+        series_sha256=digest(a.series),
+        cohort_sha256=a.i.case.cohort,
+        predecessor_sha256=history_tip(a.i.case.history),
+    )
+
+
+@pytest.mark.parametrize("model_only", [True, False], indirect=True)
+async def test_prepare_reserved_reviews_once_and_recovers_exact_response_after_restart(
+    owner_api, monkeypatch, caplog
+):
+    caplog.set_level("INFO", logger="umi.competition.progress")
+    a, i = owner_api, owner_api.i
+    request = prepare_request(a)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=a.app), base_url="https://owner.example"
+    ) as client:
+        assert (
+            await post(client, PREPARE_RESERVED_PATH, request, token="h" * 32)
+        ).status_code == 401
+        response = await post(client, PREPARE_RESERVED_PATH, request)
+        assert response.status_code == 200, response.text
+        proposal = ModelDeliveryAdoptionProposal.model_validate_json(response.content)
+        assert a.store.status(i.case.cohort)[1] == proposal.transition
+        assert i.case.owner.intake.pending_policy_adoption(i.case.cohort) == proposal.transition
+        assert i.remote.heads and i.remote.reads
+        assert '"stage":"adoption_preparation_owned_finality"' in caplog.text
+        assert '"stage":"adoption_reservation_owned_finality"' in caplog.text
+
+        async def forbidden(*args, **kwargs):
+            pytest.fail("atomic preparation repeated completed remote verification")
+
+        monkeypatch.setattr(i.remote, "head", forbidden)
+        monkeypatch.setattr(i.remote, "read_range", forbidden)
+        # Older reservation callers still reconcile the exact pending proposal.
+        assert (await post(client, ROOT + "/reserve", proposal)).content == response.content
+        a.host.nodes.clear()
+        a.host.model_delivery_candidates.clear()
+        a.host.model_delivery_candidates[i.case.cohort] = ModelDeliveryAdoptionCandidate(
+            i.config, i.case.policy, multipart=i.remote
+        )
+
+        async def reopen(cohort):
+            a.host.nodes[cohort] = a.node
+            return a.node
+
+        a.host.node = reopen
+        repeat = await post(client, PREPARE_RESERVED_PATH, request)
+        assert repeat.status_code == 200 and repeat.content == response.content
+    assert a.host.config.automatic_progression_hold_cohorts == (i.case.cohort,)
+    assert a.node.controller._history()[0] == i.case.history
+
+
+async def test_prepare_reserved_recovers_intake_fence_after_control_reservation_failure(
+    owner_api, monkeypatch
+):
+    a, i = owner_api, owner_api.i
+    request = prepare_request(a)
+    original = a.store.reserve_exact
+
+    def fail(transition):
+        raise OSError("simulated control-owner interruption")
+
+    monkeypatch.setattr(a.store, "reserve_exact", fail)
+    with pytest.raises(OSError, match="control-owner interruption"):
+        await ModelDeliveryAdoptionOwner(a.host, "prepare-reserved").respond(request)
+    pending = i.case.owner.intake.pending_policy_adoption(i.case.cohort)
+    assert pending is not None and a.store.status(i.case.cohort)[1] is None
+    reads, heads = tuple(i.remote.reads), tuple(i.remote.heads)
+    monkeypatch.setattr(a.store, "reserve_exact", original)
+    raw = await ModelDeliveryAdoptionOwner(a.host, "prepare-reserved").respond(request)
+    assert ModelDeliveryAdoptionProposal.model_validate_json(raw).transition == pending
+    assert tuple(i.remote.reads) == reads and tuple(i.remote.heads) == heads
+    assert a.store.status(i.case.cohort)[1] == pending
+
+
+async def test_prepare_reserved_fresh_finality_refusal_leaves_both_owners_unreserved(owner_api):
+    a, i = owner_api, owner_api.i
+    blocks = iter((221, 220))
+
+    async def current():
+        return next(blocks)
+
+    a.host.provider.current_finalized_block = current
+    with pytest.raises(ValueError, match="finality regressed"):
+        await ModelDeliveryAdoptionOwner(a.host, "prepare-reserved").respond(prepare_request(a))
+    assert a.store.status(i.case.cohort)[1] is None
+    assert i.case.owner.intake.pending_policy_adoption(i.case.cohort) is None
+
+
+async def test_prepare_reserved_repeat_refuses_changed_private_candidate(owner_api):
+    a, i = owner_api, owner_api.i
+    request = prepare_request(a)
+    await ModelDeliveryAdoptionOwner(a.host, "prepare-reserved").respond(request)
+    pending = a.store.status(i.case.cohort)[1]
+    other = i.config.model_copy(
+        update={"delivery": i.config.delivery.model_copy(update={"part_size_bytes": 10 * 1024**2})}
+    )
+    a.host.model_delivery_candidates[i.case.cohort] = ModelDeliveryAdoptionCandidate(
+        other, i.case.policy, multipart=i.remote
+    )
+    with pytest.raises(ValueError, match="conflicts with pending control"):
+        await ModelDeliveryAdoptionOwner(a.host, "prepare-reserved").respond(request)
+    assert a.store.status(i.case.cohort)[1] == pending
+    assert i.case.owner.intake.pending_policy_adoption(i.case.cohort) == pending
 
 
 def replace_candidate_inventory(i, legacy):

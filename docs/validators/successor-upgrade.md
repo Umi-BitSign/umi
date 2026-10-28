@@ -783,6 +783,14 @@ when SIGTERM or SIGINT sets their stop event, including during initial history
 replay. The current owned operation and cleanup finish before process ownership
 is released; shutdown need not finish the remaining replay batch. This does not
 add a forced termination deadline or permit a replacement writer to overlap.
+The coordinator, reviewer, writer and explicit history repair pass that same stop
+event into both current and predecessor history readers. Serial capture and
+parallel native workers finish already owned proof/checkpoint operations, then
+stop admitting blocks, exports and source-replication batches. Durable successful
+checkpoints remain reusable on restart. History diagnostics withdraw the full
+interval forecast during shutdown and report drainage separately; a drained
+reader does not imply a completed history interval. Signing and submission keep
+their existing ownership shield.
 
 For an existing isolated history preparation whose operational allowance is
 too small, use `python -m umi.competition_reward_history_preparation_capacity_cli`.
@@ -893,6 +901,28 @@ installing the exact successor approval that names the retained predecessor
 approval digest; an empty host or a newly added validator cannot claim
 predecessor authority.
 
+New supported reward-runtime selections use eligibility profile
+`umi-reward-eligibility-runtime/3`, with
+`runtime_binding: native_finalized_executed_code/1` and
+`epoch_semantics: umi-yuma-eligibility/1`. The native provider discovers code and
+executes metadata from the finalized `:code` proof. Runtime release numbers and
+an expanding code allowlist do not gate this profile. Each eligibility endpoint
+still proves its complete typed inputs and Yuma consensus mode at the same root;
+missing proofs, unsupported storage or another consensus mode refuse collection.
+This declares the UMI eligibility predicate; it does not claim that every future
+upstream epoch implementation is identical. Current and retained-proof consumers
+use the same boundary, with the actual code bound through their native chain
+evidence. A changed code identity never relabels already completed evidence.
+
+Profile1/2 readers remain necessary while retained signed inputs and native proofs
+name those exact historical bindings. Preserve their original bytes and accepted
+grammar. Upgrade the writer, coordinator and reviewer readers before selecting
+profile3; an older reader refuses the unsupported profile before execution.
+Publishing source alone does not select it. Use the preserving authenticated
+adoption and installed-host upgrade paths below; keep journals, original clocks
+and completed verification in place. Model participation/history schemas and the
+public reference-row follower protocol do not change with this profile.
+
 Standing runtime compatibility uses the optional `runtime_adoptions` selection
 in writer, coordinator and reviewer configurations. Keep `eligibility`, the
 signed series, manifest, policy, reward allocation and clocks unchanged. Each
@@ -929,22 +959,57 @@ the existing supported boot, authenticates the additive selection and reports
 three counted checks before returning a candidate. It does not write a control,
 stop a service, change a capacity approval or authorize a transaction.
 
-Authorization and code qualification remain separate. New profile version 2
+For retained profile version 2, authorization and code qualification remain separate. It
 requires an explicitly qualified runtime code/source pair and a native proof of
 `SubnetEpochConsensus(78)` at every endpoint's exact state root. Only proved Yuma
 is supported; an absent value uses that runtime's proved metadata default.
 Unknown code, Null or malformed consensus state refuses with an explicit reason.
 A release or source label alone does not establish runtime equivalence. The
-qualified `/2` profiles cover exact runtime479/f4786f and runtime481/6a9726
+qualified `/2` profiles cover exact runtime479/f4786f, runtime481/6a9726 and runtime483/b335b5
 code/source pairs; their artifact and predicate scopes are recorded in
 `tests/fixtures/reward-eligibility/runtime479-qualification.json` and
-`tests/fixtures/reward-eligibility/runtime481-qualification.json`. Runtime481's
+`tests/fixtures/reward-eligibility/runtime481-qualification.json`, with runtime483's
+explicit upstream-trust basis in
+`tests/fixtures/reward-eligibility/runtime483-qualification.json`. Runtime483 was
+selected on the operator's acceptance of OTF upstream attribution without an
+independent reproducible build; no independent deployed-source/build match is
+claimed. Exact native code, same-root state and consensus proofs remain mandatory.
+Runtime481's
 emission split changes are outside the unchanged Yuma eligibility predicate;
 this qualification makes no general emission-equivalence claim. Code drift
 refuses current capture and archive review with
 `reward_eligibility_runtime_code_mismatch`; coverage retry logs include only the
 expected and proved code hashes, never provider credentials. Select an
 independently qualified, authenticated profile before retrying that work.
+
+Coverage head discovery checks the already-proved code against the selected
+profile before starting fresh history catch-up. A mismatch stays pending under
+the collector's normal retry loop and leaves completed evidence intact. Supported
+authenticated adoption is still required; discovery cannot approve a new hash.
+
+History checkpoint restoration reuses successful native block checks and reads
+receipt metadata without proof payloads. Each reference validation checks its
+completion, original receipt and producer damage hold in one fresh read-only
+transaction; an independent consumer also checks its own damage hold. These
+connections are not retained across references, finality checks or restarts.
+Missing or changed receipt metadata still requires explicit repair. Receipt
+connection counts and metadata-only timing are not a full recovery ETA.
+
+An independent rebuild is optional when the operator explicitly accepts upstream
+runtime attribution; it is not a mandatory delay for every runtime upgrade. Keep
+that trust basis distinct from independently demonstrated build correspondence.
+When an independent rebuild is required, the manual `Successor host
+recovery checks` workflow accepts an exact `runtime_source_sha`, the independently
+proved `runtime_code_sha256`, and `runtime_spec_version`. That selection runs
+only the isolated source-build job on a disposable hosted runner, with read-only
+repository access and no production credentials. It reproduces the pinned
+upstream srtool production build and retains actual Wasm, source/build digest,
+logs and a comparison result. The source commit, package, compiler, profile,
+spec version and actual bytes must all match. A matching rebuild establishes
+source/build correspondence only; predicate qualification, authenticated profile
+adoption and native same-root verification remain separate gates. Empty runtime
+inputs preserve the workflow's ordinary recovery checks. Build progress includes
+explicit phase planning ranges; it is not a reward activation estimate.
 
 Choose the first adopted block no later than the earliest endpoint still needed
 by the collector, using retained native runtime evidence for that range. Finding
@@ -958,6 +1023,53 @@ Coverage logs separate credited deltas from finite retained-interval replay,
 recent capture and historical-gap capture as `coverage_credit_progress`.
 Restored credit is not a sustainable fresh-capture rate. Do not extrapolate its
 combined delta as an overall opportunity or successor activation ETA.
+
+The existing coverage owner also reports retained interval/endpoint counts from
+its maintained counters before replay starts. These inventory counts include all
+activations in that owner and grant no credit. Each progress report separates
+remaining milliseconds and minimum full adjacent intervals needed for the signed
+opportunity from the potentially much larger historical endpoint gap. The scoped
+opportunity forecast uses this collector's measured credited progress including
+waits, assumes a comparable remaining work mix, and withdraws on retries, stalls
+or insufficient samples. It excludes successor activation and host rollout.
+
+Initial adoption restores every exact retained endpoint verdict, source identity,
+native historical boundary and runtime selection. Identical completed model
+dependency groups refresh once while their private metadata identities remain
+unchanged. Unrelated receipt-directory or qualification-ledger writes currently
+invalidate that conservative shared check and cause another native dependency
+refresh; this is not a permanent check-once guarantee across unrelated appends.
+Successful full retained pages drain cooperatively before selecting a new moving
+head, including mixed-activation inventory pages. Collection stops at the signed
+minimum; it does not require filling the whole historical gap first.
+
+Successful native interval credits persist under the original owner, exact
+endpoint verdicts and mutation-fenced history/proof generations. Restarts and
+independent certificate review can reuse them after current authority, shared
+dependencies and each original historical boundary restore. Imported interval
+hints cannot seed these facts. Ordinary appends and qualified exact source
+externalization preserve completed credit; changed/lost generations, verdicts or
+completion records require explicit repair rather than silent rechecking.
+
+After restoring affected original endpoint/transport metadata, stop the selected
+coordinator/reviewer owner and use its existing config for one scoped repair:
+`python -m umi.competition_reward_coordinator_cli repair-credit --config CONFIG
+--history predecessor --interval INTERVAL_SHA256 --reason REASON`.
+Use `--history current` for that config's current series. The command takes the
+original exclusive owner lease, restores both exact native endpoints and their
+interval arithmetic, records the repair reason and preserves the original
+interval/proofs. It loads no signer and performs no autonomous collection or
+publication. A missing permanent completion owner must be recovered in place;
+this command cannot invent one. Repeat repair is idempotent.
+
+For an installed writer, stop its supervisor and use the existing root-approved
+supervisor configuration with `python -m umi.competition_supervisor_cli --config
+SUPERVISOR_CONFIG --repair-credit --history predecessor --interval
+INTERVAL_SHA256 --reason REASON`. The route authenticates the installed anchor
+and original standing configuration and holds the startup lease throughout the
+same native repair. It does not construct or start a writer, executor or signer.
+Both repair commands refuse an active owner; never bypass its lease or change
+the configured state path to make repair proceed.
 
 A native weight rate-limit refusal emits `standing_weight_rate_limit` progress
 with remaining blocks, elapsed time and an explicitly assumed block-time range.
@@ -1072,6 +1184,16 @@ without compatible original-owner checkpoints must replay the proofs. Restoring
 unchanged successful checkpoints does not reread the original proof payloads and
 does not turn those local results into portable proof authority.
 
+History and coverage restoration check remote receipt metadata in batches of at
+most 256 source references. Each batch opens fresh read-only snapshots of the
+receipt owner and any independent consumer damage holds, after the source
+snapshot. Schema and owner checks are shared within that batch; every reference
+still checks its original completion and damage status. These snapshots close
+before finality refresh and are reopened for subsequent rechecks. No payload
+read, remote availability probe, signed-format migration or verdict expiration
+is introduced. This applies to both coordinator and validator readers and their
+supported host updates; it does not require a public miner-client format change.
+
 Each retained history frame reads its chunk references and proof objects through
 one native query-only database snapshot. It does not reserve the writer slot or
 open a connection per object. The next frame load takes a fresh snapshot and
@@ -1089,6 +1211,21 @@ canonical alias reader and the current R2 receipt check. After owned tip finalit
 a fresh snapshot rechecks every dependency before history effects apply in order.
 This changes neither journal formats nor the verifier ABI; supported retained
 checkpoints keep their original signed bytes, owner and clock bindings.
+
+For an unchanged original-owner checkpoint, the native reader carries its
+validated historical tip directly into the owned provider. This private,
+in-process handoff is issued only after checking the original journal identity,
+compatible verifier semantics, source generations, conflict holds and any
+selected migration provenance. After restart it reads those compact results
+again, rather than importing or rehashing the historical header range. The
+provider still obtains a fresh owned finalized head, refuses a boundary ahead of
+that head and checks any original observer record available at the boundary.
+The history owner then rechecks all source dependencies before applying effects
+in order. `completed_tip_finality_refreshes` reports these successful handoffs;
+they never count as newly verified native blocks. Serialized checkpoint JSON,
+raw archives and untrusted header hints cannot select this path. They retain
+their ordinary ancestry and proof verification. No checkpoint migration, journal
+reset, signed-clock change or miner startup-schema change is required.
 
 For bounded retained ASCII JSON, canonicality checking uses the decoder's owned
 builtin values directly. Safe integers retain the exact RFC 8785 encoding;
@@ -1260,6 +1397,22 @@ preserved R2 object before reviewing or signing an activation and retains only
 its private receipt. Source schema 2 also requires benchmark materialization on
 a bounded filesystem whose device differs from every configured protected root;
 put that workspace on a dedicated mounted volume before starting the service.
+When a direct R2 cohort joins a standing series that already has completed
+legacy coverage checkpoints, retain those checkpoints and their original model
+verification mode. The selected signed model-delivery history identifies which
+cohorts require the direct verifier. A previously completed legacy checkpoint
+with `not_selected` model dependencies remains reusable for its original
+non-direct cohort; that mode cannot satisfy a direct R2 cohort's checkpoint.
+Do not restore every historical candidate into the local archive or repeat its
+completed model-byte checks solely to add a later cohort.
+
+For legacy local model cleanup, the intake owner first requires authenticated
+remote payload ownership for every original request and current release from
+every configured model consumer. It then fences the exact signed local archive
+tree and journals each unlink. An absent local archive verification receipt does
+not cause a second payload hash pass solely to delete those bytes; a present but
+mismatched receipt still requires explicit repair. Signed manifests, requests,
+admissions, journals and remote objects remain retained.
 
 Schema versions 3 and 4 are the standing-series successors of versions 1 and 2.
 They include the immediate predecessor series, opportunity manifest and
@@ -1571,15 +1724,21 @@ through the lifecycle's `request_start` argument before enabling dispatch. Its p
 from the qualified predecessor closure and the announced launch notice. The
 gate cannot infer a legacy closure from a current score or weight row.
 
-Later cohorts remain in preparation until the preceding cohort has a verified
-request-closing certificate and at least five hours have passed. The gate samples
-fresh verified chain time after reading that certificate, preserving its first
-observation in the journal. It adds the provider's maximum head age and subtracts
-its allowed future skew when checking elapsed time; delayed certification cannot
-backdate the rest to an old signing intent. Missing or revoked history, unavailable
-finality and regressed observations hold the next request phase. Retry, restart
-and a migration preserving this journal reuse the same boundary without renewal.
-This gate does not change current reward execution or its separate coverage rule.
+For C6 and subsequent cohorts, including successor series, select
+`rest_clock: "cohort_cutover"` in `request_start`. The lifecycle records each
+cohort's cutover during active intake, before artifact or preparation work.
+Requests require the preceding cohort's verified request-closing certificate and
+five hours from that cutover. The provider's head-age and future-skew margins
+still apply. Restart reuses the recorded boundary; preparation does not start a
+new interval. Already-preparing cohorts need a `cutover_overrides` entry binding
+the historical timestamp to its retained source SHA256. A missing observation
+holds with `waiting_cutover_observation` rather than inventing a later cutover.
+
+Older installations omitting `rest_clock` retain the certification-clock rule
+and its original journals for compatibility. Upgrade by selecting the cutover
+clock while preserving those journals and directory bindings. Missing or revoked
+predecessor history, unavailable finality and regressed observations still hold
+requests. This gate does not change reward execution or its separate coverage rule.
 
 The enclosing host owns process locks, finality lifetimes, admission and execution
 workers, readiness probes and authenticated reviewer delivery. Configure all
@@ -2297,13 +2456,34 @@ installation or replace the signed host transition.
 
 Dependency-preserving maintenance builds use `tools/build_successor_host.py`.
 It clones the selected signed dependency tree, checks the pinned source and
-unchanged dependency locks, and migrates both lifecycle launchers before sealing
+dependency locks, and migrates both lifecycle launchers before sealing
 the new manifest. Added `project.scripts` declarations are supported when all
 existing commands and every other parsed project field remain unchanged. They
 are recorded as `uninstalled_added_project_scripts`: the supervisor host installs
 only its two lifecycle launchers; new miner/operator commands use the ordinary
-package installation. Changes to dependencies, existing commands or other project
-metadata require a separate migration and refuse before creating a build tree.
+package installation. Changes to existing commands or other project metadata
+require a separate migration and refuse before creating a build tree.
+
+For a locked pure-Python dependency version update, supply one explicit
+`--dependency-wheel /ABSOLUTE/package-version-py3-none-any.whl` per changed
+package. The builder requires the exact wheel filename, size and SHA-256 in the
+target `uv.lock`. Both complete lockfiles must otherwise have identical resolution
+semantics, package membership, dependency edges and registry bindings. It verifies
+the original signed lock and package RECORD, the wheel's full RECORD inventory,
+metadata and bounded expansion. It rejects executable installation hooks, entry
+points, `.pth`, `.data`, symlinks, shared ownership layouts and nonportable wheels
+before creating a candidate. Other dependency changes need a separately supported
+build path; do not bypass the lock check or retain old CA roots under a new lock.
+
+Replacement touches only the unsigned candidate after its original dependency
+clone has passed signed-file verification. The old signed installation is never
+modified. Progress reports `locked_dependency_migration`; the unsigned build
+receipt lists exact old/new versions and wheel hashes. The candidate still needs
+native import, spawned-worker, artifact, restart and supported-platform
+qualification before signing and selection. Interrupted builds retain their
+candidate and refuse reuse of that output root; inspect the failure and use a
+fresh root, without resetting installed state or a completed native verification.
+
 `competition_host_entrypoints` renders isolated launchers with
 `if __name__ == "__main__"` so spawned history workers do not enter the supervisor
 or acquire its startup lease. The builder accepts the original unguarded wrapper
@@ -2848,6 +3028,35 @@ existing transport fallback. An invalid route configuration requires correction.
 Verify authenticated reads from the installed host and worker before claiming
 the operational switch is complete.
 
+For an operator-managed local RPC sidecar, a route destination may be exactly
+`ws://127.0.0.1:9955`, with `authorization_file` set to `null` when the local
+service requires no credential. This is the only plaintext route destination.
+Sources and external destinations retain their credential-free `wss://`
+requirement; other ports, `localhost`, alternate loopback addresses, paths,
+credentials, queries and fragments are refused. The route disables outbound
+proxy selection and does not follow redirects.
+
+Select that destination through the private operational route file, rather than
+changing `rpc_url` in a retained chain configuration. Keep its source URL, native
+finality/proof pins, signed inputs and clocks, state paths and existing independent
+fallbacks unchanged. A transport route does not establish validity: native
+finality and storage proofs still decide which responses are accepted. SDK unknown
+transaction outcomes retain their existing recovery rules; an endpoint change
+never authorizes resending an ambiguous extrinsic.
+
+Older released route readers reject this local destination before opening a
+socket. Qualify the candidate source reader and its verification manifest before
+selecting it, including repeat reads, restart and reopening retained native state.
+The same `umi-rpc-transport/1` file is read without migration or rewriting; rolling
+back the destination to the original secure source also preserves chain/cache
+bindings. Service upgrades must preserve the route environment and file binding.
+The managed endpoint service upgrader requires Linux/systemd; its macOS model-client
+installer does not constitute a launchd endpoint-service migration. A macOS
+endpoint deployment must separately qualify its installed source selection,
+service account, launchd environment and cooperative stop/restart before cutover.
+Do not use a user LaunchAgent to bypass the ownership of an existing system
+LaunchDaemon or start another miner against its journals.
+
 When all proof providers fail, the phase report retains each provider's index,
 request method and block hash, numeric JSON-RPC or HTTP error, and a bounded
 transport category such as `timeout` or `connection_closed`. Inspect every
@@ -2898,6 +3107,29 @@ signed transition. Historical finite bootstrap or policy expiry still applies
 if successor work is delayed; this is separate from the current no-sunset
 registration bridge.
 
+Native settlement publishes bounded advisory progress snapshots beneath each
+selected original execution directory, in `.settlement-progress/<series>/`.
+The corresponding reviewer's background worker reads those small files and its
+existing authenticated producer endpoint relays cached settlement diagnostics.
+Intake samples the relay after request handoff and serves its existing public
+progress cache. No new listener, credential, config field, journal conversion or
+public client upgrade is required. Select the qualified settlement, reviewer and
+intake maintenance sources together through their existing update paths before
+claiming this bridge is installed. Existing older reviewers return unavailable.
+Keep native producer timestamps and epochs unchanged during relay/restart; metadata
+alone never supplies a phase certificate, package validation or reward activation.
+Failure of this advisory bridge must not stop native work or release a future
+cohort hold. The small snapshots survive restart while their bounded process
+caches and rate estimates restart; missing/currently unavailable observations
+remain unknown and old observations become stale.
+
+Settlement publishes every history decision's original registration proof before
+making that history visible to peers, including when local signatures complete
+quorum without a peer request. Existing durable export receipts survive restart;
+completed proof payloads are not recaptured or replayed for delivery. Missing
+exports resume through the native owner before history publication, and explicit
+transport damage holds remain repair holds.
+
 Reviewer assignment reads reuse private parsed objects after static proof
 verification, with fresh retained-input and conflict checks on every read.
 The exact assignment is read in a short read-only snapshot; static verification
@@ -2919,10 +3151,19 @@ policy, cohort configuration, private journal identity and current process. The
 endpoint host keeps at most 2,048 successful selections within 512 MiB so that
 repeated sweeps can retain a cohort's working replacement ancestry. Eviction is
 still bounded and requires native verification on the next read. The cache
-returns private copies; changes, failed proofs, restart or fork
-require native verification again. Each replacement still reads and verifies its
-retained parent chain. Current execution and reward authority remain independently
-verified.
+returns private copies through its public readers. Internal phase, current-slot,
+response and retirement polls use owned read-only projections and defensively
+copy only their returned result, rather than the full assignment/job graph. Fresh
+selection and assignment bytes, conflict/index fences and replacement ancestry
+remain mandatory on every read; an absent receipt does not prove absence of work.
+The CLI's `assignment_reuse_capacity` diagnostics include `projections` alongside
+hits, misses and retained capacity. Changes, failed proofs, restart or fork require
+native verification again. Current execution and reward authority remain
+independently verified. Closed request history still denies new origin capture;
+this optimization does not admit late scoring or discard pending retirement.
+The change uses existing retained formats and the supported intake runtime
+maintenance selection above; miner grants, startup state and updater schemas are
+unchanged. Publishing source alone does not select it on a running reviewer.
 
 
 Canonical participation decoding additionally retains private decoded results for
@@ -2933,11 +3174,228 @@ result. This cache grants no registration, finality, admission or reward authori
 
 Retained model-upload requests similarly reuse successful static decoding and
 request-identity checks within a private, process-local 64 MiB / 256-entry cache.
-Every lookup reads the current canonical journal bytes and conflict fence first;
+Every lookup checks the current native mutation identity and conflict fence first;
 a removed, changed or held reservation cannot use an older result. Returned
 objects are private copies. Failures, evictions and inherited fork results require
 ordinary decoding. Admission, capacity, payload verification and current authority
 are checked separately and are not granted by this reuse.
+
+Upload polling first resolves a small durable request-to-model reference, then
+decodes one representative request per model. A duplicate request checks its
+current mutation identity and conflict fence without rereading the full row. Its first reference uses
+the complete native signature, bundle and request-identity checks; subsequent
+polls and restarts reuse the result bound to exact bytes, owner and verifier
+semantics. Existing byte-bound receipts are imported once into source-version
+receipts without repeating their successful native validation. The first import
+reads the signed metadata; it never reads model payloads. Missing or damaged
+completed references report `UploadReferenceRepairRequired`; with the poll owner
+drained, `CohortModelUploads.repair_retained_references(report=...)` restores only
+affected derived facts with counted progress and an ETA. It preserves signed
+requests, allocations, payload and review checks, and all admission authority.
+The legacy retry reconciler uses the same reference for its fresh local-allocation
+check, so requests still reserved locally need no full decoding on every sweep.
+Released allocations retain their complete request and current remote-authority
+checks before status, retry or polling can use remote storage.
+
+Round-journal retries of an identical retained reservation use a fresh read-only
+snapshot rather than taking SQLite's writer slot. The reader still checks the
+exact batch, current conflict holds, typed allowance columns, retained originals,
+schema fences and complete capacity totals, including changed local limits.
+Successful decoding of bounded canonical obligation bytes is reused within a
+32 MiB / 65,536-entry process cache; returned mappings remain private. Failed or
+changed bytes and new processes decode normally. Capacity and authority decisions
+are never cached. This preserves existing generation-0 and generation-2 journals,
+signed grants and miner/validator startup schemas without a storage migration.
+Select the qualified reviewer/settlement maintenance source through the existing
+update path; source publication alone does not establish installed adoption.
+SQLite failure reports include only a validated numeric code and known symbolic
+name alongside their reason, excluding exception text, SQL and private paths.
+
+Legacy reservation accounting keeps completed static bundle checks in the
+existing private verification-receipt store. The original owner, current native
+bundle mutation identity and verifier semantics select each result, including
+after restart. Allocation snapshots still read current conflict fences,
+accounting indexes and release transitions. Missing or damaged completed receipts
+require explicit repair through `repair_model_allocation_verification`; that
+operation restores only affected derived receipts from native original bundles,
+with progress and an ETA, and cannot change capacity charges or grant a release.
+Original upload records, signed artifacts and miner/validator wire formats are unchanged.
+
+Upload journal migration atomically adds a small source-version index and owner
+marker, with progress and an ETA. SQL triggers track insertion, same-length
+mutation, deletion, replacement and rekeying, including writes from older supported
+writers. Existing signed record bytes, bindings, journals and clocks stay in place.
+Missing or damaged version metadata requires restoration of the original metadata;
+never delete it to force a fresh check. The marker binds the original directory
+and database identity. Historical byte-bound receipts remain readable for rollback;
+they do not need to be polled after their source-version receipt is complete.
+This is an intake-owner optimization; miner clients keep the existing protocol.
+Select a qualified intake maintenance release through the supported cooperative
+update path before claiming it is active. It does not require restarting a
+progressing reviewer, history writer, coordinator, or miner.
+
+Legacy original metadata now retains a native verification result per selected
+baseline, incumbent or original participation. Intake, reviewer, settlement,
+coordinator and writer startup use persistent receipt directories under their
+existing role state. The same reader reuses these results during execution.
+Each result binds the signed inventory, original policy/history, adoption,
+provider namespace and native verifier ABI, plus every original's current owned
+file identity. Unchanged original files are neither reopened nor rehashed for
+reuse, including after restart; current authority, R2 byte verification and
+admission remain independent. A changed dependency verifies only the affected
+item. Receipt paths shard each cohort's items across 256 directories.
+Within a process, the exact authenticated frozen source object retains its
+context prefix, bounded to 512 source/namespace selections. Lookups do not
+serialize the whole policy/history/inventories again. New authenticated objects
+and changed namespaces construct their own context; current original-file
+identities remain fresh. The resulting receipt context bytes are unchanged, so
+this optimization reuses prior completed receipts without conversion or replay.
+An original whose upload is incomplete still has completed metadata verification;
+its separate pending-payload outcome does not mark verification interrupted.
+
+Existing installations migrate individual completed items on their first
+verification pass, checkpointing as they go. Interrupted marker publication can
+reuse the intact receipt. Missing or damaged completed receipts refuse reuse:
+an explicit native metadata repair calls `authenticate_legacy_model_sources`
+with the existing `original_verification_directory` and a nonempty
+`original_verification_repair_reason`; run it as the role's own account with its
+same selected sources, series, policy and authenticated delivery adoptions.
+Repair changes derived metadata only and must not run concurrently with that
+role's receipt migration. Normal startup never opts into this repair.
+
+The local `UMI_LEGACY_ORIGINAL_RECEIPT_MIN_FREE_BYTES` override reserves free
+filesystem bytes before receipt publication. Managed installations must set it
+to their selected operating/startup reserve; the compatibility default is zero
+additional reserved bytes. Individual receipts remain bounded independently.
+Retain these directories outside disposable model caches and include them in
+state restoration. Intake enables its progress logger before constructing the
+application, so initial metadata verification reports counts, elapsed time and
+ETA even before the HTTP listener opens. Logger state is restored on failure.
+Select the qualified source through each role's supported maintenance/update
+path before claiming adoption; a merged commit alone does not change a running
+service. Public miner and validator reward formats are unchanged.
+
+Automatic legacy payload retirement is selected through
+`recoverable_service.model_uploads.retirement`. Configure `consumers` with every
+policy evaluator's reviewer and settlement service: each entry has `kind`,
+`hotkey` and an owned `directory`. Each corresponding service selects that same
+directory in `model_storage_consumer`. Use separate directories, mode 2750 with
+a shared read-only service group when the intake and consumer accounts differ.
+The consumer holds process-lifetime leases and publishes a signed declaration of
+its authenticated R2 bindings. A stale declaration, missing consumer or changed
+selection blocks retirement. Keep these declarations and the retirement journal
+on durable storage, outside disposable model caches.
+
+Direct-upload polling reads each reservation's verification flag, reservation
+index/body and hold from one fresh native read transaction on an owned thread.
+The inventory and final metadata snapshot also run off the event loop. Completed
+uploads therefore need neither repeated per-field transaction/schema setup nor
+synchronous journal I/O in the async transport loop. Conflict fences are checked
+within every current snapshot; actual verification, admission, cleanup and signing
+keep their existing fresh authority checks. Select this intake maintenance source
+without changing signed profiles, state paths, journals or consumer declarations.
+
+The ordinary intake upload task groups existing source-version model references
+without rereading full original requests. It decodes only the selected retirement
+batch and retires at most `batch_models` (default 1) per pass. Retirement runs
+after the complete local inventory and before remote retry reconciliation or
+unrelated local-model polling; a slow released upload cannot hold eligible local
+bytes until the entire reconciliation pass finishes. Inventory preparation has
+its own counted progress and ETA. Remote retries reuse the resolved immutable
+model references while reading allocation state afresh after retirement. A failed
+inventory entry blocks deletion until repaired; a concurrent new original still
+invalidates the existing inventory-generation fence. It reuses completed
+R2 verification, protects models referenced by every closed cohort still using
+local storage, and refuses an open local intake. `protected_models` can preserve
+additional shared model dependencies. It fences local writes under the upload,
+archive and journal leases, records each unlink intent and completion durably,
+and resumes interrupted deletion after restart. It credits reservation capacity
+only after both payload directories are absent. Manifests, original signed
+requests, review evidence and journals remain. Missing or damaged completion
+records report repair; retirement does not initiate another model-byte pass.
+An upload absent from every authenticated remote preservation inventory waits
+with `preserved_model_selection_pending` before the owner decodes its original
+request or asks consumers for release. This includes incomplete legacy uploads;
+their original retry and expiry path remains responsible for them. Do not add a
+model to an inventory or remove its local bytes just to clear this status.
+Cached public progress exposes `storage_retirement`, with counted completion,
+retired allocated bytes, elapsed time, ETA basis and waiting status. The current
+model identity, operation and stable reason code identify consumer binding, remote
+byte completion, local verification and lease failures without publishing
+private exception text. Each new attempt clears an earlier waiting state. These are
+payload-unlink counts; concurrent filesystem use can change free space separately.
+
+Select the compatible source and private configuration together on intake,
+reviewers and settlement through the supported cooperative maintenance update.
+Before enabling retirement, confirm every selected consumer publishes its exact
+R2 binding. Miner HTTP retry schemas and public validator reward rows do not
+change: exact old requests use their preserved R2 delivery or their newer
+independently accepted continuation without recreating local payloads. Keep this
+reader on recovery and automatic-update selections after retirement; a rollback
+to a predecessor that requires removed local payloads is unsupported. A public
+miner or validator does not need these coordinator-local lease directories.
+
+Asynchronous chunked/direct model checks wait cooperatively when another native
+reader holds the exact byte-checkpoint mutex. Chunked materialization, byte export
+and shared files use the same wait path. A busy checkpoint reports `retrying`
+with reason `shared_byte_checkpoint_busy` and withdraws its ETA; acquisition
+reports `shared_byte_checkpoint_acquired`. The holder remains free to progress,
+and the waiter resumes the same operation using completed file checks. Cancellation
+releases only that operation's acquired leases. Unsafe metadata and other I/O
+errors still refuse; mutex waiting never grants admission, rights or release
+authority. Synchronous commit checks remain nonblocking. Select the qualified
+native owner/reviewer source through the existing cooperative maintenance update;
+no miner protocol change or new public client manifest is needed.
+
+Direct-upload polling records successful private review-file shape checks in its
+existing metadata journal. Unchanged owned file identities reuse those checks
+across polls and restart, without rereading documents on the event loop. Missing
+completed documents or receipts report repair; an identical restoration checks
+only the changed file identity. This receipt grants no rights approval, model
+acceptance, evaluation result or reward. Keep documents needed by active review
+consumers available. Remote retention and consumer-release evidence are required
+before evicting a local review file; the shape receipt alone does not authorize
+deletion.
+
+Intake logs `cohort_intake_wait` when an eligible sealing attempt still lacks
+model artifact acceptance. It identifies the first missing submission and the
+actual observation, compensated cutoff and readiness. `model_acceptance_stage`
+also reports `input_readiness`: a new proposal loads its required review input
+before model-byte work. With authenticated legacy R2 sources and an explicitly
+configured private standing review policy, a missing input is produced from
+completed native byte facts and bounded license/provenance reads. This path
+never restores a local model or starts another weight-verification pass. Missing
+completed byte facts require explicit repair. Malformed existing review inputs
+remain a repair condition and are never silently overwritten. Each independent
+reviewer uses its own configured standing policy and retains its own inputs;
+an owner's proposal supplies no private approval. An existing intent recovers from its retained original inputs
+without requiring the external review file; payload, native transport, quorum
+and publication checks still run before a new certificate is committed. It also
+reports each submission's retained lookup, payload, quorum, promotion,
+publication and export separately, before the batch finishes. Stage elapsed time
+and heartbeat diagnostics do not establish an end-to-end launch ETA. They carry
+only public digests and exception types, never private review documents or error
+messages. No miner or validator client flags or signed wire formats change.
+
+Declared zero-byte supporting files are included and hash-checked as empty
+documents. A bundle still needs at least one nonempty plain-text license and
+one nonempty plain-text provenance document. Legacy holds caused solely by the
+old zero-byte lower bound are reconsidered while their original records remain
+preserved. Oversize, encoding and substantive-document holds continue to apply.
+Successful reviews retain their original bytes across this upgrade.
+
+Each acceptance sweep checks up to 16 latest uncertified model entries per cohort.
+When more than one cohort has pending latest models, it processes one model from
+each and rotates the first cohort on the next sweep. This prevents hash ordering
+and large model batches from delaying all later cohorts. The ordinary cursor
+continues processing prior versions and export recovery, and resumes its normal
+batch when contention clears. Native signatures, indexes and current intake
+history are checked; sealing still verifies the complete inventory and current
+registration. Restart gives current candidates a turn immediately while retained
+admission blocks, completion ordinals and signed records remain intact.
+Direct R2 promotion copies independent parts in bounded waves of at most four,
+also capped by the signed delivery profile. The owner drains a failed wave before
+aborting the multipart upload and still verifies the new preserved object.
 
 Paid-service origin confirmation requires the surrounding registration capture
 to reach the collected origin proof's owned block. An age-valid shared capture
@@ -3137,3 +3595,18 @@ input files, identity records, result journals and signing journals remain
 mandatory for restart. These lifetime boundaries do not themselves prove an RSS
 limit; host admission must reserve active inventories across pending polls and
 account for all simultaneously selected cohorts and other consumers.
+
+
+Durable native history and coverage folds bind remote receipt enrollment epochs
+and mutation generations. The small owner migration preserves the existing
+completion ledger, original receipt bytes and native proof ABI; ordinary receipt
+appends keep the generation stable. Original receipt updates/deletes, damage and
+hold changes invalidate a bound fold even when their counts stay equal. Losing
+or reenrolling an already guarded component requires explicit metadata repair.
+Restore the exact original transport receipt first, then use the existing native
+checkpoint repair path: unchanged successful block results survive without proof
+replay, including bounded repair, restart and repeat execution. A legacy read-only
+producer without the component remains supported through per-reference metadata
+checks, with an explicit `waiting_for_receipt_owner_upgrade` status; it cannot
+supply a durable fast frontier until its owner has installed the component. New
+remote input dependencies receive one counted metadata adoption before reuse.

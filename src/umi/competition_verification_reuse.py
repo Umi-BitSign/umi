@@ -22,6 +22,7 @@ from pathlib import Path
 from threading import RLock
 from types import MappingProxyType
 from typing import Literal
+from weakref import WeakValueDictionary
 
 from pydantic import BaseModel, Field
 
@@ -41,6 +42,19 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 _LOG = logging.getLogger("umi.competition.progress")
 _CURRENT = ContextVar("competition_verification_reuse", default=None)
 _LOCKED = ContextVar("competition_verification_locked", default=())
+_LOCAL_LOCKS = WeakValueDictionary()
+_LOCAL_LOCKS_GUARD = RLock()
+
+
+def _directory_lock(directory):
+    details = directory.stat()
+    key = (os.getpid(), details.st_dev, details.st_ino)
+    with _LOCAL_LOCKS_GUARD:
+        lock = _LOCAL_LOCKS.get(key)
+        if lock is None:
+            lock = RLock()
+            _LOCAL_LOCKS[key] = lock
+    return key, lock
 
 
 class VerificationSourceChanged(ValueError):
@@ -153,7 +167,7 @@ class VerificationReuse:
         self.legacy_directory = directory if selected != directory and directory.is_dir() else None
         self.runtime = runtime_identity()
         self.pid = os.getpid()
-        self.lock = RLock()
+        self.lock_identity, self.lock = _directory_lock(selected)
 
     @contextmanager
     def selected(self):
@@ -166,11 +180,13 @@ class VerificationReuse:
     @contextmanager
     def exclusive(self):
         """One native first verification per owner across workers and processes."""
+        key = self.lock_identity
+        # Owned descendants inherit the outer verification scope. Checking it
+        # before the thread lock lets their already-owned work drain normally.
+        if key in _LOCKED.get():
+            yield
+            return
         with self.lock:
-            key = str(self.directory)
-            if key in _LOCKED.get():
-                yield
-                return
             try:
                 descriptor = lock_private_file(self.directory / ".verification.lock")
             except PrivateStateBusyError:
@@ -487,21 +503,35 @@ def verified_replay(stage, result_model):
     return decorate
 
 
+@contextmanager
+def _verification_owner_scope(owner):
+    with owner.verification_reuse.selected():
+        try:
+            yield
+        except VerificationSourceChanged:
+            _event("verification_snapshot", "repair_required")
+            if hasattr(owner, "_release_active_inputs"):
+                owner._release_active_inputs()
+            raise
+
+
 def verification_owner_operation(function):
-    """Async entry scope copied to owned native worker threads by asyncio."""
+    """Select the owner on async entries or synchronous owned worker calls."""
+    if inspect.iscoroutinefunction(function):
+
+        @wraps(function)
+        async def asynchronous(self, *args, **kwargs):
+            with _verification_owner_scope(self), work_heartbeats():
+                return await function(self, *args, **kwargs)
+
+        return asynchronous
 
     @wraps(function)
-    async def run(self, *args, **kwargs):
-        with self.verification_reuse.selected(), work_heartbeats():
-            try:
-                return await function(self, *args, **kwargs)
-            except VerificationSourceChanged:
-                _event("verification_snapshot", "repair_required")
-                if hasattr(self, "_release_active_inputs"):
-                    self._release_active_inputs()
-                raise
+    def synchronous(self, *args, **kwargs):
+        with _verification_owner_scope(self):
+            return function(self, *args, **kwargs)
 
-    return run
+    return synchronous
 
 
 class RetainedObjectInventory:

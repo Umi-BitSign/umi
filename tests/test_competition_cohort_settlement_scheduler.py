@@ -1,6 +1,8 @@
 """Real role leases and service APIs with tiny retained/native graph ports."""
 
 import asyncio
+import json
+import logging
 import threading
 import weakref
 from types import SimpleNamespace
@@ -15,6 +17,59 @@ from umi.competition_cohort_settlement_service import (
     SettlementSeriesScheduler,
 )
 from umi.concurrency import run_owned_thread
+
+
+async def test_history_is_visible_only_after_original_proofs_publish(monkeypatch, tmp_path):
+    from umi import competition_cohort_settlement_service as service
+
+    node = blank()
+    node.cohort = "c" * 64
+    node.config = SimpleNamespace(exchange_outbox=str(tmp_path))
+    decisions = {
+        key: SimpleNamespace(observation=observation)
+        for key, observation in (("first", "a" * 64), ("second", "b" * 64), ("same", "a" * 64))
+    }
+    history = SimpleNamespace(
+        transitions=tuple(
+            SimpleNamespace(
+                transition=SimpleNamespace(requires_progress_evidence=True, evidence_sha256=key)
+            )
+            for key in decisions
+        )
+    )
+    node._decisions = decisions.__getitem__
+    calls, visible = [], []
+    fail = [True]
+
+    async def ensure(observation):
+        calls.append(observation)
+        if observation == "b" * 64 and fail[0]:
+            fail[0] = False
+            raise OSError("original proof export interrupted")
+
+    node.proofs = SimpleNamespace(ensure_published=ensure)
+    monkeypatch.setattr(service, "digest", lambda value: value)
+    monkeypatch.setattr(service, "history_tip", lambda _: "d" * 64)
+    monkeypatch.setattr(service, "CohortOrderHistory", lambda **values: values)
+    monkeypatch.setattr(service, "publish_private_model", lambda *args, **kw: visible.append(args))
+    with pytest.raises(OSError, match="proof export interrupted"):
+        await node._publish_history(history)
+    assert calls == ["a" * 64, "b" * 64] and not visible
+    await node._publish_history(history)
+    assert calls == ["a" * 64, "b" * 64] * 2
+    assert len(visible) == 1 and visible[0][1]["history"] is history
+
+
+def retained_input_snapshot(node, path, package, monkeypatch):
+    """Represent the native first review required before compact maintenance."""
+    from umi import competition_cohort_settlement_service as service
+    from umi.competition_verification_snapshot import VerificationPackageStore
+
+    monkeypatch.setattr(service, "SettlementInputPackage", type(package))
+    node.verified_packages = VerificationPackageStore(path.parent / "verified-inputs")
+    node.verified_packages.load(
+        path, type(package), maximum_bytes=node.config.maximum_package_bytes
+    )
 
 
 async def replicas(provisioned, coordinator_done=0, reviewer_done=0):
@@ -139,6 +194,50 @@ async def test_missing_earlier_handoff_blocks_later_native_start(provisioned):
     assert ports.loaded == [("coordinator", 0)]
 
 
+async def test_explicit_holds_preserve_series_without_blocking_next_cohort(provisioned, caplog):
+    ports, roles, _ = await replicas(provisioned)
+    nodes = roles["coordinator"]
+    cohorts = tuple(node.cohort for node in nodes)
+    ports.handoffs[0] = False
+    holds = (cohorts[0], *cohorts[2:])
+    scheduler = SettlementSeriesScheduler(nodes, ordered_cohorts=cohorts, held_cohorts=holds)
+    with caplog.at_level(logging.INFO, logger="umi.competition_cohort_settlement_service"):
+        await scheduler.tick()
+    assert ports.loaded == [("coordinator", 1)]
+    assert tuple(node.cohort for node in scheduler.nodes) == cohorts
+    assert all(nodes[index] not in scheduler._completed for index in (0, 2, 3, 4, 5))
+    assert ports.outputs[0] is False
+    assert all(nodes[index].data is None for index in (0, 2, 3, 4, 5))
+    held_events = [
+        json.loads(r.message.partition(" ")[2])
+        for r in caplog.records
+        if r.message.startswith("settlement_progression_hold ")
+    ]
+    assert {event["cohort_sha256"] for event in held_events} == set(holds)
+    assert all(
+        event["eta_seconds"] is None
+        and event["completed"] == 0
+        and event["eta_basis"] == "awaiting_explicit_configuration_release"
+        for event in held_events
+    )
+
+
+async def test_holding_all_cohorts_does_not_load_or_certify_any_graph(provisioned):
+    ports, roles, _ = await replicas(provisioned)
+    nodes = roles["coordinator"]
+    cohorts = tuple(node.cohort for node in nodes)
+    scheduler = SettlementSeriesScheduler(nodes, ordered_cohorts=cohorts, held_cohorts=cohorts)
+    await scheduler.tick()
+    assert scheduler.active is None and not scheduler._completed
+    assert ports.loaded == [] and not any(ports.outputs)
+    with pytest.raises(ValueError, match="holds"):
+        SettlementSeriesScheduler(
+            nodes, ordered_cohorts=cohorts, held_cohorts=(cohorts[0], cohorts[0])
+        )
+    with pytest.raises(ValueError, match="holds"):
+        SettlementSeriesScheduler(nodes, ordered_cohorts=cohorts, held_cohorts=("f" * 64,))
+
+
 async def test_missing_generated_output_steps_back_and_releases_later_graph(provisioned):
     ports, roles, schedulers = await replicas(provisioned, coordinator_done=1)
     scheduler = schedulers["coordinator"]
@@ -250,11 +349,12 @@ async def test_original_input_snapshot_load_runs_off_loop():
     node.journal = SimpleNamespace(get=lambda *args: None)
     loop_thread = threading.get_ident()
 
-    def load(path, model, *, maximum_bytes):
+    def load(path, model, *, maximum_bytes, expected_sha256):
         assert path.name == node.cohort + ".json"
         assert str(path.parent) == node.config.inputs_directory
         assert model is service.SettlementInputPackage
         assert maximum_bytes == node.config.maximum_package_bytes
+        assert expected_sha256 is None
         assert threading.get_ident() != loop_thread
         raise OSError("stop after original snapshot load boundary")
 
@@ -331,13 +431,16 @@ async def test_output_digest_runs_off_loop_with_package_and_lease_owned(
 
 @pytest.mark.parametrize("missing_output", [False, True])
 async def test_compact_replica_repair_runs_during_later_native_work(
-    provisioned, tmp_path, missing_output
+    provisioned, tmp_path, missing_output, monkeypatch
 ):
+    from umi.competition_cohort_aggregate_model import AggregateProtocolModel
+    from umi.competition_cohort_reward_package import RewardPackageObject
     from umi.open_competition import digest
-    from umi.protocol import StrictProtocolModel, canonical_json_bytes
+    from umi.protocol import canonical_json_bytes
 
-    class Package(StrictProtocolModel):
+    class Package(AggregateProtocolModel):
         payload: str
+        objects: tuple[RewardPackageObject, ...] = ()
 
     ports, roles, schedulers = await replicas(provisioned, coordinator_done=1)
     earlier, later = roles["coordinator"][:2]
@@ -350,6 +453,7 @@ async def test_compact_replica_repair_runs_during_later_native_work(
     original.write_bytes(canonical_json_bytes(package))
     original.chmod(0o600)
     earlier.package_reference = original, digest(package)
+    retained_input_snapshot(earlier, original, package, monkeypatch)
     earlier.config.exchange_outbox = str(tmp_path / "outbox")
     earlier._replicate_inputs = CohortSettlementService._replicate_inputs.__get__(earlier)
     replica = tmp_path / "outbox" / "inputs" / (earlier.cohort + ".json")
@@ -484,14 +588,20 @@ async def test_queued_earlier_recovery_prevents_starting_next_later_tick(provisi
         scheduler._suspend()
 
 
-async def test_terminal_maintenance_authenticates_original_bytes_and_never_rebuilds(tmp_path):
+async def test_terminal_maintenance_authenticates_original_bytes_and_never_rebuilds(
+    tmp_path, monkeypatch
+):
     from pathlib import Path
 
+    from umi.competition_cohort_aggregate_model import AggregateProtocolModel
+    from umi.competition_cohort_reward_package import RewardPackageObject
+    from umi.competition_verification_snapshot import VerificationSnapshotRepairRequired
     from umi.open_competition import digest
-    from umi.protocol import StrictProtocolModel, canonical_json_bytes
+    from umi.protocol import canonical_json_bytes
 
-    class Package(StrictProtocolModel):
+    class Package(AggregateProtocolModel):
         payload: str
+        objects: tuple[RewardPackageObject, ...] = ()
 
     node = blank()
     state, history = await ready(node)
@@ -505,6 +615,7 @@ async def test_terminal_maintenance_authenticates_original_bytes_and_never_rebui
     original.write_bytes(canonical_json_bytes(value))
     original.chmod(0o600)
     node.package_reference = original, digest(value)
+    retained_input_snapshot(node, original, value, monkeypatch)
     await node._remember_reward_package(value)
     output = Path(node.reward_package_reference[0])
     output.parent.mkdir(mode=0o700)
@@ -533,7 +644,7 @@ async def test_terminal_maintenance_authenticates_original_bytes_and_never_rebui
     assert await node.maintain() is None
     assert not output.exists()  # only a scheduled native replay can rebuild
     original.unlink()
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(VerificationSnapshotRepairRequired):
         await node.maintain()
     assert not original.exists() and not output.exists()
     assert node.data is None
@@ -550,12 +661,16 @@ async def test_boot_memory_refusal_releases_service_descriptor(tmp_path, monkeyp
         series=object(),
         host_memory_admission=object(),
         maximum_package_bytes=4096,
+        legacy_model_storage=(),
+        model_delivery_adoptions=(),
+        policy=object(),
     )
     monkeypatch.setattr(
         boot, "SettlementServiceConfig", SimpleNamespace(model_validate_json=lambda raw: config)
     )
     monkeypatch.setattr(boot, "canonical_json_bytes", lambda value: b"{}")
     monkeypatch.setattr(boot, "digest", lambda value: "original-series")
+    monkeypatch.setattr(boot, "authenticate_legacy_model_sources", lambda *args, **kwargs: None)
     opened = []
     original = boot.lock_private_file
 

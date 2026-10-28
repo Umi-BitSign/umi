@@ -64,7 +64,7 @@ from .competition_reward_series_handoff import StandingRewardPredecessorOpportun
 from .competition_reward_service import StandingRewardServiceLimits, run_standing_reward_service
 from .competition_store import CompetitionStore
 from .competition_supervisor_adapters import ProductionSuccessorRuntimeAdapter
-from .competition_supervisor_runtime import SuccessorSupervisorRuntime
+from .competition_supervisor_runtime import SuccessorSupervisorRuntime, hold_successor_startup_lease
 from .concurrency import await_owned_task, run_owned_thread
 from .host_memory_runtime import HostMemoryAdmissionSelection, memory_runtime
 from .open_competition import CompetitionPolicy, digest, identity
@@ -281,11 +281,7 @@ class StandingRewardBootConfig(StrictProtocolModel):
                 *(self.proof_stores.credential_paths() if self.proof_stores else ()),
                 self.proof_export_directory,
                 *(c.resources.state_directory for c in self.legacy_chains),
-                *(
-                    (self.direct_model_review.r2_credentials_file,)
-                    if self.direct_model_review
-                    else ()
-                ),
+                *(self.direct_model_review.stores() if self.direct_model_review else ()),
                 *(source.directory for source in self.legacy_model_storage),
                 *(shared_byte_store_paths(self.legacy_model_storage) if include_shared else ()),
             )
@@ -386,17 +382,60 @@ async def run_installed_standing_rewards(
     runtime._require_lease()
     if type(runtime.adapter) is not ProductionSuccessorRuntimeAdapter:
         raise TypeError("standing boot requires the original native runtime adapter")
+    return await _run_owned_standing_inputs(runtime.config, config, stop, runtime=runtime)
+
+
+async def run_installed_credit_repair(
+    anchor: MaterializedSuccessorAnchor,
+    config_path: Path,
+    stop: asyncio.Event,
+    *,
+    key: str,
+    reason: str,
+    history: Literal["current", "predecessor"] = "current",
+):
+    """Repair one retained writer credit under its authenticated original lease."""
+    from .competition_evidence_codec import checked_digest
+
+    checked_digest(key)
+    if type(reason) is not str or not reason.strip() or len(reason) > 1024:
+        raise ValueError("credit repair requires an explicit bounded reason")
+    with hold_successor_startup_lease(anchor) as lease:
+        config = load_standing_boot(config_path, anchor)
+        lease.recheck()
+        selected = config.series if history == "current" else config.predecessor_series
+        if history not in {"current", "predecessor"} or selected is None:
+            raise ValueError("credit repair history is not configured")
+        root = Path(lease.config.state_root) / "standing-rewards" / digest(selected)
+        if any(not (root / name / "rounds.sqlite3").is_file() for name in ("history", "coverage")):
+            raise FileNotFoundError("credit repair requires existing original history and coverage")
+        result = await _run_owned_standing_inputs(
+            lease.config,
+            config,
+            stop,
+            credit_repair=dict(key=key, reason=reason, history=history),
+        )
+        lease.recheck()
+        return result
+
+
+async def _run_owned_standing_inputs(host, config, stop, *, runtime=None, credit_repair=None):
+    """Share the installed reader assembly between normal service and scoped repair."""
     config = StandingRewardBootConfig.model_validate_json(canonical_json_bytes(config))
-    validate_writer_byte_store_paths(config, runtime.config)
+    validate_writer_byte_store_paths(config, host)
     legacy_sources = await run_owned_thread(
         lambda: authenticate_legacy_model_sources(
             config.legacy_model_storage,
             series=config.series,
             policy=config.policy,
             model_delivery_adoptions=config.model_delivery_adoptions,
+            original_verification_directory=Path(host.state_root)
+            / "standing-rewards"
+            / digest(config.series)
+            / "legacy-original-verification",
         )
     )
-    root = Path(runtime.config.state_root) / "standing-rewards" / digest(config.series)
+    root = Path(host.state_root) / "standing-rewards" / digest(config.series)
     files = StandingRewardFiles(
         Path(config.delivery_directory),
         maximum_package_bytes=config.maximum_package_bytes,
@@ -443,6 +482,7 @@ async def run_installed_standing_rewards(
         maximum_promotion_bytes=config.maximum_promotion_bytes,
         maximum_package_bytes=config.maximum_package_bytes,
         model_artifacts=model_artifacts,
+        model_delivery_adoptions=config.model_delivery_adoptions,
         allocation_sink=files.retain_allocation,
     )
     imported, exported = await run_owned_thread(
@@ -460,6 +500,7 @@ async def run_installed_standing_rewards(
         verification_profile=config.service.history_verification,
         archive=imported,
         export_archive=exported,
+        shutdown_event=stop,
     )
     coverage = RewardCoverageJournal(
         root / "coverage",
@@ -486,7 +527,10 @@ async def run_installed_standing_rewards(
         providers = {}
         for chain, policy, locations in (
             (config.chain, config.policy, CompetitionChainResources.from_config(config.chain)),
-            *((c.chain, config.legacy_policy, c.resources) for c in config.legacy_chains),
+            *(
+                (c.chain, config.legacy_policy, c.resources)
+                for c in (() if credit_repair is not None else config.legacy_chains)
+            ),
         ):
             sha = digest(chain)
             provider = HistoricalRewardControlProvider(
@@ -519,7 +563,7 @@ async def run_installed_standing_rewards(
         predecessor_coverage = None
         if config.predecessor_series is not None:
             old = config.predecessor_series
-            old_root = Path(runtime.config.state_root) / "standing-rewards" / digest(old)
+            old_root = Path(host.state_root) / "standing-rewards" / digest(old)
             old_reader = StandingRewardControlReader(
                 old_root / "control",
                 old,
@@ -538,6 +582,7 @@ async def run_installed_standing_rewards(
                 verification_profile=config.service.history_verification,
                 archive=imported,
                 export_archive=exported,
+                shutdown_event=stop,
             )
             select_history_forecasts(
                 old_history,
@@ -580,13 +625,22 @@ async def run_installed_standing_rewards(
                 coverage=predecessor_coverage,
             )
 
+        if credit_repair is not None:
+            selected = collection if credit_repair["history"] == "current" else predecessor_coverage
+            if selected is None:
+                raise ValueError("credit repair history is not configured")
+            await current.start()
+            return await selected.repair_credit(
+                credit_repair["key"], reason=credit_repair["reason"], stop=stop
+            )
+
         def signer():
             from .named_hotkey import load_named_hotkey
 
-            wallet = runtime.config.wallet
+            wallet = host.wallet
             return load_named_hotkey(
                 Path(wallet.path) / wallet.name / "hotkeys" / wallet.hotkey,
-                runtime.config.validator_hotkey,
+                host.validator_hotkey,
             )
 
         # Keep constructor cleanup until invocation is entered; native provider

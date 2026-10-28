@@ -17,9 +17,16 @@ from .competition_cohort_model_acceptance import (
     ModelArtifactAcceptance,
     verify_model_acceptance_body,
 )
+from .competition_cohort_model_static_review import (
+    StaticModelReviewHeld,
+    build_standing_model_review_from_documents,
+    verify_standing_review_policy,
+)
+from .competition_transport_verification import TransferProgress
 from .open_competition import digest
 from .private_files import ensure_private_directory, private_path
 from .protocol import canonical_json_bytes, sha256_hex
+from .r2_multipart import r2_connection_scope
 
 
 class LegacyModelStorageReaders:
@@ -32,10 +39,13 @@ class LegacyModelStorageReaders:
         multipart,
         verification_root,
         byte_stores=None,
+        original_reuse=None,
+        original_identity=None,
     ):
         self.authenticated = dict(authenticated)
         self.policy, self.load_original = policy, load_original
         self.multipart, self.verification_root = multipart, verification_root
+        self.original_reuse, self.original_identity = original_reuse, original_identity
         self.byte_stores = {k: v for k, v in (byte_stores or {}).items() if v is not None}
         if not set(self.byte_stores) <= set(self.authenticated):
             raise ValueError("byte stores require authenticated cohort selections")
@@ -49,11 +59,60 @@ class LegacyModelStorageReaders:
     def has_cohort(self, cohort):
         return cohort in self.authenticated
 
+    async def review_inputs(self, cohort, bundle, standing):
+        """Apply a private standing policy using completed R2 facts and documents.
+
+        Missing byte facts require explicit repair; generating a review must
+        never initiate a weight hash pass or materialize the model locally.
+        Admission, private rights policy and independent quorum remain separate.
+        """
+        verify_standing_review_policy(standing, self.policy)
+        resolution = self.preserved_reference(cohort, bundle)
+        if resolution is None:
+            raise ValueError("legacy standing review has no authenticated preserved bundle")
+        documents = [
+            (i, r) for i, r in enumerate(bundle.files) if r.role in {"license", "provenance"}
+        ]
+        if any(r.size_bytes > standing.maximum_document_bytes for _, r in documents):
+            raise StaticModelReviewHeld("review_document_size_outside_policy")
+        if sum(r.size_bytes for _, r in documents) > standing.maximum_total_document_bytes:
+            raise StaticModelReviewHeld("review_documents_exceed_total_policy")
+        reader = self.reader(resolution)
+        contents = {}
+        async with r2_connection_scope(self.multipart):
+            snapshot = await reader.verify(completed_only=True)
+            with TransferProgress(
+                "legacy_model_static_review_documents",
+                len(documents),
+                unit="documents",
+                planning_unit_seconds=(0.01, 5.0),
+            ) as progress:
+                for index, record in documents:
+                    contents[record.path] = await reader.read_verified_range(
+                        snapshot,
+                        file_index=index,
+                        offset=0,
+                        size_bytes=record.size_bytes,
+                    )
+                    progress.advance(1)
+        return build_standing_model_review_from_documents(bundle, self.policy, standing, contents)
+
     def resolve(self, cohort, *, request_sha256=None, baseline=False, incumbent_sha256=None):
         try:
             authenticated = self.authenticated[cohort]
         except KeyError as error:
             raise ValueError("legacy model reader has no authenticated cohort selection") from error
+        if self.original_reuse is not None:
+            return self.original_reuse.resolve(
+                authenticated,
+                load_original=self.load_original,
+                identity=self.original_identity,
+                endpoint=self.multipart.signer.endpoint,
+                bucket=self.multipart.signer.bucket,
+                request_sha256=request_sha256,
+                baseline=baseline,
+                incumbent_sha256=incumbent_sha256,
+            )
         return resolve_legacy_model_storage(
             authenticated,
             load_original=self.load_original,
@@ -63,6 +122,31 @@ class LegacyModelStorageReaders:
             baseline=baseline,
             incumbent_sha256=incumbent_sha256,
         )
+
+    def preserved_reference(self, cohort, bundle):
+        """Resolve existing authenticated bytes; caller owns reference authority.
+
+        A later certified baseline may already be a preserved participant in
+        this frozen inventory. Reuse that exact original and association without
+        inventing an incumbent or modifying the signed census. A missing or
+        damaged selected original requires repair, never another source guess.
+        """
+        model = digest(bundle)
+        entries = self.authenticated[cohort].legacy.entries
+        original = next(
+            (
+                entry
+                for entry in entries
+                if entry.model_sha256 == model and entry.payload_state == "preserved"
+            ),
+            None,
+        )
+        if original is None:
+            return None
+        resolved = self.resolve(cohort, request_sha256=original.request_sha256)
+        if resolved.selection.bundle != bundle:
+            raise ValueError("preserved reference differs from its certified model")
+        return resolved
 
     def admitted(self, cohort, *, record, admission):
         """Resolve only the exact frozen, certified, preserved original."""

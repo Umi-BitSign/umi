@@ -37,6 +37,7 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 ROOT = "/internal/cohorts/model-delivery-adoption"
 VOTE_PATH = ROOT + "/vote"
+PREPARE_RESERVED_PATH = ROOT + "/prepare-reserved"
 MAX_PROPOSAL_BYTES = 32 * 1024
 
 
@@ -354,19 +355,64 @@ class ModelDeliveryAdoptionOwner:
             control = node.controller
             history, state, _, _ = control._history()
             _, pending = control.store.status(cohort)
-            if self.kind == "prepare":
+            prepared = pending
+            if self.kind == "prepare-reserved" and prepared is None:
+                prepared = await run_owned_thread(
+                    host.service.intake.pending_policy_adoption, cohort
+                )
+            if self.kind == "prepare-reserved" and prepared is not None:
+                if history_tip(history) != request.predecessor_sha256:
+                    raise ValueError("model-delivery preparation lost its selected predecessor")
+                expected = await run_owned_thread(
+                    candidate.prepare, history, prepared.observed_at_block
+                )
+                if expected != prepared:
+                    raise ValueError("model-delivery preparation conflicts with pending control")
+                # The existing exact reservation owns the completed review.
+                # Reconcile its current local census without another remote
+                # pass, including after a lost response or owner restart.
+                await run_owned_thread(
+                    partial(
+                        census_model_delivery,
+                        host.service.intake,
+                        host.service.uploads,
+                        prepared,
+                        candidate,
+                        reserve=True,
+                    )
+                )
+                transition = control.store.reserve_exact(prepared)
+            elif self.kind in {"prepare", "prepare-reserved"}:
                 if history_tip(history) != request.predecessor_sha256 or pending is not None:
                     raise ValueError("model-delivery preparation lost its selected predecessor")
-                block = await _owned_block(host.provider, _owner_budget(host))
+                block = await await_progress(
+                    _owned_block(host.provider, _owner_budget(host)),
+                    stage="adoption_preparation_owned_finality",
+                    cohort=cohort,
+                )
                 transition = await run_owned_thread(candidate.prepare, history, block)
                 await candidate.verify(history, transition)
+                reserve = self.kind == "prepare-reserved"
+                if reserve:
+                    final_block = await await_progress(
+                        _owned_block(host.provider, _owner_budget(host)),
+                        stage="adoption_reservation_owned_finality",
+                        cohort=cohort,
+                    )
+                    if final_block < block:
+                        raise ValueError("model-delivery owned finality regressed during review")
                 await run_owned_thread(
-                    census_model_delivery,
-                    host.service.intake,
-                    host.service.uploads,
-                    transition,
-                    candidate,
+                    partial(
+                        census_model_delivery,
+                        host.service.intake,
+                        host.service.uploads,
+                        transition,
+                        candidate,
+                        reserve=reserve,
+                    )
                 )
+                if reserve:
+                    transition = control.store.reserve_exact(transition)
             elif self.kind == "reserve":
                 prior = any(s.transition == transition for s in history.transitions)
                 if not prior:
@@ -392,7 +438,12 @@ class ModelDeliveryAdoptionOwner:
                 # validates receipt heights and gates fresh participation.
                 # Its durable reservation is reconciled into control on restart.
                 if not prior:
-                    await candidate.verify(history, transition)
+                    # An exact pending control is written only after the first
+                    # candidate check and intake gate. Restart restores that
+                    # same decision; keep the fresh local dual census below,
+                    # without another remote model pass for an unchanged intent.
+                    if pending != transition:
+                        await candidate.verify(history, transition)
                     await run_owned_thread(
                         partial(
                             census_model_delivery,
@@ -428,6 +479,7 @@ def model_delivery_adoption_owner_routes(lifecycle, *, token):
     router = APIRouter()
     for kind, model in (
         ("prepare", ModelDeliveryAdoptionPrepare),
+        ("prepare-reserved", ModelDeliveryAdoptionPrepare),
         ("reserve", ModelDeliveryAdoptionProposal),
         ("commit", ModelDeliveryAdoptionCommit),
     ):

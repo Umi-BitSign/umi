@@ -1,0 +1,19 @@
+[Unit]
+Description=UMI rootless CPU namespace readiness (%i)
+ConditionPathExists=@CONFIG_DIRECTORY@/%i.cpu-runtime.env
+Requires=user@@SERVICE_UID@.service
+After=user@@SERVICE_UID@.service
+Before=umi-cohort-phase-review@%i.service
+
+[Service]
+Type=oneshot
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+UMask=0077
+EnvironmentFile=@CONFIG_DIRECTORY@/%i.cpu-runtime.env
+ExecStart=/usr/bin/python3 -I -B /usr/local/lib/umi/ensure-cpu-namespace.py
+# The unprivileged bootstrap needs newuidmap; the reviewer remains hardened.
+NoNewPrivileges=no
+KillMode=process
+TimeoutStartSec=90
+MemoryMax=64M

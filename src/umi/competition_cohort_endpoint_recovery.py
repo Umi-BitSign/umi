@@ -24,6 +24,7 @@ from .competition_cohort_endpoint_selection import (
 from .competition_cohort_endpoint_selection import (
     CohortEndpointReplacementSelection,
     EndpointSelection,
+    _project_endpoint_selection,
     case_record_key,
     parse_endpoint_selection,
     selected_request,
@@ -92,12 +93,21 @@ class CohortEndpointResponseRecovery:
             )
 
     def _validate_one(self, selected: EndpointSelection, assignment=None):
+        return self._project_validated(selected, assignment, lambda result: result)
+
+    def _project_validated(self, selected, assignment, project, *, validated_job=None):
+        """Keep the large retained graph inside owned read-only projections."""
+        if assignment is None:
+            # This reads the exact retained assignment and its current conflict
+            # and index fences before borrowing its static proof. Only the
+            # final projection crosses either private cache boundary.
+            return self.journal._project_assignment(
+                selected.assignment_slot,
+                lambda pair: self._project_validated(
+                    selected, pair[0], project, validated_job=pair[1]
+                ),
+            )
         raw = canonical_json_bytes(selected)
-        supplied = assignment is not None
-        if not supplied:
-            # This retained read still checks its conflict/index bindings and
-            # exact journal bytes before reusing its own static proof.
-            assignment, job = self.journal.assignment_and_job(selected.assignment_slot)
         assignment_raw = canonical_json_bytes(assignment)
         key = assignment_reuse_key(
             self.journal.journal,
@@ -108,64 +118,77 @@ class CohortEndpointResponseRecovery:
             self.journal.cohorts,
         )
         cache_slot = selection_slot(selected)
-        cached = self._selection_reuse.lookup(cache_slot, key)
-        if cached is not None:
-            return cached
-        selected = parse_endpoint_selection(raw)
-        if supplied:
-            # A new caller assignment has no receipt until native validation.
-            job = self.journal.validate_assignment(assignment)
-        validate = (
-            validate_case_attempt
-            if isinstance(selected, CohortEndpointReplacementSelection)
-            else validate_recoverable_endpoint_transport
-        )
-        signed = validate(selected.order, self.journal.policy, selected.transport_policy)
-        selection_grant(selected, assignment)
-        if job != signed.order.job:
-            raise ValueError("response recovery attempt differs from acknowledged assignment")
-        result = selected, assignment, job
-        self._selection_reuse.remember(cache_slot, key, result)
-        return result
+
+        def calculate():
+            value = parse_endpoint_selection(raw)
+            # Supplied assignments still require their own native validation.
+            job = (
+                self.journal.validate_assignment(assignment)
+                if validated_job is None
+                else validated_job
+            )
+            validate = (
+                validate_case_attempt
+                if isinstance(value, CohortEndpointReplacementSelection)
+                else validate_recoverable_endpoint_transport
+            )
+            signed = validate(value.order, self.journal.policy, value.transport_policy)
+            selection_grant(value, assignment)
+            if job != signed.order.job:
+                raise ValueError("response recovery attempt differs from acknowledged assignment")
+            return value, assignment, job
+
+        return self._selection_reuse._project(cache_slot, key, calculate, project)
 
     @canonical_json_reuse()
     def _validate(self, selected: EndpointSelection, assignment=None):
-        result = self._validate_one(selected, assignment)
-        current, assignment, _ = result
-        seen = set()
-        while isinstance(current, CohortEndpointReplacementSelection):
-            key = current.order.order.parent_grant_slot
-            if key in seen:
-                raise ValueError("endpoint replacement parent cycle")
-            seen.add(key)
-            # Replacement selection slots are their immutable grant slots.
-            # The original whole-attempt selection keeps its historical key.
-            parent_slot = key
-            raw = self.journal.journal.get_raw("endpoint_recovery_selection", parent_slot)
-            if raw is None:
-                parent_slot = current.assignment_slot
+        return self._project_validation(selected, assignment, lambda result: result)
+
+    def _project_validation(self, selected, assignment, project):
+        def accept(result):
+            current = result[0]
+            seen = set()
+            while isinstance(current, CohortEndpointReplacementSelection):
+                key = current.order.order.parent_grant_slot
+                if key in seen:
+                    raise ValueError("endpoint replacement parent cycle")
+                seen.add(key)
+                parent_slot = key
                 raw = self.journal.journal.get_raw("endpoint_recovery_selection", parent_slot)
-            if raw is None:
-                raise FileNotFoundError("endpoint replacement parent is not retained")
-            parent, parent_assignment, _ = self._validate_one(parse_endpoint_selection(raw))
-            if selection_slot(parent) != parent_slot:
-                raise ValueError("endpoint parent selection changed its slot")
-            verify_replacement_parent(current.grant, selection_grant(parent, parent_assignment))
-            current, assignment = parent, parent_assignment
-        return result
+                if raw is None:
+                    parent_slot = current.assignment_slot
+                    raw = self.journal.journal.get_raw("endpoint_recovery_selection", parent_slot)
+                if raw is None:
+                    raise FileNotFoundError("endpoint replacement parent is not retained")
+                parent, parent_assignment, _ = self._validate_one(parse_endpoint_selection(raw))
+                if selection_slot(parent) != parent_slot:
+                    raise ValueError("endpoint parent selection changed its slot")
+                verify_replacement_parent(current.grant, selection_grant(parent, parent_assignment))
+                current = parent
+            return project(result)
+
+        return self._project_validated(selected, assignment, accept)
 
     @canonical_json_reuse()
     def selection(self, slot: str):
-        # The journal already supplies bounded canonical bytes and checks the
-        # current conflict fence. Keep those exact bytes for the decoder instead
-        # of parsing and reserializing the whole retained selection first.
+        return self._project_selection(slot, lambda result: result)
+
+    @canonical_json_reuse()
+    def _project_selection(self, slot: str, project):
+        # Fresh journal bytes and conflict fences are mandatory on every read.
+        # Public selection() still returns independent mutable model graphs.
         raw = self.journal.journal.get_raw("endpoint_recovery_selection", slot)
         if raw is None:
             raise FileNotFoundError("endpoint response selection is not retained")
-        selected, assignment, job = self._validate(parse_endpoint_selection(raw))
-        if selection_slot(selected) != slot:
-            raise ValueError("response recovery selection changed its slot")
-        return selected, assignment, job
+
+        def checked(result):
+            if selection_slot(result[0]) != slot:
+                raise ValueError("response recovery selection changed its slot")
+            return project(result)
+
+        return _project_endpoint_selection(
+            raw, lambda selected: self._project_validation(selected, None, checked)
+        )
 
     async def prepare(
         self,
@@ -303,8 +326,9 @@ class CohortEndpointResponseRecovery:
         return value
 
     def retained(self, slot: str, case_id: str) -> CohortRecoveredEndpointCase | None:
-        selected, _, job = self.selection(slot)
-        return self._retained(selected, job, case_id)
+        return self._project_selection(
+            slot, lambda result: self._retained(result[0], result[2], case_id)
+        )
 
     def _unfinished_intent(self, slot: str, case_id: str):
         if self.journal.journal.get("endpoint_recovery_selection", slot) is None:

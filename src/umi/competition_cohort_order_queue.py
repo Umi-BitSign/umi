@@ -6,6 +6,7 @@ nor its certificate authorizes live inference, closes work or grants rewards.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -41,6 +42,7 @@ from .open_competition import (
 )
 from .private_files import Directory
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+from .thread_gate import ThreadGate
 
 
 class CohortOrderQueueConfig(StrictProtocolModel):
@@ -108,6 +110,7 @@ def recipient_key(slot: str, hotkey: str) -> str:
 
 class CohortOrderQueue:
     def __init__(self, config: CohortOrderQueueConfig, policy: CompetitionPolicy):
+        self._process_gate = ThreadGate()
         self.config = CohortOrderQueueConfig.model_validate_json(canonical_json_bytes(config))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         self.groups = {identity(e.hotkey): e.control_group for e in self.policy.evaluators}
@@ -143,6 +146,15 @@ class CohortOrderQueue:
                 "CREATE TABLE IF NOT EXISTS order_queue_cursors "
                 "(cohort TEXT PRIMARY KEY, slot TEXT NOT NULL)"
             )
+
+    @contextmanager
+    def _locked(self):
+        # Selection and delivery share this owner. Queue sibling threads fairly
+        # before taking the external nonblocking mutex; otherwise every reader
+        # can fail while a new roster is being committed. Other owners still
+        # meet the original journal exclusion and retry contract.
+        with self._process_gate.hold(), self.journal.locked():
+            yield
 
     def scan(self, cohort: str, *, limit: int = 16) -> tuple[str, ...]:
         """Advance the fair scan before work; unfinished entries remain pending."""
@@ -183,7 +195,7 @@ class CohortOrderQueue:
         return intent
 
     def intent(self, slot: str) -> CohortOrderIntent:
-        with self.journal.locked():
+        with self._locked():
             return self._intent(slot)
 
     def select(
@@ -202,7 +214,7 @@ class CohortOrderQueue:
         )
         intent = CohortOrderIntent.model_validate_json(canonical_json_bytes(intent))
         slot = order_slot(intent.order)
-        with self.journal.locked():
+        with self._locked():
             if self.journal.get("intent", slot) is not None:
                 prior = self._intent(slot)
                 if prior.order != intent.order or prior.participant != intent.participant:
@@ -261,7 +273,7 @@ class CohortOrderQueue:
         return certificate
 
     def certificate(self, slot: str) -> SignedRecoverableEvaluationOrder | None:
-        with self.journal.locked():
+        with self._locked():
             return self._certificate(slot, self._intent(slot))
 
     def _vote(self, intent: CohortOrderIntent, vote: CohortOrderVote) -> CohortOrderVote:
@@ -277,7 +289,7 @@ class CohortOrderQueue:
         return vote
 
     def missing_reviewers(self, slot: str) -> tuple[str, ...]:
-        with self.journal.locked():
+        with self._locked():
             intent = self._intent(slot)
             if self._certificate(slot, intent) is not None:
                 return ()
@@ -300,7 +312,7 @@ class CohortOrderQueue:
         self, slot: str, vote: CohortOrderVote
     ) -> SignedRecoverableEvaluationOrder | None:
         # Collecting an already signed historical vote performs no new work.
-        with self.journal.locked():
+        with self._locked():
             intent = self._intent(slot)
             vote = self._vote(intent, vote)
             certificate = self._certificate(slot, intent)
@@ -336,14 +348,14 @@ class CohortOrderQueue:
     def check_current(
         self, slot: str, source: CohortOrderHistory, capture: RegistrationCapture
     ) -> None:
-        with self.journal.locked():
+        with self._locked():
             intent = self._intent(slot)
             block = execution_boundary(capture).block
             remember_order_history(self.journal, self.cohorts, self.policy, source, block)
             review_order(intent.order, intent.participant, source, self.policy, block)
 
     def acknowledge(self, slot: str, signed: SignedOrderDeliveryReceipt) -> None:
-        with self.journal.locked():
+        with self._locked():
             intent = self._intent(slot)
             certificate = self._certificate(slot, intent)
             if certificate is None:
@@ -370,7 +382,7 @@ class CohortOrderQueue:
             self.journal.put_many((("delivery", key, signed),), index=index)
 
     def missing_recipients(self, slot: str) -> tuple[str, ...]:
-        with self.journal.locked():
+        with self._locked():
             intent = self._intent(slot)
             certificate = self._certificate(slot, intent)
             if certificate is None:

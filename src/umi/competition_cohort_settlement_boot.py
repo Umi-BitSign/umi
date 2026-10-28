@@ -4,7 +4,7 @@ import asyncio
 import os
 import sqlite3
 import stat
-from contextlib import AsyncExitStack, contextmanager
+from contextlib import AsyncExitStack, contextmanager, suppress
 from functools import partial
 from pathlib import Path
 
@@ -33,12 +33,61 @@ from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_reward_service import _close_provider, _stop_task
 from .competition_round_journal import RoundJournal
 from .competition_store import CompetitionStore
+from .competition_transport_verification import TransferProgress
 from .concurrency import run_owned_thread
 from .host_memory_runtime import memory_runtime
 from .named_hotkey import load_named_hotkey
 from .open_competition import digest, sign_object
 from .private_files import ensure_private_directory, lock_private_file, read_private_model
 from .protocol import canonical_json_bytes
+
+_SQLITE_CONTENTION_CODES = frozenset(
+    (
+        getattr(sqlite3, "SQLITE_BUSY", 5),
+        getattr(sqlite3, "SQLITE_LOCKED", 6),
+    )
+)
+
+
+async def _open_executions(configs, policy, stop):
+    """Retain completed startup work while an existing journal writer drains."""
+    opened = []
+    with TransferProgress(
+        "settlement_execution_journal_startup",
+        len(configs),
+        unit="journals",
+        planning_unit_seconds=(0.01, 10),
+    ) as progress:
+        for config in configs:
+            while not stop.is_set():
+                try:
+                    journal = await run_owned_thread(CohortExecutionJournal, config, policy)
+                except sqlite3.OperationalError as error:
+                    code = getattr(error, "sqlite_errorcode", None)
+                    # Python3.10 SQLite errors lack numeric result attributes.
+                    # Match only standard contention messages, without exposing
+                    # messages or hiding other I/O/configuration failures.
+                    legacy_busy = code is None and error.args in (
+                        ("database is locked",),
+                        ("database table is locked",),
+                    )
+                    if not legacy_busy and (
+                        type(code) is not int or code & 255 not in _SQLITE_CONTENTION_CODES
+                    ):
+                        raise
+                else:
+                    opened.append(journal)
+                    progress.advance(1)
+                    break
+                # Only this unfinished constructor retries. Native rollback and
+                # close have completed; no already-opened journal, legacy source,
+                # model verification or key initialization is repeated.
+                progress.emit("retrying", reason="execution_journal_writer_busy")
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=2)
+            if stop.is_set():
+                return None
+    return tuple(opened)
 
 
 @contextmanager
@@ -107,6 +156,9 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
             series=config.series,
             policy=config.policy,
             model_delivery_adoptions=config.model_delivery_adoptions,
+            original_verification_directory=Path(config.state_directory)
+            / digest(config.series)
+            / "legacy-original-verification",
         )
     )
     root = Path(config.state_directory) / digest(config.series)
@@ -134,7 +186,24 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
         async def sign(body):
             return await run_owned_thread(sign_object, body, key)
 
-        executions = tuple(CohortExecutionJournal(c, config.policy) for c in config.executions)
+        if config.model_storage_consumer is not None:
+            from .competition_model_storage_leases import model_storage_consumer
+
+            await resources.enter_async_context(
+                model_storage_consumer(
+                    config.model_storage_consumer,
+                    kind="settlement",
+                    hotkey=config.signer_hotkey,
+                    policy=config.policy,
+                    series=config.series,
+                    sources=legacy_sources,
+                    sign=sign,
+                )
+            )
+
+        executions = await _open_executions(config.executions, config.policy, stop)
+        if executions is None:
+            return
         proofs = await run_owned_thread(
             partial(
                 SettlementRegistrationFiles,
@@ -142,6 +211,11 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
                 inbox=Path(config.proof_import_directory),
                 outbox=Path(config.proof_export_directory),
                 proof_stores=config.proof_stores,
+                **(
+                    {"shared_archives": tuple(Path(p) for p in config.shared_registration_archives)}
+                    if config.shared_registration_archives
+                    else {}
+                ),
             )
         )
         promotion = CompetitionStore(Path(config.promotion_directory), config.policy)
@@ -244,9 +318,29 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
         preparation = SettlementArtifactPreparation(config, promotion, direct_by_cohort)
         await provider.start()
         scheduler = SettlementSeriesScheduler(
-            nodes, ordered_cohorts=tuple(digest(plan) for plan in config.series.cohorts)
+            nodes,
+            ordered_cohorts=tuple(digest(plan) for plan in config.series.cohorts),
+            **(
+                {"held_cohorts": config.automatic_progression_hold_cohorts}
+                if config.automatic_progression_hold_cohorts
+                else {}
+            ),
         )
+
+        async def progress_snapshots():
+            # Only already-emitted metadata crosses this advisory bridge. Its
+            # failure must not change native settlement or future cohort holds.
+            while not stop.is_set():
+                for node in nodes:
+                    with suppress(Exception):
+                        progress = getattr(node, "public_progress", None)
+                        if progress is not None:
+                            await run_owned_thread(progress.publish)
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=5)
+
         tasks = [asyncio.create_task(scheduler.run(stop))]
+        tasks.append(asyncio.create_task(progress_snapshots()))
         tasks.append(asyncio.create_task(preparation.run(stop)))
         if exports is not None:
             tasks.append(asyncio.create_task(exports.run(stop, poll_seconds=config.poll_seconds)))

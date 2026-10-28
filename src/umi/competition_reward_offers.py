@@ -4,9 +4,12 @@ These are discovery inputs. The coordinator still replays their original native
 evidence before retaining a decision or asking any evaluator to sign it.
 """
 
+import logging
 from pathlib import Path
 
+from .competition_cohort_recovery import GeometricModelRewardCohortAuthority
 from .competition_cohort_reward_package import CohortRewardPackage
+from .competition_geometric_rewards import cohort_reward_parameters
 from .competition_reward_adoption import RewardAdoptionSelection, verify_adoption_selection
 from .competition_reward_coordinator import Prefix
 from .competition_reward_coverage_journal import RewardCoverageJournal
@@ -28,12 +31,27 @@ from .competition_reward_opportunity import (
     RewardOpportunityCertificate,
     check_opportunity_claim,
     opportunity_rule,
+    verify_signed_early_release,
 )
 from .competition_reward_series_handoff import StandingRewardPredecessorOpportunity
 from .competition_verification_snapshot import verified_package_digest
 from .open_competition import CompetitionPolicy, digest
 from .private_files import private_path
 from .protocol import canonical_json_bytes
+
+logger = logging.getLogger(__name__)
+
+
+def successor_reward_rule_ready(plan, authority, adoption) -> bool:
+    """Require the announced cohort economics without changing signed inputs."""
+    if plan.sequence < 6:
+        return True
+    expected = cohort_reward_parameters(plan.sequence)
+    if adoption is not None:
+        return adoption.adoption.parameters == expected
+    if isinstance(authority, GeometricModelRewardCohortAuthority):
+        return authority.model_reward_parameters == expected
+    return False
 
 
 class StandingRewardOffers:
@@ -65,8 +83,11 @@ class StandingRewardOffers:
         self.reward_adoptions = verify_adoption_selection(reward_adoptions, series, policy)
         self.settlements = Path(private_path(str(settlements)))
         self.packages = files.package_store
+        self._reported_missing_successor_adoptions: set[str] = set()
+        self.pending_reason: str | None = None
 
     def __call__(self, cohort: str, prefix: Prefix) -> RewardActivation | None:
+        self.pending_reason = None
         prefix = verify_reward_decisions(
             self.series, self.policy, prefix, reward_adoptions=self.reward_adoptions
         )
@@ -77,6 +98,18 @@ class StandingRewardOffers:
             or cohort != digest(self.series.cohorts[index])
         ):
             raise ValueError("reward offer must extend the next admitted cohort")
+        adoption = None if self.reward_adoptions is None else self.reward_adoptions.latest(cohort)
+        if not successor_reward_rule_ready(
+            self.series.cohorts[index], self.series.recovery.authority, adoption
+        ):
+            self.pending_reason = "reward_adoption_pending"
+            if cohort not in self._reported_missing_successor_adoptions:
+                logger.warning(
+                    "reward_offer_waiting_for_announced_economics cohort_sha256=%s",
+                    cohort,
+                )
+                self._reported_missing_successor_adoptions.add(cohort)
+            return None
         # Completion is small and may take hours. Check it before reparsing a
         # potentially large settlement package on its first preparation.
         prior = digest(self.handoff)
@@ -84,21 +117,28 @@ class StandingRewardOffers:
             prior = self.predecessor.certificate_sha256()
             if prior is None:
                 return None
+        predecessor = None
+        early = None if adoption is None else adoption.adoption.early_release
         if index:
             predecessor = effective_activation_decision(prefix).activation
             assert predecessor is not None
-            raw = self.coverage.journal.get("coverage_completion", coverage_work_key(predecessor))
-            if raw is None:
-                return None
-            prior = CoverageCompletion.model_validate(raw).certificate_sha256
-            certificate = self.files.certificate(prior)
-            check_opportunity_claim(
-                RewardOpportunityCertificate.model_validate_json(certificate),
-                manifest=self.manifest,
-                series=self.series,
-                policy=self.policy,
-                activation=predecessor,
-            )
+            if early is None:
+                raw = self.coverage.journal.get(
+                    "coverage_completion", coverage_work_key(predecessor)
+                )
+                if raw is None:
+                    return None
+                prior = CoverageCompletion.model_validate(raw).certificate_sha256
+                certificate = self.files.certificate(prior)
+                check_opportunity_claim(
+                    RewardOpportunityCertificate.model_validate_json(certificate),
+                    manifest=self.manifest,
+                    series=self.series,
+                    policy=self.policy,
+                    activation=predecessor,
+                )
+            else:
+                prior = digest(early)
         try:
             package = self.packages.load(
                 self.settlements / (cohort + ".json"),
@@ -122,8 +162,7 @@ class StandingRewardOffers:
         # repeats exact immutable publication; it cannot reserve a signing slot.
         self.files.retain_package(package)
         tip = history.transitions[-1].transition if history.transitions else history.genesis
-        adoption = None if self.reward_adoptions is None else self.reward_adoptions.latest(cohort)
-        return RewardActivation(
+        result = RewardActivation(
             cohort_sha256=cohort,
             allocation_sha256=digest(package.allocation),
             package_sha256=verified_package_digest(package),
@@ -134,3 +173,15 @@ class StandingRewardOffers:
             if adoption is None
             else adoption.adoption.effective_allocation_sha256,
         )
+        if early is not None:
+            preceding = effective_activation_decision(prefix)
+            assert preceding is not None
+            verify_signed_early_release(
+                self.reward_adoptions,
+                series=self.series,
+                policy=self.policy,
+                manifest=self.manifest,
+                predecessor=preceding,
+                successor=result,
+            )
+        return result

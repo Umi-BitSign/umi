@@ -38,6 +38,10 @@ from .competition_model_byte_store import shared_byte_store_paths, validate_shar
 from .competition_proof_archive_selection import selected_proof_archives
 from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_adoption import RewardAdoptionSelection, verify_adoption_selection
+from .competition_reward_baseline_restore import (
+    CompletedCoverageBaselineRequest,
+    prepare_completed_coverage_baseline,
+)
 from .competition_reward_boot import Capacity, HistoryCapacity, ObjectCapacity, _disjoint
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_control_journal import RewardControlTransactionJournal
@@ -286,11 +290,7 @@ class RewardCoordinatorConfig(StrictProtocolModel):
                 self.proof_export_directory,
                 self.exchange_inbox,
                 self.exchange_outbox,
-                *(
-                    (self.direct_model_review.r2_credentials_file,)
-                    if self.direct_model_review
-                    else ()
-                ),
+                *(self.direct_model_review.stores() if self.direct_model_review else ()),
                 *(source.directory for source in self.legacy_model_storage),
                 *(shared_byte_store_paths(self.legacy_model_storage) if include_shared else ()),
             )
@@ -306,14 +306,41 @@ def load_reward_coordinator_config(path: Path) -> RewardCoordinatorConfig:
     return config
 
 
-async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.Event) -> None:
+async def run_reward_coordinator(
+    config: RewardCoordinatorConfig,
+    stop: asyncio.Event,
+    *,
+    credit_repair=None,
+    baseline_review: CompletedCoverageBaselineRequest | None = None,
+):
     config = RewardCoordinatorConfig.model_validate_json(canonical_json_bytes(config))
+    if baseline_review is not None:
+        baseline_review = CompletedCoverageBaselineRequest.model_validate(baseline_review)
+        if credit_repair is not None:
+            raise ValueError("baseline review and credit repair are separate owner operations")
+    if credit_repair is not None:
+        from .competition_evidence_codec import checked_digest
+
+        checked_digest(credit_repair["key"])
+        reason = credit_repair["reason"]
+        selected_history = credit_repair.get("history", "current")
+        if (
+            type(reason) is not str
+            or not reason.strip()
+            or len(reason) > 1024
+            or selected_history not in {"current", "predecessor"}
+            or (selected_history == "predecessor" and config.predecessor_series is None)
+        ):
+            raise ValueError("credit repair requires its configured owner and bounded reason")
     legacy_sources = await run_owned_thread(
         lambda: authenticate_legacy_model_sources(
             config.legacy_model_storage,
             series=config.series,
             policy=config.policy,
             model_delivery_adoptions=config.model_delivery_adoptions,
+            original_verification_directory=Path(config.state_directory)
+            / digest(config.series)
+            / "legacy-original-verification",
         )
     )
     async with AsyncExitStack() as resources:
@@ -354,6 +381,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
             verification_profile=config.service.history_verification,
             archive=imported,
             export_archive=exported,
+            shutdown_event=stop,
         )
         select_history_forecasts(
             history, root=root, config=config, resources=resources, role=config.role
@@ -390,6 +418,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
             maximum_promotion_bytes=config.maximum_promotion_bytes,
             maximum_package_bytes=config.maximum_package_bytes,
             model_artifacts=model_artifacts,
+            model_delivery_adoptions=config.model_delivery_adoptions,
             allocation_sink=files.retain_allocation,
         )
         provider = HistoricalRewardControlProvider(
@@ -444,6 +473,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
                 verification_profile=config.service.history_verification,
                 archive=imported,
                 export_archive=exported,
+                shutdown_event=stop,
             )
             select_history_forecasts(
                 old_history,
@@ -485,6 +515,21 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
                 plan=config.handoff,
                 coverage=predecessor_coverage,
             )
+        if baseline_review is not None:
+            # Original exclusive state lease and configured native sources are
+            # retained. No wallet key, signer, publisher or collector is opened.
+            await provider.start()
+            return await prepare_completed_coverage_baseline(coverage, baseline_review)
+        if credit_repair is not None:
+            # Original state lease, native configuration and provider are owned;
+            # no signer, control publisher or autonomous collector is created.
+            selection = dict(credit_repair)
+            selected_history = selection.pop("history", "current")
+            selected_coverage = coverage if selected_history == "current" else predecessor_coverage
+            if selected_history not in {"current", "predecessor"} or selected_coverage is None:
+                raise ValueError("credit repair requires its configured history owner")
+            await provider.start()
+            return await selected_coverage.repair_credit(stop=stop, **selection)
         key = await run_owned_thread(
             load_named_hotkey, Path(config.signer_key_file), config.signer_hotkey
         )

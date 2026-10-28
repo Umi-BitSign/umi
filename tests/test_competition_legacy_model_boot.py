@@ -433,3 +433,214 @@ def test_writer_shared_store_cannot_alias_installed_host_roots(legacy_boot, tmp_
                 writer.validate_writer_byte_store_paths(
                     selected.model_copy(update={"legacy_model_storage": (source,)}), host
                 )
+
+
+def test_original_verification_reused_by_real_reader_after_restart(
+    legacy_boot, tmp_path, monkeypatch
+):
+    c = legacy_boot
+    root = tmp_path / "original-verification"
+
+    def prepare():
+        return authenticate_legacy_model_sources(
+            c.config.legacy_model_storage,
+            series=c.config.series,
+            policy=c.config.policy,
+            model_delivery_adoptions=c.config.model_delivery_adoptions,
+            original_verification_directory=root,
+        )
+
+    prepare()
+
+    def no_original(*args, **kwargs):
+        raise AssertionError("unchanged originals must not be reread or reverified")
+
+    monkeypatch.setattr(AuthenticatedLegacyModelSources, "load_original", no_original)
+    monkeypatch.setattr(
+        "umi.competition_cohort_legacy_model_reuse.resolve_legacy_model_storage", no_original
+    )
+    prepared = prepare()
+    remote = Remote({})
+    readers = selected_legacy_model_readers(
+        prepared, multipart=remote, verification_root=tmp_path / "durable"
+    )
+    assert readers.resolve(c.source.cohort_sha256, baseline=True).selection.bundle == c.bundle
+    assert not remote.reads
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+def test_completed_original_receipt_requires_explicit_repair(legacy_boot, tmp_path, damage):
+    c = legacy_boot
+    root = tmp_path / "original-verification"
+
+    def prepare(**extra):
+        return authenticate_legacy_model_sources(
+            c.config.legacy_model_storage,
+            series=c.config.series,
+            policy=c.config.policy,
+            model_delivery_adoptions=c.config.model_delivery_adoptions,
+            original_verification_directory=root,
+            **extra,
+        )
+
+    prepare()
+    (receipt,) = root.glob("*/*/*.json")
+    if damage == "missing":
+        receipt.unlink()
+    else:
+        receipt.write_bytes(b"{damaged receipt")
+    with pytest.raises(LegacyModelStorageRepairRequired, match="explicit repair required"):
+        prepare()
+    repaired = prepare(original_verification_repair_reason="fixture missing/damaged receipt repair")
+    assert repaired.authenticated
+    prepare()  # A normal restarted owner reuses the explicitly repaired result.
+
+
+def test_changed_original_still_refuses_after_completed_reuse(legacy_boot, tmp_path):
+    c = legacy_boot
+    root = tmp_path / "original-verification"
+
+    def prepare():
+        return authenticate_legacy_model_sources(
+            c.config.legacy_model_storage,
+            series=c.config.series,
+            policy=c.config.policy,
+            model_delivery_adoptions=c.config.model_delivery_adoptions,
+            original_verification_directory=root,
+        )
+
+    prepared = prepare()
+    selected = next(iter(prepared.authenticated.values()))
+    path = (
+        Path(c.source.directory)
+        / "objects"
+        / (selected.legacy.baseline_manifest_raw_sha256 + ".json")
+    )
+    path.write_bytes(path.read_bytes() + b" ")
+    with pytest.raises(LegacyModelStorageRepairRequired):
+        prepare()
+
+
+def test_original_receipt_survives_marker_publication_interruption(
+    legacy_boot, tmp_path, monkeypatch
+):
+    import umi.competition_cohort_legacy_model_reuse as reuse
+
+    c = legacy_boot
+    root = tmp_path / "original-verification"
+
+    def prepare():
+        return authenticate_legacy_model_sources(
+            c.config.legacy_model_storage,
+            series=c.config.series,
+            policy=c.config.policy,
+            model_delivery_adoptions=c.config.model_delivery_adoptions,
+            original_verification_directory=root,
+        )
+
+    native = reuse.remember_metadata_completion
+
+    def interrupted(path):
+        raise RuntimeError("interrupted before completion marker")
+
+    monkeypatch.setattr(reuse, "remember_metadata_completion", interrupted)
+    with pytest.raises(RuntimeError, match="completion marker"):
+        prepare()
+
+    def no_original(*args, **kwargs):
+        raise AssertionError("an intact published receipt must not repeat completed verification")
+
+    monkeypatch.setattr(reuse, "remember_metadata_completion", native)
+    monkeypatch.setattr(AuthenticatedLegacyModelSources, "load_original", no_original)
+    prepare()
+    assert list(root.glob("*/*/*.complete"))
+
+
+def test_original_receipts_preserve_explicit_disk_reserve(legacy_boot, tmp_path, monkeypatch):
+    c = legacy_boot
+    monkeypatch.setenv("UMI_LEGACY_ORIGINAL_RECEIPT_MIN_FREE_BYTES", str(2**62))
+    root = tmp_path / "original-verification"
+    with pytest.raises(OSError, match="physical reserve"):
+        authenticate_legacy_model_sources(
+            c.config.legacy_model_storage,
+            series=c.config.series,
+            policy=c.config.policy,
+            model_delivery_adoptions=c.config.model_delivery_adoptions,
+            original_verification_directory=root,
+        )
+    assert not list(root.glob("*/*/*.json"))
+
+
+def test_unchanged_authenticated_context_is_not_serialized_again(
+    legacy_boot, tmp_path, monkeypatch
+):
+    import umi.competition_cohort_legacy_model_reuse as reuse
+
+    c = legacy_boot
+    root = tmp_path / "original-verification"
+    prepared = authenticate_legacy_model_sources(
+        c.config.legacy_model_storage,
+        series=c.config.series,
+        policy=c.config.policy,
+        model_delivery_adoptions=c.config.model_delivery_adoptions,
+        original_verification_directory=root,
+    )
+    authenticated = prepared.authenticated[c.source.cohort_sha256]
+    original = reuse.digest
+    protected = (
+        authenticated.policy,
+        authenticated.original_history,
+        authenticated.original_history.plan,
+        authenticated.legacy,
+        authenticated.preservation,
+    )
+
+    def no_repeat(value):
+        assert all(value is not model for model in protected), (
+            "unchanged immutable input was serialized again"
+        )
+        return original(value)
+
+    monkeypatch.setattr(reuse, "digest", no_repeat)
+    remote = Remote({})
+    readers = selected_legacy_model_readers(
+        prepared, multipart=remote, verification_root=tmp_path / "durable"
+    )
+    assert readers.resolve(c.source.cohort_sha256, baseline=True).selection.bundle == c.bundle
+    assert not remote.reads
+
+
+def test_original_receipt_context_keeps_existing_wire_bytes(legacy_boot, tmp_path):
+    import json
+
+    from umi.competition_verification_rules import runtime_identity
+
+    c = legacy_boot
+    root = tmp_path / "original-verification"
+    prepared = authenticate_legacy_model_sources(
+        c.config.legacy_model_storage,
+        series=c.config.series,
+        policy=c.config.policy,
+        model_delivery_adoptions=c.config.model_delivery_adoptions,
+        original_verification_directory=root,
+    )
+    value = prepared.authenticated[c.source.cohort_sha256]
+    (receipt,) = root.glob("*/*/*.json")
+    data = json.loads(receipt.read_bytes())
+    expected = digest(
+        [
+            "umi-legacy-original-resolution/1",
+            runtime_identity(),
+            digest(value.policy),
+            digest(value.original_history),
+            value.adoption_block,
+            digest(value.legacy),
+            digest(value.preservation),
+            value.preservation.models[0].endpoint,
+            value.preservation.models[0].bucket,
+            None,
+            True,
+            None,
+        ]
+    )
+    assert data["context"] == expected

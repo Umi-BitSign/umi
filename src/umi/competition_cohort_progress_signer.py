@@ -30,6 +30,7 @@ from .competition_cohort_recovery import (
 )
 from .competition_cohort_request_phase import RequestProgressReviewRecord
 from .competition_cohort_request_rule_api import require_adoption
+from .competition_cohort_suite_adoption_api import require_adoption as require_suite_adoption
 from .competition_progress import log_phase
 from .competition_round_journal import RoundJournal
 from .competition_work_progress import review_scope
@@ -156,12 +157,26 @@ class CohortProgressSigner:
         evidence = CohortDecisionInput.model_validate_json(canonical_json_bytes(evidence))
 
         async def review():
-            record = await self.reviewer.review(evidence.progress.progress)
+            progress = evidence.progress.progress
+            retained, signature = await run_owned_thread(
+                self._saved, "phase_progress", digest(progress), progress
+            )
+            if signature is None:
+                record = await self.reviewer.review(progress)
+                source = record.model_dump(mode="json", by_alias=True)
+            else:
+                # This signer's own committed exact-progress review survives
+                # restart. The separate decision review below checks the current
+                # owner history and proposed transition; repeating the original
+                # proof pass adds no new authority.
+                source = retained["review"]
+                if source.get("progress") != progress.model_dump(mode="json", by_alias=True):
+                    raise ValueError("retained phase review differs from its signed progress")
             history = await self.reviewer.decision(transition, evidence)
-            if history != record.history_sha256:
+            if history != source["history_sha256"]:
                 raise OSError("cohort history changed before decision signing")
             return {
-                "source": record.model_dump(mode="json", by_alias=True),
+                "source": source,
                 "decision": evidence.model_dump(mode="json", by_alias=True),
             }
 
@@ -191,6 +206,18 @@ class CohortProgressSigner:
 
         async def review():
             return await self.reviewer.model_delivery_adoption(transition)
+
+        slot = digest({"cohort": transition.cohort_sha256, "tip": transition.predecessor_sha256})
+        return await self._vote("phase_decision", slot, transition, review)
+
+    @log_phase("cohort_evaluation_suite_adoption_vote")
+    async def certify_evaluation_suite_adoption(self, transition):
+        transition = require_suite_adoption(transition)
+        if transition.cohort_sha256 not in {c.cohort_sha256 for c in self.config.cohorts}:
+            raise ValueError("suite vote is outside configured cohorts")
+
+        async def review():
+            return await self.reviewer.evaluation_suite_adoption(transition)
 
         slot = digest({"cohort": transition.cohort_sha256, "tip": transition.predecessor_sha256})
         return await self._vote("phase_decision", slot, transition, review)

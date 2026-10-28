@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack, suppress
 from functools import partial
@@ -62,6 +63,10 @@ from .competition_cohort_recovery import (
 from .competition_cohort_service_api import ServiceWorkAdmissionAPI, prepared_service_roster
 from .competition_cohort_service_queue import ServiceWorkQueue, ServiceWorkQueueConfig
 from .competition_cohort_service_work import MAX_CATALOG_BYTES, SignedServiceWorkCatalog
+from .competition_evaluation_runtime import (
+    SignedCohortEvaluationRuntimeAdoption,
+    verify_runtime_adoption_selection,
+)
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_host_activation import _read_root_control_path
 from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
@@ -74,7 +79,7 @@ from .concurrency import run_owned_thread
 from .host_memory_runtime import authorize_memory, requests_stage_policy
 from .named_hotkey import load_named_hotkey
 from .open_competition import Hotkey, digest, identity, sign_object
-from .private_files import Directory, lock_private_file, read_private_model
+from .private_files import Directory, PrivateStateBusyError, lock_private_file, read_private_model
 from .protocol import StrictProtocolModel, canonical_json_bytes
 from .r2_multipart import R2MultipartClient, r2_connection_scope
 from .r2_sigv4 import R2SigV4, load_r2_credentials
@@ -122,6 +127,7 @@ class DirectModelUploadHostConfig(StrictProtocolModel):
     r2_bucket: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")]
     standing_review_policy: StandingModelReviewPolicy
     maximum_uploads_per_cohort: Annotated[int, Field(ge=1, le=4096)] = 1024
+    # Compatibility declaration only; current retry history is metadata-bounded.
     maximum_attempts_per_upload: Annotated[int, Field(ge=2, le=64)] = 16
     maximum_metadata_bytes_per_cohort: Annotated[int, Field(ge=1024**2, le=16 * 1024**3)] = 1024**3
     attempt_lease_seconds: Annotated[int, Field(ge=30, le=900)] = 120
@@ -318,6 +324,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
     lifecycle: LifecycleHostConfig | None = None
     dispatch: ServiceDispatchConfig | None = None
     orders: OrderHostConfig | None = None
+    runtime_adoption: SignedCohortEvaluationRuntimeAdoption | None = None
 
     @model_serializer(mode="wrap")
     def serialize(self, handler):
@@ -344,10 +351,18 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             value.pop("dispatch", None)
         if self.orders is None:
             value.pop("orders", None)
+        if self.runtime_adoption is None:
+            value.pop("runtime_adoption", None)
         return value
 
     @model_validator(mode="after")
     def peers(self):
+        if (
+            self.model_uploads is not None
+            and self.model_uploads.retirement is not None
+            and not self.legacy_model_storage
+        ):
+            raise ValueError("model retirement requires authenticated preserved R2 sources")
         if bool(self.legacy_model_storage) != (
             self.legacy_model_verification_directory is not None
         ):
@@ -555,6 +570,9 @@ class ServiceAdmissionHost:
         c, policy = self.config, intake.policy
         verify_reward_manifest(canonical_json_bytes(c.manifest), c.series, policy)
         verify_recovery_authority(c.series.recovery, policy)
+        verify_runtime_adoption_selection(
+            c.runtime_adoption, policy=policy, authority=c.series.recovery.authority
+        )
         expected = {digest(p): digest(c.series.recovery.authority) for p in c.series.cohorts}
         if intake.bindings != expected:
             raise ValueError("service admission series differs from owned intake")
@@ -596,6 +614,8 @@ class ServiceAdmissionHost:
                 series=c.series,
                 policy=policy,
                 model_delivery_adoptions=selections,
+                original_verification_directory=Path(c.legacy_model_verification_directory)
+                / "originals",
             )
         self.payloads = None
         self.r2_multipart = None
@@ -684,7 +704,17 @@ class ServiceAdmissionHost:
                     policy=policy,
                 )
             self.direct_uploads = DirectModelUploadOwners(owners)
-        self.preparation = CohortPreparation(CohortAdmissionQueue(intake), promotion)
+        self.preparation = CohortPreparation(
+            CohortAdmissionQueue(intake), promotion, runtime_adoption=c.runtime_adoption
+        )
+
+        async def prepare_legacy_review(cohort, sub):
+            if not self.legacy_payloads.sources.has_cohort(cohort):
+                raise FileNotFoundError("model review requires its private review input")
+            return await self.legacy_payloads.sources.review_inputs(
+                cohort, sub.model_bundle, c.direct_model_uploads.standing_review_policy
+            )
+
         self.models = (
             ModelAcceptanceWorker(
                 CohortModelAcceptances(
@@ -706,6 +736,21 @@ class ServiceAdmissionHost:
                 Path(c.inputs_directory),
                 promotion.directory,
                 promote=(None if self.direct_uploads is None else self.direct_uploads.promote),
+                prepare_review=(
+                    prepare_legacy_review
+                    if self.legacy_payloads is not None and c.direct_model_uploads is not None
+                    else None
+                ),
+                priority_cohorts=(
+                    tuple(
+                        binding.cohort_sha256
+                        for binding in intake.config.cohorts
+                        if binding.cohort_sha256
+                        not in c.lifecycle.automatic_progression_hold_cohorts
+                    )
+                    if c.lifecycle is not None
+                    else None
+                ),
             )
             if model_authority
             else None
@@ -719,6 +764,21 @@ class ServiceAdmissionHost:
             self.continued_payloads = ContinuedModelUploadPayloads(
                 self.uploads, self.legacy_payloads.sources, self.models.owner, self.direct_uploads
             )
+        self.upload_delivery = None
+        if self.uploads is not None and self.legacy_payloads is not None:
+            self.upload_delivery = ModelUploadDelivery(
+                self.uploads,
+                remote_payloads=self.legacy_payloads,
+                continued_payloads=self.continued_payloads,
+            )
+            if self.uploads.config.retirement is not None:
+                from .competition_cohort_model_retirement import ModelUploadRetirement
+
+                self.upload_delivery.retirement = ModelUploadRetirement(
+                    self.uploads,
+                    self.upload_delivery,
+                    series=c.series,
+                )
         if self.uploads is not None or self.direct_uploads is not None:
             self.payloads = CohortModelPayloadRouter(
                 c.series.cohorts,
@@ -809,11 +869,12 @@ class ServiceAdmissionHost:
         authorize_memory(None, None, "intake")
         if self.legacy_payloads is None:
             return await run_owned_thread(self.uploads.poll_once)
-        return await ModelUploadDelivery(
+        delivery = getattr(self, "upload_delivery", None) or ModelUploadDelivery(
             self.uploads,
             remote_payloads=self.legacy_payloads,
             continued_payloads=self.continued_payloads,
-        ).poll_once()
+        )
+        return await delivery.poll_once()
 
     async def _poll_direct_uploads(self):
         authorize_memory(None, None, "intake")
@@ -823,8 +884,13 @@ class ServiceAdmissionHost:
         authorize_memory(None, None, "intake")
         return await self.models.poll_once()
 
+    async def _poll_model_inventory(self, cohorts=None):
+        authorize_memory(None, None, "intake")
+        return await self.models.report_inventory_once(cohorts)
+
     async def poll_once(self) -> dict:
         """One complete reconciliation for callers requesting a bounded cycle."""
+        inventory = None if self.models is None else await self._poll_model_inventory()
         legacy = None if self.uploads is None else await self._poll_legacy_uploads()
         direct = None if self.direct_uploads is None else await self._poll_direct_uploads()
         if legacy is not None and direct is not None:
@@ -834,6 +900,7 @@ class ServiceAdmissionHost:
         models = None if self.models is None else await self._poll_models()
         return {
             **await self._poll_catalogs(),
+            "model_inventory": inventory,
             "model_acceptance": models,
             "model_delivery": uploads,
         }
@@ -983,6 +1050,18 @@ class ServiceAdmissionHost:
             callbacks.append(("direct_uploads", self._poll_direct_uploads))
         if self.models is not None:
             callbacks.append(("models", self._poll_models))
+            cohorts = tuple(binding.cohort_sha256 for binding in self.intake.config.cohorts)
+            inventory_owner_count = min(16, len(cohorts))
+            for index in range(inventory_owner_count):
+                # The selected six cohorts get separate bounded observers.
+                # A slow historical read cannot age a successor's count.
+                group = cohorts[index::inventory_owner_count]
+                callbacks.append(
+                    (
+                        f"model_inventory_{index:02d}",
+                        partial(self._poll_model_inventory, group),
+                    )
+                )
         async with AsyncExitStack() as owners:
             tasks = []
             for component, callback in callbacks:
@@ -998,7 +1077,26 @@ class ServiceAdmissionHost:
 
     async def _poll_component(self, stop, component, callback):
         while not stop.is_set():
-            report = {**await callback(), "component": component}
+            started = time.monotonic()
+            try:
+                report = {**await callback(), "component": component}
+            except PrivateStateBusyError:
+                # A nonblocking journal mutex can be held by a concurrent
+                # request. Keep this reconciliation owner and its checkpoints;
+                # retry on the normal poll, without restarting all other work.
+                report = {
+                    "status": "service_reconciliation_retry",
+                    "component": component,
+                    "reason_code": "private_state_busy",
+                    "completed": 0,
+                    "total": 1,
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "stalled_or_retrying": True,
+                    "eta_seconds": None,
+                    "eta_basis": "waiting_for_private_state_mutex",
+                    "retry_seconds": self.config.poll_seconds,
+                    "certification_authority": False,
+                }
             logger.info("cohort_service_admission %s", canonical_json_bytes(report).decode("ascii"))
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=self.config.poll_seconds)

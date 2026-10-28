@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
@@ -14,6 +15,7 @@ from pydantic import Field, model_validator
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 
+from .competition_cohort_model_scores import PublicModelScoreCache
 from .competition_cohort_public_downloads import PublicModelDownload
 from .competition_cohort_public_results import PublicModelCatalog, PublicPaidResults
 from .competition_public_results_directory import (
@@ -22,6 +24,7 @@ from .competition_public_results_directory import (
     owned_directory,
     read_owned_file,
 )
+from .concurrency import run_owned_thread
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .r2_sigv4 import R2SigV4, load_r2_credentials
 
@@ -31,6 +34,7 @@ _ID = r"^[0-9a-f]{64}$"
 
 class CohortPublicApiConfig(StrictProtocolModel):
     results: PublicResultsDirectory
+    model_score_corrections: dict[Hex32, Hex32] = Field(default_factory=dict)
     r2_credential_path: str | None = None
     r2_bucket: str = "umi-model-artifacts"
     url_expiry_seconds: Annotated[int, Field(ge=60, le=604800)] = 3600
@@ -178,13 +182,20 @@ def publish_cohort(config: CohortPublicApiConfig, catalog, paid, downloads):
     return descriptor
 
 
-def cohort_public_routes(config: CohortPublicApiConfig, *, signer: R2SigV4 | None = None):
+def cohort_public_routes(
+    config: CohortPublicApiConfig, *, signer: R2SigV4 | None = None, model_scores=None
+):
     config = CohortPublicApiConfig.model_validate_json(canonical_json_bytes(config))
     if signer is None and config.r2_credential_path is not None:
         loaded = load_r2_credentials(Path(config.r2_credential_path))
         signer = R2SigV4(loaded.endpoint, config.r2_bucket, loaded.credentials)
     root, router = Path(config.results.directory), APIRouter()
     slots = asyncio.Semaphore(config.maximum_concurrent_reads)
+    model_scores = model_scores or PublicModelScoreCache(
+        root,
+        maximum_bytes=config.maximum_artifact_bytes,
+        corrections=config.model_score_corrections,
+    )
 
     def load(cohort):
         for p in (root, root / "cohorts", root / "artifacts"):
@@ -236,6 +247,22 @@ def cohort_public_routes(config: CohortPublicApiConfig, *, signer: R2SigV4 | Non
             "next_offset": offset + limit if offset + limit < len(items) else None,
             "items": items[offset : offset + limit],
         }
+
+    @router.get("/v1/competition/cohorts/{cohort}/model-results")
+    async def model_results(
+        cohort: Annotated[str, ApiPath(pattern=_ID)],
+        offset: int = Query(0, ge=0, le=65536),
+        limit: int = Query(100, ge=1, le=100),
+    ):
+        def result():
+            try:
+                body = model_scores.read(cohort)
+            except FileNotFoundError as error:
+                raise HTTPException(404, "certified model results not published") from error
+            items = body.pop("items")
+            return {**body, **page(items, offset, limit)}
+
+        return await bounded(result)
 
     @router.get("/v1/competition/cohorts/{cohort}/service-results")
     async def service_results(
@@ -398,6 +425,29 @@ def cohort_public_routes(config: CohortPublicApiConfig, *, signer: R2SigV4 | Non
 
 
 def create_cohort_public_app(config: CohortPublicApiConfig, *, signer: R2SigV4 | None = None):
-    app = FastAPI(title="UMI public cohort results", docs_url=None, redoc_url=None)
-    app.include_router(cohort_public_routes(config, signer=signer))
+    scores = PublicModelScoreCache(
+        config.results.directory,
+        maximum_bytes=config.maximum_artifact_bytes,
+        corrections=config.model_score_corrections,
+    )
+
+    @asynccontextmanager
+    async def lifespan(app):
+        stop = asyncio.Event()
+        try:
+            await run_owned_thread(scores.sample)
+        except (OSError, ValueError):
+            scores.failed = True
+        task = asyncio.create_task(scores.run(stop))
+        try:
+            yield
+        finally:
+            stop.set()
+            await task
+
+    app = FastAPI(
+        title="UMI public cohort results", docs_url=None, redoc_url=None, lifespan=lifespan
+    )
+    app.state.model_scores = scores
+    app.include_router(cohort_public_routes(config, signer=signer, model_scores=scores))
     return app

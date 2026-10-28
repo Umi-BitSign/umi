@@ -21,6 +21,7 @@ from typing import Any
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain import CompetitionChainConfig, _hotkey, _uint
 from .competition_chain_state import _cache_usage
+from .competition_reward_checkpoint_tip import OwnedCheckpointTip, validate_checkpoint_tip
 from .competition_reward_control import (
     FinalizedRewardControlProvider,
     _control_evidence,
@@ -83,6 +84,7 @@ class OwnedHistoricalRewardControl:
     evidence_sha256: str
     metadata_sha256: str
     chain_config_sha256: str
+    timestamp_ms: int
     evidence: bytes = field(repr=False)
     metadata: bytes = field(repr=False)
     _issuer: object = field(default=None, repr=False, compare=False)
@@ -105,6 +107,7 @@ def _binding(value: OwnedHistoricalRewardControl) -> str:
             "evidence": value.evidence_sha256,
             "metadata": value.metadata_sha256,
             "config": value.chain_config_sha256,
+            "timestamp_ms": value.timestamp_ms,
         }
     )
 
@@ -123,6 +126,8 @@ def validate_historical_reward_control(
         or type(observation.metadata) is not bytes
         or account_id32(observation.control_hotkey) != account_id32(expected_control_hotkey)
         or observation.chain_config_sha256 != expected_chain_config_sha256
+        or type(observation.timestamp_ms) is not int
+        or observation.timestamp_ms <= 0
     ):
         raise ValueError("historical reward control lacks the selected owned proof")
     context = observation._runtime_context
@@ -273,11 +278,13 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
         ):
             raise ValueError("reward control archive names another chain")
         timestamp, ceiling = await self._resolve_control_header(ref, archive.encoded)
-        runtime, _, control, committed = await verify_slot_archive(
+        runtime, actual_time, control, committed = await verify_slot_archive(
             archive, self._history_proof_tools(), timestamp=timestamp, ceiling=ceiling
         )
         _cache_usage(self._cache_root, self.config.maximum_cache_bytes)
-        return self._issue_control(archive, runtime, raw, metadata, control, committed), runtime
+        return self._issue_control(
+            archive, runtime, raw, metadata, control, committed, actual_time
+        ), runtime
 
     async def _runtime_for_owned_control_locked(
         self, observation: OwnedHistoricalRewardControl
@@ -321,7 +328,7 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
             self.config.runtime_metadata_binary_sha256,
         )
 
-    def _issue_control(self, archive, runtime, raw, metadata, control, committed):
+    def _issue_control(self, archive, runtime, raw, metadata, control, committed, timestamp_ms):
         """Issue only after capture or external replay has proved these inputs."""
         result = OwnedHistoricalRewardControl(
             archive.snapshot,
@@ -331,6 +338,7 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
             archive.evidence_sha256,
             runtime.metadata_sha256,
             digest(self.config),
+            timestamp_ms,
             raw,
             metadata,
             _issuer=_ISSUER,
@@ -345,10 +353,14 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
         )
         return result
 
-    async def _resolve_control_header(self, ref, encoded, *, retained_headers=None):
+    async def _resolve_control_header(
+        self, ref, encoded, *, retained_headers=None, completed_checkpoint=None
+    ):
         # Single historical reads and checkpoint restoration always acquire a
         # current owned head. Only an explicit bounded worker batch shares it.
         options = {} if retained_headers is None else {"retained_headers": retained_headers}
+        if completed_checkpoint is not None:
+            options["completed_checkpoint"] = completed_checkpoint
         async with self._control_header_window(**options) as resolve:
             return await resolve(ref, encoded)
 
@@ -397,6 +409,7 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
         self,
         *,
         retained_headers=None,
+        completed_checkpoint=None,
     ) -> AsyncIterator[Callable[[FinalizedSnapshotRef, str], Awaitable[tuple[int | None, int]]]]:
         """Resolve historical headers against one genuinely owned finalized head.
 
@@ -411,6 +424,15 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
         owner = asyncio.current_task()
         if self._closed or not self._lock.locked():
             raise ValueError("historical header window requires the running locked provider")
+        if completed_checkpoint is not None:
+            if not self._owned or type(completed_checkpoint) is not OwnedCheckpointTip:
+                raise ValueError("checkpoint tip requires the original native owner result")
+            validate_checkpoint_tip(
+                completed_checkpoint,
+                snapshot=completed_checkpoint.snapshot,
+                encoded_header=completed_checkpoint.encoded_header,
+                chain_config_sha256=digest(self.config),
+            )
         try:
             head = await self._finality.verified_finalized_snapshot()
         except Exception as error:
@@ -440,6 +462,11 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
                 raise ValueError("historical header resolver escaped its owned window")
             if ref.block_number > head.block_number:
                 raise ValueError("historical reward control is ahead of owned finality")
+            if completed_checkpoint is not None and (
+                completed_checkpoint.snapshot,
+                completed_checkpoint.encoded_header,
+            ) != (ref, encoded):
+                raise ValueError("checkpoint tip differs from the selected history boundary")
             original = await self._finality.verified_block_at(ref.block_number)
             timestamp = None
             if original is not None:
@@ -447,6 +474,18 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
                 if json.loads(original.finality_evidence)["block"]["scale_header"] != encoded:
                     raise ValueError("reward control header differs from owned history")
                 timestamp = original.timestamp_ms
+                ceiling = head_block.timestamp_ms
+            elif completed_checkpoint is not None:
+                # The original private success record already proved this
+                # immutable historical identity. A new owned head refreshes the
+                # finality ceiling, not the old ancestry/proof work. The history
+                # owner rechecks source generations after this await, before
+                # applying the checked batch in order. Raw archives and hints
+                # never reach this branch.
+                if ref.block_number == head.block_number and (
+                    ref != head or encoded != encoded_head
+                ):
+                    raise ValueError("completed checkpoint differs from the owned head")
                 ceiling = head_block.timestamp_ms
             else:
                 if not self._owned or self._registration_rpc is None:
@@ -586,5 +625,5 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
                 raise ValueError("historical control timestamp or subnet differs")
             _cache_usage(self._cache_root, self.config.maximum_cache_bytes)
             return self._issue_control(
-                archive, runtime, raw, runtime.metadata_bytes, control, committed
+                archive, runtime, raw, runtime.metadata_bytes, control, committed, actual_time
             )

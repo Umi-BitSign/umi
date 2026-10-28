@@ -17,6 +17,7 @@ from dataclasses import asdict
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_evidence_codec import checked_digest
 from .competition_reward_checkpoint_progress import CheckpointMetadataProgress
+from .competition_reward_checkpoint_tip import OwnedCheckpointTip, _issue_checkpoint_tip
 from .competition_reward_history_origin import check_checkpoint_origin
 from .competition_verification_rules import runtime_identity
 from .open_competition import digest, digest_canonical_bytes
@@ -135,6 +136,7 @@ class HistoryCheckpoints:
 
     def _initialize(self, journal, binding):
         self.journal = journal
+        self.binding = dict(binding)
         self._original_export_origins = {}
         self.remote_sources = None
         directory = journal.root.stat()
@@ -330,6 +332,17 @@ class HistoryCheckpoints:
                 if missing
                 else {}
             )
+            rechecked = (
+                dict(
+                    zip(
+                        reused,
+                        self.remote_sources.recheck_snapshot_tokens(list(reused.values())),
+                        strict=True,
+                    )
+                )
+                if reused
+                else {}
+            )
             for identity in group:
                 if identity in fresh:
                     fact = fresh[identity]
@@ -338,7 +351,7 @@ class HistoryCheckpoints:
                     # Remote indexes can change independently of this SQL
                     # snapshot; every reused receipt still receives its check.
                     fact = reused[identity]
-                    token = self.remote_sources.recheck_snapshot_token(fact)
+                    token = rechecked[identity]
                 _remember_source_token(snapshot_tokens, identity, fact)
                 out.append(token)
         return out
@@ -405,6 +418,19 @@ class HistoryCheckpoints:
             )
             failure.height = height
             raise failure from error
+
+    def load_restore_batch(
+        self, first: int, last: int
+    ) -> tuple[list[dict], OwnedCheckpointTip | None]:
+        """Carry the checked native tip across the owner's async finality read.
+
+        These original-owner receipts already establish historical finality.
+        The ordinary fresh source recheck still fences every item before apply;
+        neither serialization nor an imported archive can issue this capability.
+        """
+        values = self.load_many(first, last)
+        tip = _issue_checkpoint_tip(self, values[-1]) if values else None
+        return values, tip
 
     def header_hints(self, first: int, last: int) -> tuple[str, ...]:
         """Reuse completed local headers without opening their proof payloads.
@@ -612,13 +638,37 @@ class HistoryCheckpoints:
                 )
             }
             if self.remote_sources is not None:
-                for height in range(first, last + 1):
-                    if height in captured:
-                        continue
-                    alias = self.remote_sources._alias("control_history_block", str(height), db)
-                    if alias is not None:
-                        self.remote_sources.source_token("control_history_block", str(height), db)
-                        captured.add(height)
+                pending = [
+                    (str(height), digest(["control_history_block", str(height)]))
+                    for height in range(first, last + 1)
+                    if height not in captured
+                ]
+                for start in range(0, len(pending), 256):
+                    group = pending[start : start + 256]
+                    arguments = [alias for _, alias in group]
+                    markers = ",".join("?" for _ in arguments)
+                    aliases = {
+                        row[0]
+                        for row in db.execute(
+                            "SELECT id FROM records WHERE kind=? AND id IN (" + markers + ")",
+                            [self.remote_sources.alias_kind, *arguments],
+                        )
+                    }
+                    aliases.update(
+                        row[0]
+                        for row in db.execute(
+                            "SELECT id FROM holds WHERE id IN (" + markers + ")",
+                            arguments,
+                        )
+                    )
+                    keys = [
+                        ("control_history_block", height)
+                        for height, alias in group
+                        if alias in aliases
+                    ]
+                    if keys:
+                        self.remote_sources.snapshot_tokens(keys, db)
+                        captured.update(int(key) for _, key in keys)
             verified, exported = set(), set()
             for height, body in db.execute(
                 "SELECT i.height,r.body FROM history_checkpoint_index i LEFT JOIN records r "

@@ -1,6 +1,8 @@
 """Owned artifact admission and real intake fencing with synthetic finality."""
 
 import asyncio
+import json
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from types import SimpleNamespace
@@ -255,20 +257,48 @@ def observe(phase, cohort, block):
     )
 
 
-def test_intake_waits_for_every_model_and_closes_after_delayed_certification(prepared):
+def test_intake_waits_for_every_model_and_closes_after_delayed_certification(prepared, caplog):
     owner, cohort, subs, inputs = prepared
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
     phase = CohortIntakePhaseObserver(owner.intake)
     for block in range(200, 301, 5):
         result = observe(phase, cohort, block)
     assert result.seal is None
+    waits = [
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in caplog.records
+        if record.getMessage().startswith("cohort_intake_wait ")
+    ]
+    assert waits[-1]["reason_code"] == "selected_model_artifact_acceptance_pending"
+    assert waits[-1]["pending_submission_sha256"] in {digest(sub) for sub in subs}
+    assert waits[-1]["serving"] is True
+    assert waits[-1]["observed_at_block"] >= waits[-1]["earliest_seal_block"]
+    assert (waits[-1]["completed"], waits[-1]["total"], waits[-1]["percent"]) == (0, 2, 0)
     first = certify(owner, cohort, subs[0], inputs, block=300)
     owner.publish(first, capture_at(300))
     assert observe(phase, cohort, 305).seal is None
+    latest = json.loads(
+        next(
+            r.getMessage().split(" ", 1)[1]
+            for r in reversed(caplog.records)
+            if r.getMessage().startswith("cohort_intake_wait ")
+        )
+    )
+    assert (latest["completed"], latest["total"], latest["percent"]) == (1, 2, 50)
     second = certify(owner, cohort, subs[1], inputs, block=4000)
     assert second.certificate.acceptance.accepted_ordinal == 2
     owner.publish(second, capture_at(4000))
     closed = observe(phase, cohort, 4000)
     assert closed.seal is not None and len(closed.seal.selected) == 2
+    completed = json.loads(
+        next(
+            r.getMessage().split(" ", 1)[1]
+            for r in reversed(caplog.records)
+            if r.getMessage().startswith("cohort_model_certification_progress ")
+        )
+    )
+    assert (completed["completed"], completed["total"], completed["percent"]) == (2, 2, 100)
+    assert completed["certification_authority"] is False
     reopened = CohortIntakePhaseObserver(
         CohortIntake(
             owner.intake.config, owner.intake.policy, eligible_tracks=("endpoint", "model")
@@ -429,6 +459,236 @@ async def test_worker_promotes_before_publication_and_retries_retained_acceptanc
     assert second["entries_pending"] == 0
     assert calls.count(failed) == 2
     assert calls.count(digest(subs[1])) == 2
+
+
+async def test_worker_reports_actual_pending_item_before_whole_batch_finishes(
+    prepared, tmp_path, monkeypatch, caplog
+):
+    owner, cohort, _, inputs = prepared
+    publish_private_model(
+        tmp_path / "inputs/model-reviews" / (inputs.model_sha256 + ".json"), inputs
+    )
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def held_payload(*_args):
+        started.set()
+        await release.wait()
+        raise OSError("private document diagnostic must not leak")
+
+    monkeypatch.setattr(owner, "ensure_payload", held_payload)
+    worker = ModelAcceptanceWorker(owner, None, tmp_path / "inputs", tmp_path / "output")
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
+    task = asyncio.create_task(worker.poll_once())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=10)
+        assert not task.done()
+        messages = [r.getMessage() for r in caplog.records]
+        stages = [
+            json.loads(m.split(" ", 1)[1])
+            for m in messages
+            if m.startswith("model_acceptance_stage ")
+        ]
+        active = next(s for s in stages if s["stage"] == "payload")
+        assert active["cohort_sha256"] == cohort
+        assert len(active["submission_sha256"]) == 64
+        assert active["completed"] == 0 and active["status"] == "running"
+        release.set()
+        assert (await task)["entries_pending"] == 2
+        assert "private document diagnostic" not in caplog.text
+        assert '"error_type":"OSError"' in caplog.text
+        assert '"state":"accounting_mismatch"' not in caplog.text
+    finally:
+        release.set()
+        if not task.done():
+            await task
+
+
+@pytest.mark.parametrize("damage", ["missing", "malformed"])
+async def test_missing_review_inputs_do_not_trigger_remote_payload_work(
+    prepared, tmp_path, monkeypatch, damage
+):
+    owner, cohort, subs, inputs = prepared
+    root, out = tmp_path / "inputs", tmp_path / "output"
+    if damage == "malformed":
+        path = root / "model-reviews" / (inputs.model_sha256 + ".json")
+        path.parent.mkdir(mode=0o700, parents=True)
+        path.write_bytes(b"{}")
+        path.chmod(0o600)
+
+    async def forbidden(*args):
+        raise AssertionError("unavailable review input caused model byte work or new finality")
+
+    monkeypatch.setattr(owner, "ensure_payload", forbidden)
+    worker = ModelAcceptanceWorker(owner, forbidden, root, out)
+    for _ in range(2):
+        result = await worker.poll_once()
+        assert result["entries_pending"] == 2
+        assert result["entries_exported"] == 0
+    for sub in subs:
+        assert not owner.has_intent(cohort, digest(sub))
+
+
+async def test_retained_intent_recovers_without_external_review_file_but_requires_payload(
+    prepared, tmp_path, monkeypatch
+):
+    owner, cohort, subs, inputs = prepared
+    root, out = tmp_path / "inputs", tmp_path / "output"
+    for sub in subs:
+        publication = certify(owner, cohort, sub, inputs)
+        assert owner.has_intent(cohort, digest(sub))
+        publish_private_model(
+            root / "model-acceptance-publications" / cohort / (digest(sub) + ".json"), publication
+        )
+    assert not (root / "model-reviews").exists()
+    calls = []
+
+    async def unavailable(*args):
+        calls.append(args)
+        raise OSError("remote byte verification unavailable")
+
+    monkeypatch.setattr(owner, "ensure_payload", unavailable)
+
+    async def capture():
+        return capture_at(220)
+
+    worker = ModelAcceptanceWorker(owner, capture, root, out)
+    result = await worker.poll_once()
+    assert result["entries_pending"] == len(calls) == 2
+    for sub in subs:
+        with pytest.raises(PendingModelArtifacts):
+            owner.retained(cohort, digest(sub))
+
+    async def available(*args):
+        calls.append(args)
+
+    monkeypatch.setattr(owner, "ensure_payload", available)
+    assert (await worker.poll_once())["entries_exported"] == 2
+    assert len(calls) == 4
+
+
+async def test_latest_pending_candidate_runs_before_old_export_cursor_wraps(prepared, tmp_path):
+    owner, cohort, subs, inputs = prepared
+    root, out = tmp_path / "inputs", tmp_path / "output"
+    published = certify(owner, cohort, subs[0], inputs)
+    owner.publish(published, capture_at(220))
+    pending = certify(owner, cohort, subs[1], inputs)
+    publish_private_model(
+        root / "model-acceptance-publications" / cohort / (digest(subs[1]) + ".json"), pending
+    )
+    keys = [key for key, _ in owner.entries(cohort)]
+    assert [digest(sub) for _, sub in owner.pending_latest_entries(cohort)] == [digest(subs[1])]
+
+    async def capture():
+        return capture_at(220)
+
+    worker = ModelAcceptanceWorker(owner, capture, root, out, batch_size=1)
+    worker.cursors[cohort] = max(keys)
+    assert (await worker.poll_once())["entries_exported"] == 1
+    assert owner.retained(cohort, digest(subs[1])).certificate == pending.certificate
+    assert not owner.pending_latest_entries(cohort)
+    # The ordinary cursor remains fair: existing publication exports still run.
+    for _ in range(2):
+        await worker.poll_once()
+    assert (out / "model-reward-acceptances" / cohort / (digest(subs[0]) + ".json")).exists()
+
+
+def replace_model_submission(owner, cohort, original_sub):
+    from umi.competition_cohort_intake_records import read_participation
+
+    key, _ = next((k, s) for k, s in owner.entries(cohort) if s == original_sub)
+    original = read_participation(CohortAdmissionQueue(owner.intake).record(cohort, key)).request
+    sub = original.signed_submission.submission.model_copy(update={"sequence": 2})
+    signed = original.signed_submission.model_copy(
+        update={"submission": sub, "signature": sign_object(sub, wallet("Alice"))}
+    )
+    consent = original.consent.consent.model_copy(update={"submission_sha256": digest(sub)})
+    request = original.model_copy(
+        update={
+            "signed_submission": signed,
+            "consent": original.consent.model_copy(
+                update={"consent": consent, "signature": sign_object(consent, wallet("Alice"))}
+            ),
+        }
+    )
+    owner.intake.retain(
+        request, capture_at(210 + owner.intake.policy.minimum_submission_interval_blocks)
+    )
+    return sub
+
+
+def test_priority_uses_latest_sequence_and_keeps_superseded_recovery_scan(prepared):
+    owner, cohort, subs, _ = prepared
+    sub = replace_model_submission(owner, cohort, subs[0])
+    priority = {digest(s) for _, s in owner.pending_latest_entries(cohort)}
+    assert digest(sub) in priority and digest(subs[0]) not in priority
+    assert digest(subs[1]) in priority
+    assert {digest(s) for _, s in owner.entries(cohort)} == priority | {digest(subs[0])}
+    ordered = owner.pending_latest_entries(cohort)
+    assert owner.pending_latest_entries(cohort, limit=1, offset=1) == ordered[1:2]
+    assert owner.pending_latest_entries(cohort, limit=1, offset=len(ordered)) == ()
+    with pytest.raises(ValueError, match="offset exceeds"):
+        owner.pending_latest_entries(
+            cohort, limit=1, offset=owner.intake.capacity.maximum_records + 1
+        )
+
+
+async def test_intake_certifies_replacement_before_closure_and_reuses_after_restart(
+    prepared, tmp_path, monkeypatch
+):
+    owner, cohort, subs, inputs = prepared
+    root, out = tmp_path / "inputs", tmp_path / "output"
+    original_history = canonical_json_bytes(owner.intake.history(cohort))
+    for sub in subs:
+        owner.publish(certify(owner, cohort, sub, inputs), capture_at(220))
+    assert owner.certification_inventory(cohort)["completed"] == 2
+    replacement = replace_model_submission(owner, cohort, subs[0])
+    inventory = owner.certification_inventory(cohort)
+    assert (inventory["completed"], inventory["total"]) == (1, 2)
+    assert inventory["pending_submission_sha256s"] == (digest(replacement),)
+    assert inventory["selection_scope"] == "latest_model_submissions"
+    queue = CohortAdmissionQueue(owner.intake)
+    key, _ = next((k, s) for k, s in owner.entries(cohort) if s == replacement)
+    record = acceptance_module.read_participation(queue.record(cohort, key))
+    for signature in signatures(record.proposed_admission):
+        queue.publish_vote(
+            CohortAdmissionVote(admission=record.proposed_admission, signature=signature),
+            capture_at(220),
+        )
+    publication = certify(owner, cohort, replacement, inputs)
+    publish_private_model(
+        root / "model-acceptance-publications" / cohort / (digest(replacement) + ".json"),
+        publication,
+    )
+
+    async def capture():
+        return capture_at(220)
+
+    # Restarts retain the original proposal, votes and certificate. No lifecycle
+    # controller is run: certification must happen while intake remains open.
+    worker = ModelAcceptanceWorker(owner, capture, root, out)
+    assert (await worker.poll_once())["entries_pending"] == 0
+    assert canonical_json_bytes(owner.intake.history(cohort)) == original_history
+    assert owner.certification_inventory(cohort)["completed"] == 2
+    root.rename(tmp_path / "inputs-offline")
+    owner.archive.rename(tmp_path / "archive-offline")
+
+    async def offline():
+        raise AssertionError("completed intake certificates must not repeat RPC or payload work")
+
+    restored = CohortModelAcceptances(owner.intake, owner.archive)
+    monkeypatch.setattr(restored, "prepare", offline)
+    resumed = ModelAcceptanceWorker(restored, offline, root, out)
+    assert (await resumed.poll_once())["entries_pending"] == 0
+    assert restored.retained(cohort, digest(replacement)).certificate == publication.certificate
+
+
+def test_priority_refuses_changed_native_sequence_index(prepared):
+    owner, cohort, _, _ = prepared
+    key, _ = owner.entries(cohort)[0]
+    with owner.intake._connection() as (db, _):
+        db.execute("UPDATE cohort_consents SET sequence=999 WHERE consent=?", (key,))
+    with pytest.raises(ValueError, match="index differs"):
+        owner.pending_latest_entries(cohort)
 
 
 def test_missing_payload_cannot_reserve_a_model_position(prepared):
@@ -615,3 +875,39 @@ def test_verified_seal_reuse_never_hides_changed_model_acceptance(prepared, dama
             )
     with pytest.raises((ValueError, PendingModelArtifacts)):
         owner.intake.sealed(cohort, tip)
+
+
+@pytest.mark.parametrize("damage", ["missing", "malformed"])
+async def test_private_review_preparation_repairs_missing_only_and_is_reused(
+    prepared, tmp_path, damage
+):
+    owner, cohort, subs, inputs = prepared
+    root, out = tmp_path / "inputs", tmp_path / "output"
+    sub = subs[0]
+    path = root / "model-reviews" / (sub.model_revision + ".json")
+    if damage == "malformed":
+        path.parent.mkdir(mode=0o700, parents=True)
+        path.write_bytes(b"{}")
+        path.chmod(0o600)
+    calls = []
+
+    async def prepare(selected_cohort, selected_sub):
+        calls.append((selected_cohort, selected_sub))
+        return inputs
+
+    async def capture():
+        return capture_at(220)
+
+    worker = ModelAcceptanceWorker(owner, capture, root, out, prepare_review=prepare)
+    if damage == "malformed":
+        with pytest.raises(ValueError):
+            await worker._one(cohort, sub)
+        assert not calls and path.read_bytes() == b"{}"
+    else:
+        with pytest.raises(FileNotFoundError):
+            await worker._one(cohort, sub)  # Independent publication has not arrived.
+        assert calls == [(cohort, sub)]
+        assert path.exists() and owner.has_intent(cohort, digest(sub))
+        with pytest.raises(FileNotFoundError):
+            await worker._one(cohort, sub)
+        assert calls == [(cohort, sub)]

@@ -56,8 +56,25 @@ def _timestamp(value: datetime | None) -> tuple[str, str]:
 class R2Credentials:
     access_key_id: str
     secret_access_key: str = field(repr=False)
+    metadata_batch_origin: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        if self.metadata_batch_origin is not None:
+            if type(self.metadata_batch_origin) is not str:
+                raise ValueError("R2 metadata batch origin differs")
+            origin = urlsplit(self.metadata_batch_origin)
+            if (
+                origin.scheme != "https"
+                or not origin.hostname
+                or origin.username
+                or origin.password
+                or origin.port is not None
+                or origin.path
+                or origin.query
+                or origin.fragment
+                or origin.netloc != origin.hostname
+            ):
+                raise ValueError("R2 metadata batch origin differs")
         if _ACCESS_KEY.fullmatch(self.access_key_id) is None:
             raise ValueError("R2 access key differs")
         if not 16 <= len(self.secret_access_key) <= 256 or any(
@@ -114,14 +131,19 @@ def load_r2_credentials(path: Path) -> LoadedR2Credentials:
             if separator != "=" or not key or key in values:
                 raise ValueError("R2 credentials file differs")
             values[key] = value.strip().strip('"').strip("'")
-        if set(values) != {
+        required = {
             "TOKEN_VALUE",
             "ACCESS_KEY_ID",
             "SECRET_ACCESS_KEY",
             "DEFAULT_ENDPOINT",
-        }:
+        }
+        if set(values) not in (required, required | {"METADATA_BATCH_ORIGIN"}):
             raise ValueError("R2 credentials file differs")
-        credentials = R2Credentials(values["ACCESS_KEY_ID"], values["SECRET_ACCESS_KEY"])
+        credentials = R2Credentials(
+            values["ACCESS_KEY_ID"],
+            values["SECRET_ACCESS_KEY"],
+            values.get("METADATA_BATCH_ORIGIN"),
+        )
         # Reuse the signer parser for the exact account endpoint requirement.
         R2SigV4(values["DEFAULT_ENDPOINT"], "validation-bucket", credentials)
         return LoadedR2Credentials(values["DEFAULT_ENDPOINT"], credentials)

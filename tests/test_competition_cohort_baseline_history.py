@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 from umi import competition_store
+from umi.competition_launch import PublicLaunchIdentity, PublicRoundSchedule
 from umi.competition_runtime_port import baseline_record_digest
 from umi.competition_store import CompetitionStore
 from umi.open_competition import digest
@@ -42,6 +43,7 @@ from .test_competition_cohort_baseline_review import (
 from .test_competition_cohort_baseline_review import (
     runtime as runtime,
 )
+from .test_open_competition import round_for, snapshot, submission, suite_for
 
 pytestmark = [
     pytest.mark.parametrize("receipt_scenario", ["model-awards"], indirect=True),
@@ -63,6 +65,54 @@ def retained_case(review_case, model_case, tmp_path):
 
 def apply(store, review, **options):
     return store.apply_cohort_baseline(certify(review), observed_block=options.get("block", 230))
+
+
+def test_certified_winner_is_not_blocked_by_unused_continuous_calendar(retained_case):
+    store, review, baseline, _ = retained_case
+    launch = PublicLaunchIdentity(
+        schema="umi-competition-public-launch/2",
+        eligible_tracks=("model",),
+        round_stride_blocks=200,
+        round_schedule=PublicRoundSchedule(
+            schema="umi-public-round-schedule/1",
+            intake_opened_block=100,
+            roster_close_earliest_block=150,
+            roster_close_latest_block=151,
+            work_signing_close_block=160,
+            evaluation_close_block=180,
+            protected_reference_reveal_block=190,
+            evidence_cutoff_block=200,
+            round_valid_through_block=300,
+        ),
+    )
+    store = CompetitionStore(store.directory, store.policy, public_launch=launch)
+    record = apply(store, review)
+    assert record["previous_promotion_sha256"] == baseline_record_digest(baseline)
+    reopened = CompetitionStore(store.directory, store.policy, public_launch=launch)
+    assert reopened.baseline() == record
+    assert reopened.public_launch == launch
+    assert reopened.cohort_baseline_application_status(certify(review)) == "completed"
+
+
+def test_actual_retained_round_still_blocks_certified_winner(retained_case):
+    store, review, baseline, batch = retained_case
+    original = batch["scenarios"][0]["artifacts"][0].job.incumbent
+    signed = submission(store.policy)
+    store.admit(signed, snapshot(), 110)
+    round_ = round_for(store.policy, suite_for(store.policy), (signed,), digest(original))
+    round_ = round_.model_copy(
+        update={
+            "valid_through_block": 300,
+            "public_schedule": round_.public_schedule.model_copy(
+                update={"round_valid_through_block": 300}
+            ),
+        }
+    )
+    store.close_round(round_, current_block=round_.submission_close_block)
+    before = rows(store)
+    with pytest.raises(ValueError, match="during a retained round"):
+        apply(store, review)
+    assert rows(store) == before and store.baseline() == baseline
 
 
 def rows(store):
@@ -225,3 +275,49 @@ def test_retained_damage_requires_repair_instead_of_silent_reverification(retain
             connection.execute("DELETE FROM metadata WHERE key='cohort_baseline_writer'")
     with pytest.raises(ValueError):
         CompetitionStore(store.directory, store.policy)
+
+
+def test_certified_reference_survives_restart_without_editing_legacy_inventory(retained_case):
+    store, review, _, _ = retained_case
+    target, model = review.target_cohort_sha256, review.candidate.model_sha256
+    args = (target, review.target_sequence, model)
+    assert not store.verified_cohort_baseline_model(*args, maximum_bytes=1_000_000)
+    apply(store, review)
+    reopened = CompetitionStore(store.directory, store.policy, read_only_existing=True)
+    assert reopened.verified_cohort_baseline_model(*args, maximum_bytes=1_000_000)
+    assert reopened.certified_cohort_baseline_reference(*args, maximum_bytes=1_000_000) == review
+    assert not reopened.verified_cohort_baseline_model(
+        "ef" * 32, review.target_sequence, model, maximum_bytes=1_000_000
+    )
+    assert not reopened.verified_cohort_baseline_model(
+        target, review.target_sequence + 1, model, maximum_bytes=1_000_000
+    )
+    assert not reopened.verified_cohort_baseline_model(
+        target, review.target_sequence, review.previous.model_sha256, maximum_bytes=1_000_000
+    )
+
+
+@pytest.mark.parametrize("damage", ["missing", "bytes", "wrong_target"])
+def test_certified_reference_cannot_hide_missing_or_damaged_receipt(retained_case, damage):
+    store, review, _, _ = retained_case
+    apply(store, review)
+    key = "cohort_baseline_receipt:" + str(review.previous.sequence + 1)
+    with store._connection() as db:
+        if damage == "missing":
+            db.execute("DELETE FROM metadata WHERE key=?", (key,))
+        else:
+            raw = db.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()[0]
+            if damage == "bytes":
+                raw += "\n"
+            else:
+                value = json.loads(raw)
+                value["certificate"]["review"]["target_cohort_sha256"] = "ef" * 32
+                raw = canonical_json_bytes(value).decode()
+            db.execute("UPDATE metadata SET value=? WHERE key=?", (raw, key))
+    with pytest.raises(ValueError):
+        store.verified_cohort_baseline_model(
+            review.target_cohort_sha256,
+            review.target_sequence,
+            review.candidate.model_sha256,
+            maximum_bytes=1_000_000,
+        )

@@ -166,6 +166,15 @@ to conceal a repair requirement.
 
 ## Upgrade an existing miner
 
+The endpoint upgrade manifest currently selects C5, for retained C5 endpoint
+work and recovery. C7 and later public-model submissions use the separate model
+client below. Their original signed plans may still display endpoint/model at
+50/50; the later signed model-delivery adoption selects the effective model-only
+profile. The cohort catalog reports `effective_eligible_tracks` and
+`effective_service_pool_bps` from that adoption. The endpoint updater must not
+enroll an endpoint into a cohort whose effective profile is model-only. A C5
+endpoint miner can remain offline while its old journals are retained.
+
 Linux miners managed by systemd use one updater. Choose only whether
 you intend to participate in the public-model track:
 
@@ -331,8 +340,8 @@ coordinator repairs that archive. Keep retrying the original claim; do not sign
 a replacement to work around a temporary hold.
 
 The updater installs itself at `/usr/local/libexec/umi-miner-upgrade`. Use that
-same installed file for later cohorts; the current manifest supplies the active
-cohort's inputs and allowed tracks:
+same installed file for later supported endpoint cohorts when their matching
+manifest is published. The current C5 manifest does not select C7 model intake:
 
 ```sh
 sudo /usr/local/libexec/umi-miner-upgrade --public-model-track yes
@@ -394,8 +403,16 @@ its root account; do not move wallets or switch accounts to install this client:
 )
 ```
 
-The installer verifies the current manifest against public status and requires
-the model track to be available. It installs the selected exact source revision
+On macOS, `python3` may be Apple's Python 3.9. The installer detects that and
+restarts itself under an installed Python 3.10–3.14 before fetching the
+manifest. It checks Python commands on `PATH`, then the standard Homebrew
+locations. If your supported Python is elsewhere, set
+`UMI_MODEL_CLIENT_PYTHON=/absolute/path/to/python3` for the command above.
+The installer stops with an explicit prerequisite error if none is available;
+it does not change the endpoint miner or its Python environment.
+
+The installer verifies the published client source against public status and
+requires the model track to be available in that source profile. It installs the selected exact source revision
 and its locked dependencies in a separate, noneditable virtual environment under
 `~/.local/share/umi/model-client`. It verifies the installed source, dependency
 lock and submission command before selecting the new command. A maintenance
@@ -423,6 +440,12 @@ or verification fails. Previously installed releases remain available for
 already-running uploads and recovery. Do not remove their directories while a
 process uses them. A failed new installation does not erase earlier releases.
 
+The installer reads `deploy/miner-upgrade/current.json` for the exact client
+source, including while that manifest names C5 for retained endpoint work. The
+client selects C7+ participation from the requested cohort's signed history.
+It does not install new code in the background; a new server deployment alone
+does not update an installed client.
+
 This mode does not discover, stop or change an endpoint service. It does not read
 wallets, migrate a startup file, change service accounts, move grant or protocol
 journals, sign consent or enroll a model. It works alongside an older, manual,
@@ -435,12 +458,17 @@ the new command. Follow [model delivery](model.md#model-files-for-recoverable-co
 with the same request, source, wallet and policy to resume an interrupted upload.
 The current client authenticates model-delivery changes from cohort history,
 resumes a retained original through its authenticated continuation when required,
-and uploads new direct-delivery payloads to R2. It signs additional transport
+and uploads new direct-delivery payloads to R2. It also reads authenticated
+amendments that make a previously mixed cohort model-only. Updating the client
+does not reopen intake or enable an upload route; the cohort's authenticated
+history selects those rules. It signs additional transport
 declarations using the same wallet; do not edit or re-sign the original request.
 Admission review follows byte delivery, so an uploaded payload alone does not
 mean the model has been admitted.
 Direct R2 transfers retry temporary network failures, throttling and expired
-capabilities. A connection with no read/write progress for five minutes returns
+capabilities. If R2 loses a multipart upload before completion, the client
+authenticates a replacement upload and retries with the original signed request.
+A connection with no read/write progress for five minutes returns
 to that retry loop; this is an inactivity timeout, not a deadline for the whole
 model. An interrupted multipart delivery can retransmit parts when rerun with
 the same request. A completed, verified payload is reused without uploading it

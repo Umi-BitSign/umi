@@ -28,6 +28,7 @@ from .test_competition_cohort_model_delivery_issuance import case as case
 from .test_competition_cohort_model_delivery_issuance import census, post
 from .test_competition_cohort_model_delivery_issuance import issuance as issuance
 from .test_competition_cohort_model_delivery_issuance import legacy_scenario as legacy_scenario
+from .test_competition_cohort_model_delivery_issuance import model_only as model_only
 from .test_competition_cohort_model_delivery_issuance import owner_api as owner_api
 from .test_competition_cohort_model_delivery_issuance import policy as policy
 from .test_competition_cohort_model_delivery_issuance import prepared as prepared

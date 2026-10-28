@@ -19,7 +19,11 @@ from umi.competition_cohort_reward_certification import (
     replay_reward_allocation,
     verify_certified_reward_allocation,
 )
-from umi.competition_geometric_rewards import GEOMETRIC_MODEL_REWARD_RULE, GeometricRewardParameters
+from umi.competition_geometric_rewards import (
+    GEOMETRIC_MODEL_REWARD_RULE,
+    GeometricRewardParameters,
+    cohort_reward_parameters,
+)
 from umi.competition_round_journal import RoundJournal
 from umi.competition_store import CompetitionStore
 from umi.open_competition import digest
@@ -78,7 +82,11 @@ def test_native_award_uses_signed_parameters_and_first_canonical_content(model_c
 
 
 @pytest.mark.parametrize("model_case", [("proportional", 2)], indirect=True)
-@pytest.mark.parametrize("receipt_scenario", ["geometric-model-awards"], indirect=True)
+@pytest.mark.parametrize(
+    "receipt_scenario,recovery",
+    [("geometric-model-awards", "legacy"), ("geometric-model-awards-c7", "legacy7")],
+    indirect=True,
+)
 def test_native_geometric_allocation_recovers_lost_reply_and_certifies(
     model_case, tmp_path, monkeypatch
 ):
@@ -157,6 +165,8 @@ def test_native_geometric_allocation_recovers_lost_reply_and_certifies(
         == result
     )
     assert result.schema_ == "umi-cohort-reward-allocation/5"
+    if batch["history"].plan.sequence == 7:
+        assert result.model_award.parameters == cohort_reward_parameters(7)
 
 
 def test_native_authority_signs_each_parameter_and_preserves_legacy_bytes(recovery, policy):

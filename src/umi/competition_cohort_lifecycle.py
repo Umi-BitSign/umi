@@ -25,6 +25,7 @@ from .competition_cohort_coordinator import (
 )
 from .competition_cohort_history import CohortRecoveryHistory
 from .competition_cohort_progress_signer import CertifiedPhaseObserver
+from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
 from .competition_cohort_recovery import CohortRecoveryState, Phase, StandingCohortRecoveryAuthority
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_cohort_request_start import SeriesRequestStart
@@ -149,6 +150,7 @@ class CohortLifecycleService:
             "expected_round_sha256": self.expected_round_sha256,
             "error_type": error_type,
         }
+        PUBLIC_COHORT_PROGRESS.record("lifecycle", report)
         logger.info("%s", canonical_json_bytes(report).decode())
 
     async def _driver(self, phase: Phase) -> CohortPhaseDriver:
@@ -296,9 +298,12 @@ class CohortLifecycleService:
                 await self.before_tick()
             history, state, _, _ = self.controller._history()
             self._remember_state(state)
+            if state.phase == "intake" and self.request_start is not None:
+                await self.request_start.observe_cutover(self.cohort)
             if state.phase == "preparation" and self.request_start is not None:
                 self.stage = "request_start"
                 readiness = await self.request_start.check(self.cohort)
+                PUBLIC_COHORT_PROGRESS.record("request_start", readiness)
                 if not readiness["ready"]:
                     self.last_report = dict(
                         self.controller._report(state, readiness["status"]),

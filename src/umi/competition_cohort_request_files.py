@@ -5,6 +5,8 @@ referenced objects are copied before an index becomes visible. Missing delivery 
 readers never open an evaluator's live database or infer a failed outcome.
 """
 
+import json
+import logging
 import os
 from collections import OrderedDict
 from collections.abc import Iterator
@@ -22,12 +24,17 @@ from .competition_cohort_execution_journal import (
     CohortExecutionJournal,
     step_count,
 )
+from .competition_cohort_export_checkpoint import (
+    ModelPartialExportCheckpoints,
+    legacy_publication_compatible,
+)
 from .competition_cohort_orders import SignedRecoverableEvaluationOrder
 from .competition_cohort_request_inventory import RequestInventory, read_request_inventory
 from .competition_cohort_request_partial import (
     MAX_PARTIAL_ITEMS,
     PartialRequestManifest,
     collect_partial_request,
+    collect_partial_request_with_inputs,
     review_partial_request,
 )
 from .competition_cohort_request_reuse import (
@@ -46,6 +53,8 @@ from .private_files import ensure_private_directory, private_path, publish_priva
 from .private_files import read_private_model as read
 from .protocol import Hex32, StrictProtocolModel
 
+logger = logging.getLogger("umi.competition.progress")
+
 
 class _Reference(StrictProtocolModel):
     sha256: Hex32
@@ -63,6 +72,209 @@ class RequestCompletionFiles:
         self._cache_lock = Lock()
         self._publication_lock = Lock()
         self._pid = os.getpid()
+        self._model_partials = ModelPartialExportCheckpoints(self.root)
+        self._partial_reuse_counts = dict(
+            lookups=0, hits=0, seeded=0, changed=0, repairs=0, absent=0
+        )
+        self._order_reads = None
+
+    def _partial_reuse_event(self, event):
+        with self._cache_lock:
+            self._partial_reuse_counts["lookups"] += 1
+            self._partial_reuse_counts[event] += 1
+            if self._partial_reuse_counts["lookups"] % 64 == 0:
+                logger.info(
+                    json.dumps(
+                        dict(
+                            schema="umi-model-partial-export-reuse/1",
+                            pid=os.getpid(),
+                            stage="model_partial_export_source_reuse",
+                            **self._partial_reuse_counts,
+                            certification_authority=False,
+                        ),
+                        separators=(",", ":"),
+                    )
+                )
+
+    def current_model_partial(self, owner, slot, *, completed_by_block):
+        """Reuse an unchanged native partial before walking its complete evidence."""
+        matches = getattr(owner, "partial_export_unchanged", None)
+        if matches is None or not legacy_publication_compatible():
+            return None  # Earlier supported injected journal ports retain their path.
+        try:
+            checkpoint = self._model_partials.load(owner, slot)
+        except (OSError, ValueError) as error:
+            self._partial_reuse_event("repairs")
+            logger.info(
+                "model_partial_export_checkpoint status=repair_required slot=%s "
+                "completed=0 total=1 eta_seconds=null "
+                "eta_basis=native_source_metadata_reconstruction error_type=%s",
+                slot,
+                type(error).__name__,
+            )
+            return None
+        seeded = checkpoint is None
+        if seeded:
+            checkpoint = self._seed_model_partial(owner, slot, completed_by_block)
+        if (
+            checkpoint is None
+            or checkpoint.maximum_bytes != self.maximum_bytes
+            or checkpoint.completed_by_block > completed_by_block
+            or not matches(checkpoint)
+        ):
+            self._partial_reuse_event("absent" if checkpoint is None else "changed")
+            return None
+        if not seeded and not self.current(
+            checkpoint.manifest_sha256,
+            policy_sha256=digest(owner.policy),
+            opened_at_block=0,
+            completed_by_block=completed_by_block,
+        ):
+            self._partial_reuse_event("repairs")
+            logger.info(
+                "model_partial_export_checkpoint status=repair_required slot=%s "
+                "completed=0 total=1 eta_seconds=null eta_basis=restore_changed_export_files",
+                slot,
+            )
+            return None
+        self._partial_reuse_event("seeded" if seeded else "hits")
+        return checkpoint.manifest_sha256
+
+    def model_partial_cohort(self, owner, slot):
+        checkpoint = self._model_partials.load(owner, slot)
+        return None if checkpoint is None else checkpoint.cohort_sha256
+
+    def _seed_model_partial(self, owner, slot, block):
+        """Upgrade existing completed publication facts using only small metadata."""
+        if not legacy_publication_compatible():
+            return None
+        projection = getattr(owner, "partial_export_projection", None)
+        if projection is None:
+            return None
+        inputs = projection(slot)
+        if inputs is None:
+            return None
+        assignment, job = inputs
+        order = assignment.certificate
+        directory = self._partial_directory(order, assignment.delivery.receipt.evaluator_hotkey)
+        private_path(str(directory))
+        latest = None
+        try:
+            with os.scandir(directory) as entries:
+                count = 0
+                for entry in entries:
+                    if entry.name.startswith("."):
+                        continue
+                    count += 1
+                    number = entry.name.removesuffix(".json")
+                    if (
+                        count > MAX_PARTIAL_ITEMS + 1
+                        or len(number) != 5
+                        or not number.isascii()
+                        or not number.isdigit()
+                        or not entry.name.endswith(".json")
+                        or int(number) > MAX_PARTIAL_ITEMS
+                    ):
+                        raise ValueError("partial request upgrade inventory exceeds its bound")
+                    if latest is None or entry.name > latest:
+                        latest = entry.name
+        except FileNotFoundError:
+            return None
+        if latest is None:
+            return None
+        try:
+            ref = read(directory / latest, _Reference, maximum_bytes=1024)
+            manifest = PartialRequestManifest.model_validate_json(
+                read_endpoint_object(self.objects, ref.sha256)
+            )
+        except FileNotFoundError:
+            logger.info(
+                "model_partial_export_checkpoint status=repair_required slot=%s "
+                "eta_basis=restore_missing_upgrade_export_metadata",
+                slot,
+            )
+            return None
+        if (
+            manifest.item_count != int(latest.removesuffix(".json"))
+            or manifest.assignment_sha256 != digest(assignment)
+            or manifest.cases
+            or manifest.responses
+        ):
+            raise ValueError("partial request upgrade changed its original model inputs")
+        if not self.current(
+            ref.sha256,
+            policy_sha256=digest(owner.policy),
+            opened_at_block=0,
+            completed_by_block=block,
+        ):
+            return None
+        checkpoint = owner.partial_export_checkpoint(
+            slot,
+            assignment,
+            job,
+            manifest,
+            ref.sha256,
+            maximum_bytes=self.maximum_bytes,
+            completed_by_block=block,
+        )
+        if checkpoint is not None:
+            self._model_partials.remember(owner, checkpoint)
+        return checkpoint
+
+    def _remember_model_partial(self, owner, slot, assignment, job, manifest, key, block):
+        checkpoint = getattr(owner, "partial_export_checkpoint", None)
+        if checkpoint is not None:
+            try:
+                value = checkpoint(
+                    slot,
+                    assignment,
+                    job,
+                    manifest,
+                    key,
+                    maximum_bytes=self.maximum_bytes,
+                    completed_by_block=block,
+                )
+                if value is not None:
+                    self._model_partials.remember(owner, value)
+            except (OSError, ValueError) as error:
+                logger.warning(
+                    "model_partial_export_checkpoint status=repair_required slot=%s "
+                    "eta_basis=restore_private_source_checkpoint error_type=%s",
+                    slot,
+                    type(error).__name__,
+                )
+
+    def _reviewed_model_partial(self, owner, slot, manifest_sha, block):
+        """Reuse the exact native verdict while repairing only delivery files."""
+        matches = getattr(owner, "partial_export_context_matches", None)
+        if matches is None:
+            return False
+        try:
+            checkpoint = self._model_partials.load(owner, slot)
+        except (OSError, ValueError):
+            checkpoint = None
+        if (
+            checkpoint is not None
+            and checkpoint.slot == slot
+            and checkpoint.manifest_sha256 == manifest_sha
+            and checkpoint.maximum_bytes == self.maximum_bytes
+            and checkpoint.completed_by_block <= block
+            and matches(checkpoint)
+        ):
+            return True
+        if not legacy_publication_compatible():
+            return False
+        # Collection just reproduced this exact manifest and all its referenced
+        # immutable source objects. A retained native /1 verdict for those same
+        # bytes/policy/interval remains valid when only delivery files are lost.
+        # Destination stamps establish availability, not whether the original
+        # successful native proof review occurred.
+        prior = load_publication_verification(self.root, manifest_sha, digest(owner.policy))
+        return prior is not None and (
+            prior.maximum_bytes == self.maximum_bytes
+            and prior.opened_at_block == 0
+            and prior.completed_by_block <= block
+        )
 
     @staticmethod
     def _stamp(path):
@@ -93,6 +305,8 @@ class RequestCompletionFiles:
         or replaced output, another policy, or a narrower verification interval
         requires replay. Closure reviewers still verify their own evidence.
         """
+        if not legacy_publication_compatible():
+            return False
         if os.getpid() != self._pid:
             return False
         key = (terminal_sha, policy_sha256)
@@ -167,7 +381,7 @@ class RequestCompletionFiles:
     ) -> str:
         """Deliver original partial work without sealing or signing a terminal."""
         collected = ReplayObjectCollector(JournalEndpointObjects(owner.journal), self.maximum_bytes)
-        manifest = collect_partial_request(owner, slot, collected)
+        manifest, assignment, job = collect_partial_request_with_inputs(owner, slot, collected)
         key = collected.retain(manifest)
         if self.current(
             key,
@@ -175,16 +389,19 @@ class RequestCompletionFiles:
             opened_at_block=0,
             completed_by_block=completed_by_block,
         ):
+            self._remember_model_partial(
+                owner, slot, assignment, job, manifest, key, completed_by_block
+            )
             return key
-        assignment = owner.assignment(slot)
-        review_partial_request(
-            key,
-            collected,
-            owner.policy,
-            assignment.certificate,
-            opened_at_block=0,
-            completed_by_block=completed_by_block,
-        )
+        if not self._reviewed_model_partial(owner, slot, key, completed_by_block):
+            review_partial_request(
+                key,
+                collected,
+                owner.policy,
+                assignment.certificate,
+                opened_at_block=0,
+                completed_by_block=completed_by_block,
+            )
         order = assignment.certificate
         for sha in sorted(collected.values):
             with self._publication_lock:
@@ -218,6 +435,9 @@ class RequestCompletionFiles:
                         ),
                     )
                 )
+        self._remember_model_partial(
+            owner, slot, assignment, job, manifest, key, completed_by_block
+        )
         return key
 
     def partial(self, roster: RecoverableRosterEvidence, submission_sha256: str) -> tuple[str, ...]:
@@ -552,11 +772,19 @@ class RequestCompletionFiles:
         self, roster: RecoverableRosterEvidence
     ) -> Iterator[SignedRecoverableEvaluationOrder]:
         stage_count("maximum_participants", len(roster.round.participants))
+        # One selected immutable round binds the whole inventory pass. Hashing
+        # it again for every participant adds no new source or authority check.
+        round_sha = digest(roster.round)
+        if self._order_reads is None:
+            # Lazy selection preserves older read-only injected file ports.
+            from .competition_cohort_request_order_reuse import RequestOrderReads
+
+            self._order_reads = RequestOrderReads(self.root)
         order_count = 0
         for participant in roster.round.participants:
             try:
                 ref = read(
-                    self._order_path(digest(roster.round), participant.submission_sha256),
+                    self._order_path(round_sha, participant.submission_sha256),
                     _Reference,
                     maximum_bytes=1024,
                 )
@@ -564,14 +792,14 @@ class RequestCompletionFiles:
                 continue
             order_count += 1
             stage_count("maximum_orders", order_count)
-            order = SignedRecoverableEvaluationOrder.model_validate_json(
-                read_endpoint_object(self.objects, ref.sha256)
+            order = self._order_reads.read(
+                self,
+                self._order_path(round_sha, participant.submission_sha256),
+                ref,
+                roster.round,
+                round_sha,
+                participant.submission_sha256,
             )
-            if (
-                order.order.round != roster.round
-                or digest(order.order.submission.submission) != participant.submission_sha256
-            ):
-                raise ValueError("delivered request order differs from its selected participant")
             yield order
 
     def terminal(

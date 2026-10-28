@@ -57,13 +57,15 @@ class LegacyModelAdmissionPayloads:
         self.sources.admitted(cohort, record=record, admission=admission)
         return True
 
-    async def ensure(self, request):
+    async def ensure(self, request, *, completed_only=False):
         cohort, key = request.consent.consent.cohort_sha256, digest(request)
         resolution = self.sources.resolve(cohort, request_sha256=key)
         reader = self.sources.reader(resolution)
         # Invalidate a prior process-local capability before a failing retry.
         self.verified.pop(key, None)
-        snapshot = await reader.verify()
+        snapshot = (
+            await reader.verify(completed_only=True) if completed_only else await reader.verify()
+        )
         self.verified[key] = snapshot
         return snapshot
 
@@ -96,12 +98,15 @@ class LegacyModelAdmissionPayloads:
             state, _ = store.status(cohort)
             return state.tip_sha256, digest(record), digest(admission)
 
-    async def ensure_owned(self, request):
+    async def ensure_owned(self, request, *, completed_only=False):
         key = digest(request)
         self.verified.pop(key, None)
         try:
             before = await run_owned_thread(self.owned_original, request)
-            await self.ensure(request)
+            if completed_only:
+                await self.ensure(request, completed_only=True)
+            else:
+                await self.ensure(request)
             if await run_owned_thread(self.owned_original, request) != before:
                 raise OSError("model intake changed during remote retry verification")
         except BaseException:

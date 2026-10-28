@@ -21,6 +21,7 @@ from .competition_cohort_model_transport_selection import (
 from .competition_cohort_recovery import verify_recovery_authority
 from .competition_host_activation import _read_root_control_path
 from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
+from .competition_model_storage_leases import ModelStorageConsumerConfig
 from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_boot import ObjectCapacity, _disjoint
 from .competition_reward_decisions import StandingRewardSeries
@@ -32,7 +33,7 @@ from .competition_reward_manifest import (
 from .host_memory_runtime import HostMemoryAdmissionSelection
 from .open_competition import CompetitionPolicy, Hotkey, Track, digest, identity
 from .private_files import Directory
-from .protocol import StrictProtocolModel, canonical_json_bytes
+from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 
 class SettlementOriginalSources(StrictProtocolModel):
@@ -81,6 +82,7 @@ class SettlementServiceConfig(StrictProtocolModel):
     settlement_directory: Directory
     proof_import_directory: Directory
     proof_stores: ProofArchiveStores | None = None
+    shared_registration_archives: Annotated[tuple[Directory, ...], Field(max_length=8)] = ()
     proof_export_directory: Directory
     exchange_inbox: Directory
     exchange_outbox: Directory
@@ -94,14 +96,20 @@ class SettlementServiceConfig(StrictProtocolModel):
     direct_model_review: DirectModelReviewSourceConfig | None = None
     model_delivery_adoptions: ModelDeliveryAdoptionSelections = ()
     legacy_model_storage: LegacyModelStorageSelections = ()
+    model_storage_consumer: ModelStorageConsumerConfig | None = None
+    automatic_progression_hold_cohorts: Annotated[tuple[Hex32, ...], Field(max_length=512)] = ()
 
     host_memory_admission: HostMemoryAdmissionSelection | None = None
 
     @model_serializer(mode="wrap")
     def serialize(self, handler):
         value = handler(self)
+        if self.model_storage_consumer is None:
+            value.pop("model_storage_consumer", None)
         if self.proof_stores is None:
             value.pop("proof_stores", None)
+        if not self.shared_registration_archives:
+            value.pop("shared_registration_archives", None)
         if self.host_memory_admission is None:
             value.pop("host_memory_admission", None)
         if self.original_sources is None:
@@ -114,6 +122,8 @@ class SettlementServiceConfig(StrictProtocolModel):
             value.pop("model_delivery_adoptions", None)
         if not self.legacy_model_storage:
             value.pop("legacy_model_storage", None)
+        if not self.automatic_progression_hold_cohorts:
+            value.pop("automatic_progression_hold_cohorts", None)
         return value
 
     def stores(self, *, include_shared=True):
@@ -121,12 +131,14 @@ class SettlementServiceConfig(StrictProtocolModel):
             Path(p)
             for p in (
                 self.state_directory,
+                *((self.model_storage_consumer.directory,) if self.model_storage_consumer else ()),
                 self.chain.state_directory,
                 self.inputs_directory,
                 self.history_directory,
                 self.promotion_directory,
                 self.settlement_directory,
                 self.proof_import_directory,
+                *self.shared_registration_archives,
                 *(self.proof_stores.credential_paths() if self.proof_stores else ()),
                 self.proof_export_directory,
                 self.exchange_inbox,
@@ -134,11 +146,7 @@ class SettlementServiceConfig(StrictProtocolModel):
                 *(e.directory for e in self.executions),
                 *(self.original_sources.stores() if self.original_sources else ()),
                 *((self.request_export_directory,) if self.request_export_directory else ()),
-                *(
-                    (self.direct_model_review.r2_credentials_file,)
-                    if self.direct_model_review
-                    else ()
-                ),
+                *(self.direct_model_review.stores() if self.direct_model_review else ()),
                 *(source.directory for source in self.legacy_model_storage),
                 *(shared_byte_store_paths(self.legacy_model_storage) if include_shared else ()),
             )
@@ -146,11 +154,18 @@ class SettlementServiceConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def bindings(self):
+        if self.model_storage_consumer is not None and not self.legacy_model_storage:
+            raise ValueError("model storage consumer requires authenticated remote model sources")
         verify_reward_manifest(canonical_json_bytes(self.manifest), self.series, self.policy)
         verify_recovery_authority(self.series.recovery, self.policy)
         groups = {identity(e.hotkey): e.control_group for e in self.policy.evaluators}
         who, proposer = identity(self.signer_hotkey), identity(self.proposer_hotkey)
         cohorts = {digest(p) for p in self.series.cohorts}
+        holds = self.automatic_progression_hold_cohorts
+        if len(holds) != len(set(holds)) or not set(holds) <= cohorts:
+            raise ValueError("settlement progression holds must name distinct configured cohorts")
+        if len(self.shared_registration_archives) != len(set(self.shared_registration_archives)):
+            raise ValueError("shared registration archives must be distinct")
         sources = self.original_sources
         if self.schema_ in {
             "umi-cohort-settlement-config/1",

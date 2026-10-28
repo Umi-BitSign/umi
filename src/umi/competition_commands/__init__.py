@@ -5,7 +5,6 @@ from collections.abc import Callable
 
 from ..open_competition import CompetitionPolicy
 from . import (
-    cohort_baseline,
     cohorts,
     evidence,
     host,
@@ -18,8 +17,17 @@ from . import (
 
 CommandHandler = Callable[[Namespace, CompetitionPolicy], dict]
 
+
+def _apply_cohort_baseline(args: Namespace, policy: CompetitionPolicy) -> dict:
+    # The service configuration imports common command readers. Loading the
+    # baseline handler here would import that partially initialized service.
+    from .cohort_baseline import activate
+
+    return activate(args, policy)
+
+
 COMMAND_HANDLERS: dict[str, CommandHandler] = {
-    "apply-cohort-baseline": cohort_baseline.activate,
+    "apply-cohort-baseline": _apply_cohort_baseline,
     "apply-runtime-port": runtime_port.activate,
     "admit": store.admit,
     "assemble-dependence-calibration": evidence.assemble_dependence_calibration,

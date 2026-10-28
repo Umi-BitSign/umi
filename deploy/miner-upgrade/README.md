@@ -20,18 +20,32 @@ Stage counts, elapsed time and historical-duration ETA are emitted without a new
 execution deadline.
 
 `--install-model-client` is an independent user installation mode for Linux and
-macOS with Python 3.10 through 3.14. It validates the same manifest/status binding,
+macOS with Python 3.10 through 3.14. When invoked with an older system Python,
+it selects an already installed supported interpreter before fetching the
+manifest; `UMI_MODEL_CLIENT_PYTHON` can name a supported interpreter outside the
+usual PATH or Homebrew locations. It validates the same manifest/status binding,
 then installs the exact source and locked dependencies without discovering an
 endpoint or using its environment. See the connection guide for its commands,
 repeat-install behavior and retained release directories. Model-only track intent
 keeps its existing no-service-change behavior and does not install this client.
 
-`current.json` is the canonical profile for policy, transport, track and authority
-bindings. A matching live deployment can supply a newer compatible source
+`current.json` is the canonical endpoint-upgrade profile for its selected cohort;
+it currently names C5 for retained endpoint work. C7+ public-model participation
+uses the separate model client and each cohort's signed history. The catalog's
+effective profile fields follow signed cohort amendments automatically; the
+original mixed plan is retained for recovery. A matching live deployment can supply a newer compatible source
 revision. An explicit `runtime.deployment_revision` instead binds the exact
 maintenance `runtime.revision` to the existing live deployment. Policy or track
 changes require matching public records; future cohort rules are selected by the
 manifest rather than inferred from cohort numbers.
+
+The standalone model-client installer reads this same `current.json`; it has no
+separate automatic release feed. Publish its qualified exact implementation
+commit in `runtime.revision`, retaining `runtime.deployment_revision` and all
+existing cohort/policy fields for a compatible maintenance release. A new intake
+`runtime` in public status does not override that explicit pointer. The installed
+model client adopts a new source when its installation command is run again;
+authenticated cohort history still selects C7+ intake and delivery rules.
 
 Runtime installation uses the exact policy-selected CPython and dependency pins,
 isolated imports and an absolute `/usr/bin/env` executable. The service account

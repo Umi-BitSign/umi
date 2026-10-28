@@ -111,6 +111,35 @@ def test_settlement_config_and_cli_use_exact_root_selection(selected, capsys):
         load_settlement_service_config(selected.path)
 
 
+def test_progression_holds_are_explicit_and_keep_existing_config_bytes(selected):
+    c = selected.config
+    assert "automatic_progression_hold_cohorts" not in c.model_dump(by_alias=True)
+    assert "shared_registration_archives" not in c.model_dump(by_alias=True)
+    original_series = canonical_json_bytes(c.series)
+    original = c.model_dump(by_alias=True)
+    cohort = digest(c.series.cohorts[0])
+    value = dict(original, automatic_progression_hold_cohorts=(cohort,))
+    held = SettlementServiceConfig.model_validate_json(canonical_json_bytes(value))
+    assert canonical_json_bytes(held.series) == original_series
+    assert held.state_directory == c.state_directory
+    assert held.automatic_progression_hold_cohorts == (cohort,)
+    shared = str(Path(c.state_directory).parent / "shared-registration")
+    shared_config = SettlementServiceConfig.model_validate_json(
+        canonical_json_bytes(dict(value, shared_registration_archives=(shared,)))
+    )
+    assert Path(shared) in shared_config.stores()
+    assert canonical_json_bytes(shared_config.series) == original_series
+    with pytest.raises(ValueError, match="distinct"):
+        SettlementServiceConfig.model_validate_json(
+            canonical_json_bytes(dict(value, shared_registration_archives=(shared, shared)))
+        )
+    for holds in ((cohort, cohort), ("f" * 64,)):
+        with pytest.raises(ValueError, match="holds"):
+            SettlementServiceConfig.model_validate_json(
+                canonical_json_bytes(dict(original, automatic_progression_hold_cohorts=holds))
+            )
+
+
 def test_cli_exposes_background_preparation_and_restores_logging(selected, monkeypatch, capsys):
     import logging
 
@@ -134,6 +163,25 @@ def test_cli_exposes_background_preparation_and_restores_logging(selected, monke
         tuple((logger.level, logger.propagate, tuple(logger.handlers)) for logger in loggers)
         == before
     )
+
+
+def test_cli_startup_failure_reports_native_locations_without_secret_messages(
+    selected, monkeypatch, capsys
+):
+    async def failing(config):
+        raise RuntimeError("private-input-must-not-enter-diagnostics")
+
+    monkeypatch.setattr(cli, "_run", failing)
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--config", str(selected.path)])
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert report["status"] == "failed" and report["error_type"] == "RuntimeError"
+    assert report["details"][0]["source_frames"]
+    assert all(
+        frame["module"].startswith("umi.") for frame in report["details"][0]["source_frames"]
+    )
+    assert "private-input-must-not-enter-diagnostics" not in captured.out + captured.err
 
 
 @pytest.mark.parametrize(

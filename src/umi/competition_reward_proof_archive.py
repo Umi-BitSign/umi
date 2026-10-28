@@ -24,6 +24,7 @@ from pydantic import Field, JsonValue
 from .canonical_reuse import canonical_json_reuse
 from .competition_evidence_codec import (
     MAX_EVIDENCE_BYTES,
+    MAX_PROOF_OBJECT_BYTES,
     MAX_RECIPE_BYTES,
     PreparedEvidenceEncoding,
     checked_digest,
@@ -37,6 +38,7 @@ from .competition_journal_physical_budget import ArchivePhysicalBudget
 from .open_competition import digest, identity
 from .private_files import (
     ensure_private_directory,
+    lock_private_file,
     private_path,
     publish_private_model,
     read_private_model,
@@ -253,6 +255,23 @@ class RewardProofArchive:
         self._read_lock = Lock()
         self._pid = os.getpid()
 
+    @contextmanager
+    def read_release_lease(self, *, exclusive=False):
+        """Coordinate selected native readers with online local release.
+
+        Hold the shared lease through frame resolution AND finish(), including
+        local fallback reads. Release uses an exclusive nonblocking lease; a
+        current reader defers cleanup rather than receiving missing-file errors.
+        """
+        if not self.root.exists():
+            yield
+            return
+        fd = lock_private_file(self.root / ".proof-read-release.lock", shared=not exclusive)
+        try:
+            yield
+        finally:
+            os.close(fd)
+
     def _ensure_root(self):
         # Legacy publication created private children beneath an owned root
         # using the process umask. Secure that supported layout in place before
@@ -341,7 +360,7 @@ class RewardProofArchive:
             publish_private_model(
                 path,
                 _Bytes(hex=raw.hex()),
-                maximum_bytes=2 * MAX_EVIDENCE_BYTES + 1024,
+                maximum_bytes=MAX_PROOF_OBJECT_BYTES,
             )
 
     def _published_object_present(self, sha: str, size: int) -> bool:
@@ -585,10 +604,8 @@ class RewardProofArchive:
                 raise ValueError("reward archive encoded part count exceeds its bound")
             total = 0
             refs[name] = []
-            for number, (sha, size, recipe) in enumerate(parts):
+            for sha, size, recipe in parts:
                 checked_digest(sha)
-                if number < len(parts) - 1 and size != MAX_EVIDENCE_BYTES:
-                    raise ValueError("encoded transport requires ordinary archive chunk boundaries")
                 segments = inspect_recipe(recipe, expanded_bytes=size, kind="proof")
                 total += size
                 checked_size(total, MAX_FIELD_BYTES)
@@ -625,7 +642,7 @@ class RewardProofArchive:
                     return self._retain_bytes(raw)
                 sha = hashlib.sha256(raw).hexdigest()
                 if sha not in pending:
-                    if pending_bytes + len(raw) > MAX_EVIDENCE_BYTES:
+                    if pending_bytes + len(raw) > MAX_PROOF_OBJECT_BYTES:
                         flush()
                     pending[sha] = raw
                     pending_bytes += len(raw)
@@ -685,7 +702,27 @@ class RewardProofArchive:
     def read(
         self, kind: Kind, key: str, *, bounds: dict[str, int]
     ) -> tuple[dict, dict[str, bytes]]:
-        frame = self._frame(kind, key)
+        with self.read_release_lease():
+            frame = self._frame(kind, key)
+            return self._read_frame(frame, kind, key, bounds)
+
+    def read_if_present(
+        self, kind: Kind, key: str, *, bounds: dict[str, int]
+    ) -> tuple[dict, dict[str, bytes]] | None:
+        """Absent lookup hints may defer; missing referenced evidence is a repair.
+
+        Frame selection is separate from payload resolution so a caller cannot
+        mistake a damaged present archive for an unavailable lookup source.
+        Completed remote transport fences retain their existing repair errors.
+        """
+        with self.read_release_lease():
+            try:
+                frame = self._frame(kind, key)
+            except FileNotFoundError:
+                return None
+            return self._read_frame(frame, kind, key, bounds)
+
+    def _read_frame(self, frame, kind, key, bounds):
         if frame.kind != kind or frame.key != key or set(frame.fields) != set(bounds):
             raise ValueError("reward archive frame changes its requested domain")
         with self._directory_scope(enabled=bool(frame.fields)) as directory:

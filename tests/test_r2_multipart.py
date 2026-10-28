@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import gzip
 from datetime import datetime, timezone
 
 import httpx
 import pytest
 
+from umi import r2_multipart as module
 from umi.competition_cohort_direct_model_upload import DirectModelUploadPart
+from umi.competition_transport_verification import TransferProgress
 from umi.r2_multipart import R2MultipartClient
 from umi.r2_sigv4 import R2Credentials, R2SigV4
 
@@ -20,6 +23,65 @@ def signer():
         bucket="umi-model-artifacts",
         credentials=R2Credentials("0123456789ABCDEF", "secret-access-key-value"),
     )
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_range_reports_partial_response_without_completing_parent(cancel):
+    entered, release = asyncio.Event(), asyncio.Event()
+    closed, requests, events = [], [], []
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"ab"
+            entered.set()
+            await release.wait()
+            yield b"cd"
+
+        async def aclose(self):
+            closed.append(True)
+
+    async def send(request):
+        requests.append(request)
+        return httpx.Response(206, headers={"Content-Range": "bytes 0-3/4"}, stream=Stream())
+
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    with TransferProgress("materialize", 4, events.append) as parent:
+        task = asyncio.create_task(client.read_range(KEY, offset=0, size_bytes=4, at=AT))
+        await entered.wait()
+        assert parent.completed == 0
+        assert parent.child["stage"] == "r2_response_read"
+        assert parent.child["completed_units"] == 2
+        if cancel:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert parent.child["status"] == "retrying"
+        else:
+            release.set()
+            assert await task == b"abcd"
+            assert parent.child["status"] == "completed"
+        assert parent.completed == 0
+    assert len(requests) == len(closed) == 1
+    assert events[-1]["status"] == "retrying"
+
+
+async def test_response_diagnostics_cannot_fail_a_valid_read(monkeypatch):
+    from umi import competition_transport_verification as progress
+
+    client = R2MultipartClient(
+        signer(),
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(206, headers={"Content-Range": "bytes 0-3/4"}, content=b"abcd")
+        ),
+    )
+    with TransferProgress("materialize", 4) as parent:
+
+        def unavailable(_):
+            raise RuntimeError("diagnostic thread unavailable")
+
+        monkeypatch.setattr(progress.Thread, "start", unavailable)
+        assert await client.read_range(KEY, offset=0, size_bytes=4, at=AT) == b"abcd"
+        assert progress._CURRENT.get() is parent
 
 
 @pytest.mark.asyncio
@@ -110,6 +172,141 @@ async def test_provider_errors_are_bounded_and_do_not_echo_body():
     with pytest.raises(OSError, match="HTTP 503") as observed:
         await client.create(KEY, at=AT)
     assert "credential-bearing" not in str(observed.value)
+
+
+@pytest.mark.parametrize("method", ["HEAD", "GET"])
+@pytest.mark.parametrize("status", [429, 503])
+async def test_transient_reads_retry_same_scope_without_echoing_provider_body(
+    monkeypatch, caplog, method, status
+):
+    requests, waits = [], []
+
+    async def pause(seconds):
+        waits.append(seconds)
+
+    async def send(request):
+        requests.append(request)
+        if len(requests) < 3:
+            return httpx.Response(status, content=b"credential-bearing provider detail")
+        return httpx.Response(200, content=b"verified response")
+
+    monkeypatch.setattr(module.asyncio, "sleep", pause)
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    response = await client._exchange(method, KEY, at=AT)
+    assert response.status_code == 200 and len(requests) == 3
+    assert waits == [0.25, 0.5]
+    assert all(request.url == requests[0].url for request in requests)
+    assert all(
+        request.headers["authorization"] == requests[0].headers["authorization"]
+        for request in requests
+    )
+    assert f'"http_status":{status}' in caplog.text
+    assert "credential-bearing" not in caplog.text and KEY not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "method,status,attempts", [("GET", 503, 3), ("GET", 403, 1), ("POST", 503, 1), ("PUT", 503, 1)]
+)
+async def test_read_retries_are_bounded_and_never_replay_mutations(
+    monkeypatch, method, status, attempts
+):
+    calls = []
+
+    async def pause(_):
+        pass
+
+    def send(request):
+        calls.append(request)
+        return httpx.Response(status, content=b"private provider body")
+
+    monkeypatch.setattr(module.asyncio, "sleep", pause)
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    with pytest.raises(OSError, match=f"HTTP {status}"):
+        await client._exchange(method, KEY, at=AT)
+    assert len(calls) == attempts
+
+
+@pytest.mark.parametrize("method", ["HEAD", "GET"])
+@pytest.mark.parametrize(
+    "error_type",
+    [httpx.ReadError, httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError],
+)
+async def test_connection_failure_retries_only_the_failed_read(
+    monkeypatch, caplog, method, error_type
+):
+    requests, waits = [], []
+
+    async def pause(seconds):
+        waits.append(seconds)
+
+    def send(request):
+        requests.append(request)
+        if len(requests) == 1:
+            raise error_type("private-provider-url-and-credentials", request=request)
+        return httpx.Response(200, content=b"complete verified response")
+
+    monkeypatch.setattr(module.asyncio, "sleep", pause)
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    async with client.connection_scope():
+        response = await client._exchange(method, KEY, at=AT)
+    assert response.content == b"complete verified response"
+    assert len(requests) == 2 and waits == [0.25]
+    assert requests[0].url == requests[1].url
+    assert requests[0].headers == requests[1].headers
+    assert error_type.__name__ in caplog.text
+    assert KEY not in caplog.text and "private-provider" not in caplog.text
+    assert '"elapsed_seconds":' in caplog.text and '"retry_seconds":0.25' in caplog.text
+
+
+@pytest.mark.parametrize(
+    "method,attempts", [("HEAD", 3), ("GET", 3), ("POST", 1), ("PUT", 1), ("DELETE", 1)]
+)
+async def test_connection_retry_is_bounded_and_never_repeats_mutation(
+    monkeypatch, method, attempts
+):
+    calls = []
+
+    async def pause(_):
+        pass
+
+    def send(request):
+        calls.append(request)
+        raise httpx.ReadError(
+            "response lost after provider may have accepted mutation", request=request
+        )
+
+    monkeypatch.setattr(module.asyncio, "sleep", pause)
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    with pytest.raises(OSError, match="transport unavailable"):
+        await client._exchange(method, KEY, at=AT)
+    assert len(calls) == attempts
+
+
+async def test_range_retry_discards_failed_partial_response(monkeypatch):
+    calls, closed = [], []
+
+    class Partial(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"ab"
+            raise httpx.ReadError("partial provider response lost")
+
+        async def aclose(self):
+            closed.append(True)
+
+    async def pause(_):
+        pass
+
+    def send(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(206, headers={"Content-Range": "bytes 0-3/4"}, stream=Partial())
+        return httpx.Response(206, headers={"Content-Range": "bytes 0-3/4"}, content=b"abcd")
+
+    monkeypatch.setattr(module.asyncio, "sleep", pause)
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    assert await client.read_range(KEY, offset=0, size_bytes=4, at=AT) == b"abcd"
+    assert len(calls) == 2 and closed == [True]
+    assert all(r.headers["range"] == "bytes=0-3" for r in calls)
 
 
 @pytest.mark.asyncio

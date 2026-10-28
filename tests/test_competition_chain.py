@@ -664,6 +664,44 @@ def test_released_operational_timeout_binding_is_upgraded_in_place(chain):
     )
 
 
+async def test_capacity_growth_adopts_exact_predecessor_and_preserves_captures(chain):
+    captured = await chain.provider.collect()
+    values = chain.config.model_dump(mode="json", by_alias=True)
+    values.update(
+        maximum_cache_bytes=24 * 1024**3,
+        previous_maximum_cache_bytes=chain.config.maximum_cache_bytes + 1,
+    )
+    changed = CompetitionChainConfig.model_validate(values)
+    with pytest.raises(ValueError, match="another chain configuration"):
+        FinalizedRegistrationProvider(
+            changed, chain.policy, finality=chain.finality, proofs=chain.proofs
+        )
+    values["previous_maximum_cache_bytes"] = chain.config.maximum_cache_bytes
+    changed = CompetitionChainConfig.model_validate(values)
+    wrong_chain = changed.model_copy(update={"rpc_url": "wss://another.example/"})
+    with pytest.raises(ValueError, match="another chain configuration"):
+        FinalizedRegistrationProvider(
+            wrong_chain, chain.policy, finality=chain.finality, proofs=chain.proofs
+        )
+    provider = FinalizedRegistrationProvider(
+        changed,
+        chain.policy,
+        finality=chain.finality,
+        proofs=chain.proofs,
+        now_ms=lambda: chain.clock.now,
+    )
+    assert (await provider.collect()).snapshot == captured.snapshot
+    repeated = changed.model_copy(update={"previous_maximum_cache_bytes": None})
+    provider = FinalizedRegistrationProvider(
+        repeated,
+        chain.policy,
+        finality=chain.finality,
+        proofs=chain.proofs,
+        now_ms=lambda: chain.clock.now,
+    )
+    assert (await provider.collect()).snapshot == captured.snapshot
+
+
 async def test_prefetch_cancellation_drains_bounded_child_reads():
     started = asyncio.Event()
     state = SimpleNamespace(active=0, peak=0)
@@ -1445,3 +1483,29 @@ async def test_parallel_prefetch_retains_each_proofs_own_block_claims():
         rpc.values.clear()
 
     await asyncio.wait_for(asyncio.gather(first(), second()), 30)
+
+
+def test_registration_capacity_index_migrates_retained_cache_without_payload_scan(chain):
+    provider = chain.provider
+    with sqlite3.connect(provider._path) as db:
+        db.execute("DROP INDEX captures_evidence_lengths")
+        db.execute(
+            "INSERT INTO captures VALUES (?,?,?,?,?)",
+            (_HEIGHT, _hash(1), "{}", "ab" * 32, b"payload" * 1000),
+        )
+        before = db.execute(
+            "SELECT block,hash,snapshot,evidence_sha256,evidence FROM captures"
+        ).fetchall()
+    provider._initialize_cache()
+    provider._initialize_cache()
+    with sqlite3.connect(provider._path) as db:
+        assert (
+            db.execute(
+                "SELECT block,hash,snapshot,evidence_sha256,evidence FROM captures"
+            ).fetchall()
+            == before
+        )
+        plan = db.execute(
+            "EXPLAIN QUERY PLAN SELECT block,length(evidence) FROM captures"
+        ).fetchall()
+        assert any("captures_evidence_lengths" in str(row) for row in plan)

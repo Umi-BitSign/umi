@@ -47,6 +47,7 @@ def blank():
     node.reference = False
     node.reviewed_terminal_tip = node.published_tip = None
     node.package_reference = ("retained-original", "retained-digest")
+    node.verified_packages = SimpleNamespace(load_existing=lambda *args, **kwargs: object())
     node.reward_package_reference = None
     node.terminal_certification_sha256 = None
     return node

@@ -27,6 +27,7 @@ from umi.competition_reward_control_publisher import StandingControlPublisher
 from umi.competition_reward_offers import StandingRewardOffers
 from umi.competition_reward_preparation import StandingRewardPreparation
 from umi.competition_store import CompetitionStore
+from umi.competition_verification_snapshot import VerificationSnapshotRepairRequired
 from umi.concurrency import await_owned_task
 from umi.open_competition import digest
 from umi.policy import scoring_policy_hash
@@ -271,7 +272,7 @@ class NativeAdmissionProbe:
         raw = path.read_bytes()
         path.unlink()
         try:
-            with pytest.raises(FileNotFoundError):
+            with pytest.raises(VerificationSnapshotRepairRequired):
                 await reviewer.tick()
             assert reviewer.data is None and reviewer._memory_lease is None
             self._free(role="reviewer", cohort=cohort)

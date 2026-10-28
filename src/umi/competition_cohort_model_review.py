@@ -27,6 +27,10 @@ from .competition_cohort_model_acceptance import (
     check_model_vote,
     verify_model_acceptance_body,
 )
+from .competition_cohort_model_static_review import (
+    StandingModelReviewPolicy,
+    verify_standing_review_policy,
+)
 from .competition_cohort_recovery import verify_recovery_quorum
 from .competition_execution import execution_boundary
 from .competition_model_transport_qualification import (
@@ -36,7 +40,7 @@ from .competition_model_transport_qualification import (
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import CompetitionPolicy, Hotkey, digest, identity
-from .private_files import Directory, read_private_model
+from .private_files import Directory, publish_private_model, read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 
@@ -81,6 +85,7 @@ class ModelArtifactReviewer:
         direct_review: Callable[[ModelReviewRequest], Awaitable[ModelArtifactReviewInputs]]
         | None = None,
         legacy_readers: LegacyModelStorageReaders | None = None,
+        legacy_standing_policy: StandingModelReviewPolicy | None = None,
     ):
         self.config = ModelReviewConfig.model_validate_json(canonical_json_bytes(config))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
@@ -103,6 +108,11 @@ class ModelArtifactReviewer:
         ):
             raise ValueError("legacy model readers differ from the private review authority")
         self.legacy_readers = legacy_readers
+        self.legacy_standing_policy = legacy_standing_policy
+        if legacy_standing_policy is not None:
+            if legacy_readers is None:
+                raise ValueError("legacy standing review requires authenticated R2 readers")
+            verify_standing_review_policy(legacy_standing_policy, self.policy)
         # Capacity and file placement may change on recovery; identity may not.
         self.journal = RoundJournal(
             Path(c.directory),
@@ -287,14 +297,47 @@ class ModelArtifactReviewer:
                             raise ValueError("direct model review source is unavailable")
                         inputs = await self.direct_review(request)
                     else:
-                        inputs = await run_owned_thread(
-                            partial(
-                                read_private_model,
-                                Path(self.config.approvals_directory) / (a.model_sha256 + ".json"),
-                                ModelArtifactReviewInputs,
-                                maximum_bytes=33 * 1024**2,
-                            )
+                        approval_path = Path(self.config.approvals_directory) / (
+                            a.model_sha256 + ".json"
                         )
+                        try:
+                            inputs = await run_owned_thread(
+                                partial(
+                                    read_private_model,
+                                    approval_path,
+                                    ModelArtifactReviewInputs,
+                                    maximum_bytes=33 * 1024**2,
+                                )
+                            )
+                        except FileNotFoundError:
+                            if (
+                                self.legacy_standing_policy is None
+                                or not self.legacy_readers.has_cohort(a.cohort_sha256)
+                            ):
+                                raise
+                            source = await self.history(a.cohort_sha256)
+                            block = execution_boundary(await self.capture()).block
+                            self._validate(request, source.history, block)
+                            await run_owned_thread(
+                                partial(
+                                    self.legacy_readers.accepted,
+                                    a.cohort_sha256,
+                                    record=request.record,
+                                    admission=request.admission,
+                                    acceptance=a,
+                                )
+                            )
+                            inputs = await self.legacy_readers.review_inputs(
+                                a.cohort_sha256, sub.model_bundle, self.legacy_standing_policy
+                            )
+                            await run_owned_thread(
+                                partial(
+                                    publish_private_model,
+                                    approval_path,
+                                    inputs,
+                                    maximum_bytes=33 * 1024**2,
+                                )
+                            )
                         # R2 byte provenance never approves the owner's rights
                         # claims. These exact privately reviewed documents must
                         # match the original /1 body before any remote work.

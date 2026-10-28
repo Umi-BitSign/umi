@@ -116,6 +116,17 @@ async def model_case(receipt_scenario, tmp_path, runtime, request):
                         "stdout_hex": (text + "\n").encode().hex(),
                     }
                 )
+                if mode == "candidate-failure" and step.role == "candidate":
+                    execution = execution.model_copy(
+                        update={
+                            "output": execution.output.model_copy(
+                                update={"status": "miner_failure", "hypothesis": ""}
+                            ),
+                            "stdout_hex": "",
+                            "returncode": 1,
+                            "reason": "process_failed",
+                        }
+                    )
                 steps.append(step.model_copy(update={"execution": execution}))
             artifacts.append(a.model_copy(update={"steps": tuple(steps)}))
         scenario["artifacts"] = tuple(artifacts)
@@ -261,6 +272,17 @@ def test_sole_model_uses_exact_baseline_floor_without_promotion_threshold(model_
     assert not result.chain_submission_authorized
     if candidate.model_sha256 == result.baseline_model_sha256:
         assert candidate.eligible
+
+
+@pytest.mark.parametrize("model_case", [("candidate-failure", 1)], indirect=True)
+def test_failed_candidate_certifies_zero_without_blocking_model_award(model_case):
+    result = award(model_case)
+    candidate = result.candidates[0]
+    assert candidate.aggregate.numerator == "0"
+    assert int(candidate.baseline_aggregate.numerator) > 0
+    assert not candidate.eligible
+    assert result.recipient_hotkey is None
+    assert result.winner_submission_sha256 is None
 
 
 @pytest.mark.parametrize("model_case", [("equal", 2)], indirect=True)

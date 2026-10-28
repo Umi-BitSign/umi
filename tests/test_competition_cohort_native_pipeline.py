@@ -361,9 +361,9 @@ def configure_owner(o, orders, chain_config, root, monkeypatch, *, overrides=Non
         / (scoring_policy_hash(o.h.transport) + ".json"),
         o.h.transport,
     )
-    SettlementEvidenceFiles(Path(config.lifecycle.sources.objects_directory)).publish(
-        digest(o.h.terms), lambda _: canonical_json_bytes(o.h.terms)
-    )
+    term_files = SettlementEvidenceFiles(Path(config.lifecycle.sources.objects_directory))
+    for terms in (o.h.terms, *o.h.terms_by_cohort.values()):
+        term_files.publish(digest(terms), lambda _, terms=terms: canonical_json_bytes(terms))
     reference_objects = getattr(
         o.h, "reference_objects", {digest(o.h.reference): canonical_json_bytes(o.h.reference)}
     )
@@ -452,7 +452,9 @@ def configure_model_reviews(o, root, client, signatures):
     o.service.models.reviewers = tuple(peers)
 
 
-async def certify_requests(o, app, root, monkeypatch, signatures, admission_probe=None):
+async def certify_requests(
+    o, app, root, monkeypatch, signatures, admission_probe=None, *, model_only=False
+):
     """Use native request observation, review and handoff with synthetic readiness.
 
     Fence the original catalog, preserve completed benchmark and service work,
@@ -461,6 +463,12 @@ async def certify_requests(o, app, root, monkeypatch, signatures, admission_prob
     h = o.h
     cohort_index = tuple(digest(p) for p in o.config.series.cohorts).index(h.cohort)
     assert (await o.service.poll_once())["catalogs_installed"] == cohort_index + 1
+    if model_only:
+        for catalog in h.catalogs:
+            if catalog.catalog.cohort_sha256 == h.cohort:
+                readiness = await o.service.api.readiness(digest(catalog.catalog), "ab" * 16)
+                assert readiness["reason_code"] == "model_only"
+                assert readiness["new_claims_closed"] and not readiness["ready"]
     node = await app.state.lifecycle.node(h.cohort)
     await node._driver("requests")
     source = app.state.lifecycle.requests[h.cohort]
@@ -508,6 +516,11 @@ async def certify_requests(o, app, root, monkeypatch, signatures, admission_prob
             if admission_probe is None
             else await admission_probe.request_reviewer(o, name, config, source, root / name)
         )
+        # The external reviewer fixture can precreate this signer directory.
+        # A real signer requires its state directory to remain private.
+        signer_directory = Path(config.directory)
+        signer_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        signer_directory.chmod(0o700)
         signer = CohortProgressSigner(config, reviewer, sign)
         o.apps[name.lower() + ".example"].include_router(
             phase_vote_routes(signer, phase="requests", token="v" * 32)
@@ -978,7 +991,13 @@ async def run_pipeline(
                 assert service.lost_replies == int(interrupt)
                 service.reveal()
             await certify_requests(
-                o, app, tmp_path / "request-review", monkeypatch, signatures, admission_probe
+                o,
+                app,
+                tmp_path / "request-review",
+                monkeypatch,
+                signatures,
+                admission_probe,
+                model_only=not mixed,
             )
             assert max(signatures.values()) == 1
             settled = await run_settlement(
@@ -1021,7 +1040,7 @@ async def run_pipeline(
             assert (dict(inference), dict(signatures)) == counts
             if (
                 activate
-                and mixed
+                and (mixed or direct is not None)
                 and (not interrupt or direct is not None or activate_after_interruption)
             ):
                 # The actual recurring settlement output feeds reward discovery.

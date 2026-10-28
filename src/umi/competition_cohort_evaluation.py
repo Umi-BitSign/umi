@@ -10,7 +10,7 @@ from __future__ import annotations
 from fractions import Fraction
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
 from .competition_cohort_history import (
@@ -24,6 +24,11 @@ from .competition_cohort_participation import (
     verify_participant_admission,
 )
 from .competition_cohort_recovery import Block
+from .competition_cohort_suite_adoption import selected_evaluation_suite
+from .competition_evaluation_runtime import (
+    SignedCohortEvaluationRuntimeAdoption,
+    round_runtime_authorization,
+)
 from .competition_evidence import (
     EvaluationRunScope,
     IndependentEvaluationEvidence,
@@ -50,7 +55,9 @@ class RecoverableRoundParticipant(StrictProtocolModel):
 
 
 class RecoverableEvaluationRound(StrictProtocolModel):
-    schema_: Literal["umi-recoverable-evaluation-round/1"] = Field(alias="schema")
+    schema_: Literal["umi-recoverable-evaluation-round/1", "umi-recoverable-evaluation-round/2"] = (
+        Field(alias="schema")
+    )
     policy_sha256: Hex32
     cohort_sha256: Hex32
     intake_closure_sha256: Hex32
@@ -63,9 +70,21 @@ class RecoverableEvaluationRound(StrictProtocolModel):
         tuple[RecoverableRoundParticipant, ...], Field(min_length=1, max_length=512)
     ]
     prepared_at_block: Block
+    runtime_adoption: SignedCohortEvaluationRuntimeAdoption | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_round(self, handler):
+        value = handler(self)
+        if self.runtime_adoption is None:
+            value.pop("runtime_adoption", None)
+        return value
 
     @model_validator(mode="after")
     def canonical_roster(self) -> Self:
+        if (self.schema_ == "umi-recoverable-evaluation-round/2") != (
+            self.runtime_adoption is not None
+        ):
+            raise ValueError("cohort runtime amendment requires a versioned prepared round")
         submissions = tuple(p.submission_sha256 for p in self.participants)
         if submissions != tuple(sorted(set(submissions))):
             raise ValueError("recoverable round roster must be sorted and unique")
@@ -102,6 +121,7 @@ def verify_recoverable_round_participant(
     view = verify_cohort_history(
         history, policy, expected_tip_sha256=expected_tip_sha256, current_block=current_block
     )
+    round_runtime_authorization(round_, policy, history)
     accepted = verify_participant_admission(
         admission,
         signed,
@@ -122,9 +142,8 @@ def verify_recoverable_round_participant(
         round_.cohort_sha256 != view.state.cohort_sha256
         or round_.policy_sha256 != digest(policy)
         or round_.sequence != history.plan.sequence
-        or round_.suite_sha256 != history.plan.suite_sha256
+        or round_.suite_sha256 != selected_evaluation_suite(history.plan, view.state)
         or round_.intake_closure_sha256 != digest(intake)
-        or round_.runtime_sha256 != policy.evaluation_runtime_sha256
         or participant not in round_.participants
         or sub.track not in round_.eligible_tracks
     ):

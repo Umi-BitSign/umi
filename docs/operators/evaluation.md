@@ -26,6 +26,50 @@ The [private holdout](private-holdout.md#open-competition-private-holdout) suppl
 English references from documented annotations. An independent evaluator is a
 separately administered execution service, not a person grading translations.
 
+### Recoverable CPU process capacity
+
+New CPU runtime declarations default to `pids_limit: 256`. Keep the selected
+CPU, memory, scratch and inference budgets explicit. A Linux CPU quota does not
+change the host CPU count returned to MediaPipe, so a 128-process container can
+fail while constructing its thread pools even when memory remains available.
+
+For already signed C7+ policies using 128 processes, select one
+`SignedCohortEvaluationRuntimeAdoption` in the admission host's optional
+`runtime_adoption` configuration (or the standalone preparation publication
+configuration). Its `adoption` body uses schema
+`umi-cohort-evaluation-runtime-adoption/1`, binds the exact policy, recovery
+authority and complete sorted authority cohort list, names the original and
+effective runtime objects, and includes `first_cohort_sequence`,
+`issued_at_block` and a retained reason. Collect the configured independent
+recovery quorum's signatures on that exact body. Only the 128-to-256 process
+change is accepted; image, CPU, RAM, scratch, video and inference limits remain
+bound to the original policy. This is not a Bittensor runtime-version pin.
+
+The owner validates the selection before progression can run. Future prepared
+rounds embed it in `umi-recoverable-evaluation-round/2`; preparation reviewers,
+order delivery, execution journals, sandbox memory admission and settlement
+replay all authenticate the same effective runtime. Existing retained rounds
+reuse their original embedded selection after restart, even if the configured
+selection changes. C5/C6 and earlier round `/1` bytes remain unchanged. No
+previous completed case is executed again for this resource adjustment.
+
+Deploy the compatible owner, preparation reviewers, evaluators, settlement and
+validator replay readers through their supported release selections before
+selecting the amendment. Clients that parse prepared rounds also need the `/2`
+reader. Public model upload requests, signatures, R2 routes and journals do not
+change; upload-only clients do not need a new request format. Keep existing
+intake/progression holds selected: installing this profile does not close intake
+or start challenges.
+
+Direct cohort CPU readiness authenticates each order's selected runtime before
+coalescing shared preflight checks. With R2 model storage selected, it resolves
+the certified candidate and baseline sources and checks their remote presence
+and expected size once per distinct source in that readiness probe. It does not
+require every model to be cached locally or download model bytes while polling.
+Missing or inconsistent source metadata holds readiness; actual materialization
+and execution retain their existing byte-verification requirements and durable
+completed results.
+
 <a id="open-competition-evaluator--inputs-and-identity"></a>
 
 ### Inputs and identity
@@ -326,6 +370,24 @@ read-then-write decisions retain the writer transaction. Every snapshot checks
 current conflict holds, journal generation and reservation fences; this is not a
 cache of mutable authorization state.
 
+Inbox assignment readers release that snapshot before static proof validation.
+Concurrent local readers of the same exact assignment share its first successful
+validation, then receive separate private copies. Changed retained bytes, owner
+bindings or conflict holds still require their normal checks; current finality
+and execution permission are never borrowed from this reuse. The
+`assignment_static_verification` and `assignment_verification_owner` stages show
+verification and local-owner waiting separately. Bounded assignment reuse also
+reports hit, miss, eviction and oversize counts, retained bytes and configured
+capacity; a capacity bypass is visible instead of silently hiding repeated work.
+For a host whose complete queue exceeds the execution caches, explicitly select
+`UMI_EXECUTION_ASSIGNMENT_CACHE_BYTES` and `UMI_EXECUTION_ASSIGNMENT_CACHE_ENTRIES`
+in the reviewer service environment. These bound each of its two execution
+caches; defaults remain 64 MiB and 256 entries. The byte override permits at most 512 MiB,
+and the entry override at most 16384. Choose them from measured queue size and
+available memory, allowing for Python object/copy overhead, all reviewers,
+concurrent model ceilings and the host reserve. They change no journal binding,
+admission limit or proof semantics. Other caches retain their selected budgets.
+
 An exact single-record retention retry also uses that read-only snapshot: the
 same canonical bytes must already be committed and satisfy their reservation.
 New records and conflicting bytes still use the native writer transaction;
@@ -390,10 +452,48 @@ the series. Both roles capture native history and reward opportunity evidence
 while evaluation continues, so peer review does not wait to begin its history
 scan until the first vote request. The reviewer never loads the control
 transaction key. A separate history preparation process must release its service
-lock before the ordinary service starts; restart still requires native replay
-of retained proof bytes. Completing a separate full scan first does not remove
-that replay cost. History preparation alone cannot certify an allocation or
-activate reward weights.
+lock before the ordinary service starts. The native owner retains successful
+block checkpoints and the already applied ordered history fold in the original
+journal. Restart restores that fold with fresh owned tip finality; unchanged
+blocks do not repeat proof replay or per-block source reconstruction. Sparse
+anchors preserve older history prefixes with at most 63 metadata records. A first
+upgrade from per-block-only results builds the fold once during normal bounded
+restoration. Changed sources, damaged records or changed verification semantics
+require explicit scoped repair; they never silently fall back to a full replay.
+Exact source publication to R2 preserves the original identities and the fold.
+The writer, coordinator and supported read-only history consumers share this
+reader. Preserve their original journal and supported automatic update path;
+installing source alone does not establish deployment. History preparation
+alone cannot certify an allocation or activate reward weights.
+
+For an explicitly selected writable `umi-r2-proof-archive/2` export store,
+`archive_backfill_batch_frames` enables the owner's bounded background delivery
+cursor. Existing local frames keep their exact decoder-valid recipe and chunk
+encoding; new destinations can copy the checkpoint-bound compact sources.
+Completed object/frame receipts and each completed height survive interruption,
+without another native proof check. The cursor also handles a completed initial
+admission interval without manufacturing per-block verdicts. Delivery status,
+counted progress and its scoped ETA appear under `archive_delivery`; capture,
+verification and ordered application remain separate. Delivery errors retain
+that cursor and withdraw its ETA while native history continues.
+
+`archive_release_batch_files` separately selects bounded local release and
+requires `archive_release_consumer_abi: umi-proof-read-release-lease/1` plus the
+backfill cursor. Select that ABI only after checking the actual writer,
+coordinator, reviewers, recovery readers and rollback selection all use the
+supported R2 readers and read/release leases. An old process is not covered by a
+new package on disk. The default is no online eviction. An active local reader
+defers cleanup; each unlink has a durable exact-file intent, directory fsync and
+completion, so restart credits its allocated bytes once. Shared objects can be
+released after their own immutable R2 completion because selected readers prefer
+that remote generation. Unknown files, private journals, provenance, signed
+inputs and `.remote-state` remain intact. Preserve index capacity for the durable
+cursor and per-file records; capacity or changed-source failures require the
+reported repair rather than deleting metadata. Upgrade the selected supported
+hosts before adopting these optional fields; original configurations serialize
+without them and keep their signed bytes. Do not restart an active old owner
+merely to install this optimization before its current activation work finishes.
+
 
 Historical ancestry recovery verifies bounded batches. When a batch retains
 verified links but has not reached its fixed target, the ordinary coordinator
@@ -508,6 +608,94 @@ one priority slot so its next case does not wait behind the entire roster. Other
 jobs retain capacity; a single-slot worker alternates priority with ordinary
 work. An unavailable source remains pending and cannot authorize a different
 source or fabricate a result.
+
+With an explicit boot-disk model cache, CPU model evaluation retains a bounded
+set of model archives under the existing shared allocation and filesystem reserves. It
+finishes a paired assignment's case/role steps before rotating to another model,
+keeping candidate and reference bytes resident when they fit. Each step still
+uses its original authority checks, inference deadline and durable result; paired
+model observations are never borrowed from another assignment. The original
+`archive` slot and interrupted transfers stay in place across upgrades. The idle
+`standby` slot and managed parallel slots may be evicted when a pair cannot fit;
+concurrent jobs share the reference where possible. Unrelated cache entries are
+never removed. Legacy installations without an explicit boot cache retain their
+single-slot, one-step scheduling.
+
+Resident admission uses the smaller of the configured cache limit and actual
+managed-slot allocation plus free filesystem bytes above its reserve. Unrelated
+entries continue to occupy their quota and cannot be counted as reclaimable. A pair that fits
+the configured limit but not that physical budget uses the existing exclusive
+single-model switching path. A second pair waits for a resident peer or external
+space release without holding an inference slot, allowing a smaller ready pair
+to proceed. It does not repeatedly restart preparation. Per-write reserve
+checks still apply if another service consumes space after admission. Queue
+observations read bounded filesystem metadata, never model payloads or completed
+verification evidence.
+
+`model_pair_queue`, `model_pair_capacity` and `model_pair_execution` expose queue,
+space admission and case/role progress separately. Completed steps restored from
+the journal count separately from newly executed steps. The ETA covers that job,
+not all cohort scoring or reward activation. Cancellation drains the current
+invocation and releases scheduling ownership; restart reuses existing checkpoints.
+Pair execution's idle diagnostic uses the selected step's full supported budget,
+so an ordinary long inference is not classified as a sixty-second byte-transfer
+stall. This changes telemetry only; signed clocks and inference deadlines remain
+unchanged. `model_pair_queue` and `model_cache_capacity` distinguish initial
+physical admission and a subsequent external capacity loss.
+On startup, the worker reads only directory names in its bounded managed cache
+and a small set of recent assignment IDs. It gives matching acknowledged jobs
+one scheduling turn before continuing the unchanged fair cursor. This preference
+does not read model payloads or replay the inbox roster; each admitted job still
+uses the ordinary assignment, current-authority and retained-step checks. A
+failed resumed job returns to normal rotation instead of monopolizing capacity.
+`model_resume_inventory` reports counted slot-inventory progress separately.
+Slot discovery recognizes the exact interrupted-transfer marker or completed
+materialization receipt. Completion removes the interrupted marker; the ordinary
+materialized reader still checks retained file identities before invocation.
+
+Managed boot-cache transfers take one allocation snapshot under the exclusive
+cache lock, then account for each signed file append and its directory metadata.
+They reserve publication metadata before writing and check actual filesystem free
+space before every append. Cache eviction uses that same lock. Read-only CPU
+consumers retain their model leases throughout invocation. Unknown cache entries,
+boot roots containing invocation scratch, and older pathless write ports retain
+full metadata scans. Capacity snapshots are discarded when the transfer lease
+ends; they are not durable verification or authorization records.
+After restart, eviction preference keeps the current signed round's reference
+when selecting a new candidate; exact source authentication still runs before
+invocation and capacity pressure can release any idle managed peer.
+
+Accepted inbox receipts confirm delivery, not model execution. The recoverable
+worker reports owner-history retrieval, registration capture, history and order
+review, fresh-history confirmation and sandbox execution as separate
+`execution_*` progress stages. Wait heartbeats retain elapsed time and the scoped
+ETA basis; they do not cancel work. An `execution_retry` event records the
+assignment slot and bounded native cause frames without exception text. Check
+these diagnostics before treating an accepted assignment as a running challenge.
+
+An assigned evaluator need not have cast an artifact-review vote. If its own
+review journal has no request, the benchmark host retrieves the owner's original
+request, acceptance certificate and native history through the authenticated
+`/internal/cohorts/model-artifacts/execution-source` export. It checks the exact
+submission, prepared admission, cohort authority, acceptance quorum, transport
+and intake clocks before atomically retaining the source and verification result
+in its benchmark journal. Reopening reuses that result for unchanged input and
+validation context. Missing or conflicting completion records require repair.
+This namespace records byte-source verification; it creates no review vote,
+acceptance or execution authority. Existing local reviewed requests keep their
+original path, including refusal when their retained intent is missing.
+
+Registration-cache startup installs a covering index for evidence-length
+accounting on retained stores. Capture persistence can then count retained
+evidence without scanning large payload rows. This additive index preserves
+the cache identity, capacity allowance and every original proof.
+
+The recoverable executor's outer attempt wait includes the configured
+`execution.read_timeout_seconds` for metadata, restoration and cache queues,
+followed by the signed inference budget and cleanup allowance. The CPU runner
+still enforces the original per-inference limit independently. Queue or transfer
+time must not consume that model execution budget. Changing the local wait does
+not renew signed cohort clocks or extend a model's inference deadline.
 
 Repeated observation of the journal's current finalized block uses a read-only
 snapshot. A newer block rechecks the previous value while owning the writer

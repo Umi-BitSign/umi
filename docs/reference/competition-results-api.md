@@ -19,10 +19,65 @@ and return `total`, `next_offset` and `items`.
 
 | GET path | Meaning |
 | --- | --- |
+| `/v1/competition/cohorts/{cohort}/progress` | Cached stage, counted work, scoped ETA and retry/repair status; advisory, never reward or phase authority |
 | `/v1/competition/cohorts/{cohort}/service-results` | All sealed roster hotkeys, including zero-work rows, retained UIDs, successful/failed paid terminals, exact quality credit and certified service weight |
+| `/v1/competition/cohorts/{cohort}/model-results` | Certified model scores, exact ranks, baseline eligibility and certified allocation metadata; does not establish live chain rewards |
 | `/v1/competition/cohorts/{cohort}/models` | Every exported admitted public submission, original terms and license, revision identity, artifact-release state and download availability |
 | `/v1/competition/cohorts/{cohort}/models/{model}/download` | Native bundle manifest, renewable GET capabilities, optional complete tar archive, and the file-download endpoint |
 | `/v1/competition/cohorts/{cohort}/models/{model}/download-files` | One manifest file's bounded pieces or preserved-payload byte range |
+
+Model results keep `baseline_aggregate` as the reference model's actual measured
+score. When the selected signed reward parameters include relative baseline
+grace, `reward_parameters.baseline_grace_bps` states that grace and every scored
+row includes an exact `baseline_threshold`. Eligibility compares the exact score
+against that threshold. For C7 and later's 100 basis-point grace, the threshold
+is 99% of the measured baseline, not one percentage point subtracted from it.
+For example, a baseline score of 0.40 gives a threshold of 0.396.
+`below_baseline` means below this effective eligibility threshold. Historical
+results omit these optional fields and retain their original strict comparison.
+Grace affects reward eligibility; selecting a successor reference still requires
+meeting or exceeding its paired measured baseline.
+
+When a selected signed adoption changes reward parameters after original
+certification, the publisher emits `umi-public-cohort-model-results/3` with
+`certification: quorum_certified_reward_adoption`. `allocation_sha256` identifies
+the effective allocation; `original_allocation_sha256` and
+`reward_adoption_sha256` retain its exact source bindings.
+`original_source_metadata_sha256` binds the original certified metadata used by
+the model/download catalog. The catalog reuses its completed release checks when
+an adopted result retains this source and its exact model roster. Scores, ranks and
+measured baselines remain unchanged unless the adoption also contains an
+independent signed score correction, identified by
+`score_correction_statement_sha256`. These fields still make no claim about a
+finalized live weight row.
+
+Execution counts are confirmed delivered export floors, so live execution can be
+ahead. A completed model requires all of its selected evaluators' terminal exports.
+Projected execution totals assume the undelivered orders match delivered profiles.
+An execution ETA covers evaluations only; certification and reward activation are
+separate. `overall_eta_seconds: null` means no end-to-end forecast is established.
+
+Execution rates use completed models within the currently observed evaluator
+processes, identified by `rate_epoch_sha256`. `rate_completed_models` and
+`rate_sample_seconds` describe that sample only. An evaluator restart, rollout,
+unavailable identity or change to the evaluator set withdraws the old rate while
+preserving all completed work. A new sample needs three completed models and five
+minutes before an estimate is issued. Older reviewers without the optional cached
+identity endpoint keep counts available and report an unknown ETA. Public polling
+reads only the retained in-process snapshot; it triggers no RPC or verification.
+The exact progress GET has its own bounded read lane, using the configured
+`maximum_concurrent_reads` limit. Slow native/status reads cannot consume its
+slots. It remains available under the request-certification memory guard; that
+exception grants no admission, native-read or submission authority. Unknown
+cohorts still return 404.
+
+During intake, `components.intake_certification` is sampled by bounded native
+inventory owners (up to 16), with one per cohort in the selected C5–C10 series.
+A slow read of an older cohort, model review or remote upload check does not postpone a successor's
+next count. The acceptance owner reads a bounded pending prefix for scheduling
+and does not repeat the certification count. The public GET only
+reads the most recent sample; `age_seconds` and `stale` show its freshness. This
+count covers latest model submissions, not a sealed scoring roster.
 
 File pages accept `file_index`, `offset` and `limit` (1–128 pieces). A preserved
 chunk page has SHA-256 and byte size per piece. A concatenated R2 payload page
@@ -44,11 +99,33 @@ separate statuses.
 
 ## Download with restart support
 
-Run `python -m umi.competition_cohort_public_download_cli --help` for the installed
-client's arguments. Select the configured public API origin and identities from
-the model catalog:
+Run `python -m umi.competition_cohort_public_download_cli --help` in a current
+UMI Python environment for the installed client's arguments. The C6 catalog is
+paginated at 100 items; read both pages and select an item with
+`download_available: true`:
 
-`python -m umi.competition_cohort_public_download_cli --api https://api.example.org --cohort COHORT_SHA256 --model MODEL_SHA256 --output /absolute/model-download`
+```text
+https://api.umi.vision/v1/competition/cohorts/06b8074172f29bcbead0ae5e88e25ca94af2fe5c7bca71b6821df7c1139a83af/models?offset=0&limit=100
+https://api.umi.vision/v1/competition/cohorts/06b8074172f29bcbead0ae5e88e25ca94af2fe5c7bca71b6821df7c1139a83af/models?offset=100&limit=100
+```
+
+Use the item's `model_sha256`, not its `submission_sha256` or UID. For example,
+this downloads the C6 UID 5 model into a new directory:
+
+```sh
+python -m umi.competition_cohort_public_download_cli \
+  --api https://api.umi.vision \
+  --cohort 06b8074172f29bcbead0ae5e88e25ca94af2fe5c7bca71b6821df7c1139a83af \
+  --model 77d075ac84aaa51f241806bfed239b94885a8fa158d20267e2e69067d3c335aa \
+  --output /absolute/path/to/new-output-directory
+```
+
+For another model or cohort, replace the digest arguments with values from its
+catalog and continue pagination using `next_offset` until null. The download
+metadata endpoint returns renewable, short-lived capabilities; don't use a
+capability URL as a permanent link. C6's concatenated payload has file ranges
+and no ready-made tar archive. The client assembles and verifies the native
+files automatically.
 
 The client writes `manifest.json` plus `model/` in a new, private output directory.
 It supports original 8 MiB preserved chunks and C6+ concatenated payload ranges,
@@ -131,9 +208,38 @@ missing checkpoint artifact or conflicting immutable artifact is an explicit
 repair hold: restore the exact content-addressed metadata from the publication
 backup before retrying. Never delete a checkpoint to force a fresh publication,
 or replace signed inputs or native receipts to resolve a publication problem.
-Retain the small publication metadata and checkpoints durably in R2. Configure a timer
-to rerun publication as C6 and later intake, artifact acceptance and R2 promotion
-advance. Refresh explicit pins only to newly authenticated native exports.
+Retain the small publication metadata and checkpoints durably in R2. For automatic
+certified C6+ catalogs, run
+`python -m umi.competition_cohort_public_cli publish-certified --config /absolute/catalog-watch.json --watch`.
+Its `NativePublicCatalogWatchConfig` selects `score_directory`, `state_directory`,
+`cohorts` and a native `CohortPublicPublisherConfig` `template`. The selected score
+artifact schedules publication; release still requires the original signed
+admission, supported contribution terms, artifact acceptance and completed
+preservation receipts. The output scope is `sealed_roster`, including unselected
+reward candidates, rather than all historical intake revisions.
+
+The template must preserve the native intake's original complete cohort/authority
+bindings and `eligible_tracks`, even when current public submissions support only
+models. This read-only binding does not reopen endpoint admission. A
+`direct_promotion_source` selects the actual owner upload directory, owner UID and
+hotkey, R2 endpoint/bucket and standing-review-policy digest. It derives each
+original promotion journal binding from that cohort's retained transport history.
+For retained chunk packages, `legacy_sources` maps cohort IDs to the same pinned
+association/package metadata used by manual publication. Models outside the
+certified catalog are ignored, and only missing download transports are added.
+Successful original checks survive restart and incremental transport publication;
+completed or damaged records never silently become fresh native verification.
+
+Keep one publisher for each selected cohort/output directory. Refresh the watch
+configuration automatically from the actual selected intake configuration as its
+series changes; the watcher reloads an atomically replaced configuration. Preserve
+completed state and independently deliver the resulting bounded `artifacts/` and
+`cohorts/` metadata to the API account, artifacts first. No native owner restart,
+chain RPC, model payload access or reward activation gate is needed. The current
+public download client supports both retained chunk packages and concatenated
+payload ranges. Its default HTTPX client sends `python-httpx/<version>` with
+`trust_env=False`; raw Python-urllib requests can be rejected by the gateway, so
+use the supported client or an explicit accepted User-Agent for custom clients.
 
 ## Serve separately or through intake
 
