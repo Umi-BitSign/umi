@@ -50,6 +50,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "preserve-bundle": models.verify_bundle,
     "project-weights": store.project_weights,
     "query-cohort-admission": cohorts.query_admission,
+    "fetch-cohort-model-licenses": cohorts.fetch_model_licenses,
     "promote": store.promote,
     "propose-execution-result": evidence.propose_execution_result,
     "record-evaluation": store.record_evaluation,

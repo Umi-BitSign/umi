@@ -15,6 +15,7 @@ from ..competition_cohort_participation import (
     CohortParticipationRequest,
     SignedCohortParticipationConsent,
 )
+from ..competition_model_license import verify_cohort_model_terms
 from ..open_competition import CompetitionPolicy, SignedSubmission, digest, identity, sign_object
 from ..protocol import canonical_json_bytes
 from .common import load_json
@@ -55,7 +56,6 @@ def sign_consent(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
         or body.submission_sha256 != digest(sub)
         or identity(body.hotkey) != identity(sub.hotkey)
         or sub.policy_sha256 != digest(policy)
-        or sub.accepted_terms_sha256 != policy.contribution_terms_sha256
         or not history.authority.authority.issued_at_block
         <= body.signed_at_block
         <= args.current_block
@@ -68,6 +68,7 @@ def sign_consent(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
         > policy.maximum_submission_lifetime_blocks
     ):
         raise ValueError("consent does not cover the selected open cohort and contribution")
+    verify_cohort_model_terms(sub, body, history, policy, current_block=args.current_block)
     import bittensor as bt
 
     wallet = bt.Wallet(name=args.wallet_name, hotkey=args.hotkey_name, path=args.wallet_path)
@@ -120,6 +121,19 @@ def query_admission(args: argparse.Namespace, policy: CompetitionPolicy) -> dict
         )
     )
     return status.model_dump(mode="json", by_alias=True)
+
+
+def fetch_model_licenses(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
+    from ..competition_model_license_client import fetch_model_license_adoptions
+
+    result = fetch_model_license_adoptions(
+        origin=args.origin,
+        history=load_json(args.history, CohortRecoveryHistory),
+        policy=policy,
+        expected_tip_sha256=args.expected_tip_sha256,
+        current_block=args.current_block,
+    )
+    return result.model_dump(mode="json", by_alias=True)
 
 
 def run_admission_worker(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:

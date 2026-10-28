@@ -33,6 +33,7 @@ from .competition_cohort_model_upload_continuation import (
 from .competition_cohort_participation import CohortParticipationReceipt, CohortParticipationRequest
 from .competition_cohort_recovery import ModelDeliveryProfile
 from .competition_model_interface import model_python_entrypoint
+from .competition_model_license import model_contribution_terms
 from .competition_model_source_verification import verify_model_source
 from .competition_transport_verification import TransferProgress, current_progress
 from .concurrency import run_owned_thread
@@ -384,6 +385,8 @@ async def submit_cohort_model(
     ):
         raise ValueError("model upload requires matching policy, model request and hotkey")
     bundle = sub.model_bundle
+    if sub.accepted_terms_sha256 != model_contribution_terms(bundle, policy):
+        raise ValueError("model upload has not accepted its exact model contribution terms")
     model_python_entrypoint(bundle)
     source = Path(os.path.abspath(source))  # Preserve symlinks for the no-follow reader.
     fingerprints = await _verify_source_owned(source, bundle, policy, report, retry_seconds)
