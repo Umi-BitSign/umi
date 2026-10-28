@@ -7,7 +7,8 @@ import json
 import logging
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event, Lock
+from contextlib import contextmanager
+from threading import Barrier, Event, Lock, get_ident
 
 import httpx
 import pytest
@@ -33,6 +34,7 @@ class BatchServer(EvidenceServer):
         self.mutate = None
         self.lock, self.active, self.peak = Lock(), 0, 0
         self.entered, self.release = None, None
+        self.ready_objects = 1
 
     def client(self):
         previous = super().client()
@@ -70,7 +72,8 @@ class BatchServer(EvidenceServer):
             self.peak = max(self.peak, self.active)
         try:
             if self.entered is not None:
-                self.entered.set()
+                if self.active >= self.ready_objects:
+                    self.entered.set()
                 assert self.release.wait(5)
             if type(self.batch_failure) is int:
                 return httpx.Response(self.batch_failure)
@@ -226,6 +229,7 @@ def test_malformed_ack_never_credits_any_receipt_or_silently_falls_back(tmp_path
 def test_batch_and_direct_publish_share_global_admission(tmp_path):
     server = BatchServer()
     server.entered, server.release = Event(), Event()
+    server.ready_objects = 8
     selected = store(tmp_path / "owner", server)
     a = objects(*(str(i).encode() for i in range(8)))
     with ThreadPoolExecutor(max_workers=3) as pool:
@@ -247,11 +251,11 @@ def test_batch_and_direct_publish_share_global_admission(tmp_path):
     assert selected._publishing_keys == set() and selected._publishing_bytes == 0
 
 
-def test_pending_graph_chunks_keep_eight_item_and_32KiB_payload_bounds(tmp_path):
+def test_pending_graph_chunks_leave_capacity_for_another_lane(tmp_path):
     server = BatchServer()
     selected = store(tmp_path / "owner", server)
     selected.put_many(objects(*(bytes([i]) * 4096 for i in range(19))))
-    assert [len(batch["objects"]) for batch in server.batches] == [8, 8, 3]
+    assert sorted(len(batch["objects"]) for batch in server.batches) == [3, 4, 4, 4, 4]
     assert server.peak <= 8
 
 
@@ -345,6 +349,7 @@ def test_waiting_batch_observes_disable_before_another_proxy_attempt(tmp_path, m
     server = BatchServer()
     server.batch_failure = 503
     server.entered, server.release = Event(), Event()
+    server.ready_objects = 8
     waiting = Event()
     original = store_module.TransferProgress.emit
 
@@ -365,7 +370,102 @@ def test_waiting_batch_observes_disable_before_another_proxy_attempt(tmp_path, m
             server.release.set()
         first.result(5)
         second.result(5)
+    # Both already admitted lanes may finish; the waiting graph must observe
+    # the disabled route rather than attempt another proxy request.
+    assert len(server.batches) == 2
+    assert selected._publishing_keys == set() and selected._publishing_bytes == 0
+
+
+def test_two_batch_lanes_overlap_and_reuse_their_owned_clients(tmp_path, monkeypatch, caplog):
+    server = BatchServer()
+    server.entered, server.release, server.ready_objects = Event(), Event(), 8
+    selected = store(tmp_path / "owner", server)
+    original, clients, lock = selected.client._new_client, [], Lock()
+
+    @contextmanager
+    def owned():
+        with original() as client:
+            with lock:
+                clients.append((get_ident(), client))
+            yield client
+
+    monkeypatch.setattr(selected.client, "_new_client", owned)
+    values = objects(*(str(i).encode() for i in range(40)))
+    with (
+        caplog.at_level(logging.INFO, logger="umi.competition.progress"),
+        ThreadPoolExecutor(max_workers=1) as caller,
+    ):
+        future = caller.submit(selected.put_many, values)
+        try:
+            assert server.entered.wait(3)
+            assert len(server.batches) == 2 and server.active == 8
+        finally:
+            server.release.set()
+        future.result(5)
+    assert len(server.batches) == 10 and server.peak == 8
+    assert len(clients) == len({thread for thread, _client in clients}) == 2
+    assert all(client.is_closed for _thread, client in clients)
+    completed = [
+        json.loads(row.message)
+        for row in caplog.records
+        if '"stage":"proof_graph_replication"' in row.message
+        and '"status":"completed"' in row.message
+    ]
+    assert len(completed) == 1 and completed[0]["completed_operations"] == 40
+    server.batches.clear()
+    store(tmp_path / "owner", server).put_many(values)
+    assert not server.batches and not server.calls
+
+
+def test_large_direct_object_overlaps_a_small_batch(tmp_path):
+    class Server(BatchServer):
+        def __init__(self):
+            super().__init__()
+            self.overlap = Barrier(2)
+
+        def send(self, request):
+            if request.method in {"POST", "PUT"}:
+                self.overlap.wait(timeout=3)
+            return super().send(request)
+
+    server = Server()
+    selected = store(tmp_path / "owner", server)
+    values = objects(b"one", b"two", b"three", b"four", b"large" * 1000)
+    selected.put_many(values)
     assert len(server.batches) == 1
+    assert len(server.objects) == len(values)
+    assert selected._publishing_keys == set() and selected._publishing_bytes == 0
+
+
+def test_conflicting_lane_drains_other_success_before_graph_fails(tmp_path):
+    entered, release = Event(), Event()
+    good = [f"good-{i}".encode() for i in range(4)]
+    bad = [f"bad-{i}".encode() for i in range(4)]
+    good_key = hashlib.sha256(good[0]).hexdigest()
+
+    class Server(BatchServer):
+        def send(self, request):
+            if request.method == "POST":
+                body = json.loads(request.content)
+                if body["objects"][0]["key"].endswith(good_key):
+                    entered.set()
+                    assert release.wait(3)
+                else:
+                    assert entered.wait(3)
+                    release.set()
+            return super().send(request)
+
+    server = Server()
+    bad_key = hashlib.sha256(bad[0]).hexdigest()
+    server.objects["proofs/objects/" + bad_key] = b"conflict"
+    selected = store(tmp_path / "owner", server)
+    with pytest.raises(ValueError, match="conflicts"):
+        selected.put_many(objects(*good, *bad))
+    assert len(server.batches) == 2 and not server.calls
+    assert all(
+        selected.reference_for_path("objects/" + hashlib.sha256(raw).hexdigest()) is not None
+        for raw in good
+    )
     assert selected._publishing_keys == set() and selected._publishing_bytes == 0
 
 

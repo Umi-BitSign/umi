@@ -35,6 +35,7 @@ from .r2_publish_batch import (
 from .r2_sigv4 import R2SigV4, load_r2_credentials
 
 PROOF_PUBLICATION_WORKERS = 8
+PROOF_PUBLICATION_BATCH_OBJECTS = min(MAX_PUBLISH_OBJECTS, PROOF_PUBLICATION_WORKERS // 2)
 MAX_ACTIVE_PROOF_PUBLICATION_BYTES = 2 * MAX_PROOF_OBJECT_BYTES
 
 
@@ -624,14 +625,14 @@ class RemoteProofStore:
                 self._publishing_bytes -= size
                 self._publication_condition.notify_all()
 
-    def _batch_publications(self, pending, progress):
-        """Retain exact per-item receipts, including success before a partial failure."""
+    def _batch_publications(self, pending, progress, stop):
+        """One owned lane; retain exact receipts before exposing partial failure."""
         remaining = []
-        small = [(sha, raw) for sha, raw in pending if len(raw) <= MAX_PUBLISH_OBJECT_BYTES]
-        remaining.extend((sha, raw) for sha, raw in pending if len(raw) > MAX_PUBLISH_OBJECT_BYTES)
-        limit = min(MAX_PUBLISH_OBJECTS, PROOF_PUBLICATION_WORKERS)
-        for offset in range(0, len(small), limit):
-            selected = small[offset : offset + limit]
+        limit = PROOF_PUBLICATION_BATCH_OBJECTS
+        for offset in range(0, len(pending), limit):
+            if stop.is_set():
+                break
+            selected = pending[offset : offset + limit]
             if self._publish_batch_failure is not None:
                 remaining.extend(selected)
                 continue
@@ -644,6 +645,8 @@ class RemoteProofStore:
             ) as batch:
                 sizes = {self._key("objects/" + sha): len(raw) for sha, raw in selected}
                 with self._publication_slots(sizes, batch):
+                    if stop.is_set():
+                        break
                     # Another graph may have disabled the route while this
                     # batch waited for the same global admission budget.
                     if self._publish_batch_failure is not None:
@@ -749,12 +752,14 @@ class RemoteProofStore:
         fallback = None
         fallback_keys = set()
 
-        def publish_lane(lane):
+        def publish_lane(lane, *, batched=False):
             try:
                 with r2_evidence_connection_scope(self.client):
+                    if batched:
+                        return self._batch_publications(lane, progress, stop)
                     for sha, raw in lane:
                         if stop.is_set():
-                            return
+                            break
                         reference, restored = self._put_bytes(raw)
                         if reference["content_sha256"] != sha:
                             raise ValueError(
@@ -764,9 +769,29 @@ class RemoteProofStore:
                         progress.advance_operations(1, restored=restored)
                         if sha in fallback_keys:
                             fallback.advance(1, restored=restored)
+                return []
             except BaseException:
                 stop.set()
                 raise
+
+        def run_lanes(direct, batches=()):
+            # Batch reservations leave capacity for another batch or direct
+            # objects. Every lane still shares the store's key/byte admission.
+            lanes = [[] for _ in range(min(PROOF_PUBLICATION_WORKERS - len(batches), len(direct)))]
+            for number, item in enumerate(direct):
+                lanes[number % len(lanes)].append(item)
+            jobs = [(lane, True) for lane in batches] + [(lane, False) for lane in lanes]
+            if len(jobs) == 1:
+                lane, batched = jobs[0]
+                return publish_lane(lane, batched=batched)
+            remaining = []
+            with ThreadPoolExecutor(
+                max_workers=len(jobs), thread_name_prefix="umi-proof-publish"
+            ) as pool:
+                futures = [pool.submit(publish_lane, lane, batched=batch) for lane, batch in jobs]
+                for future in futures:
+                    remaining.extend(future.result())
+            return remaining
 
         with TransferProgress(
             "proof_graph_replication",
@@ -781,9 +806,21 @@ class RemoteProofStore:
             if not pending:
                 return
             if self._publish_batch is not None:
-                pending = self._batch_publications(pending, progress)
-                if not pending:
-                    return
+                if self._publish_batch_failure is None:
+                    small = [item for item in pending if len(item[1]) <= MAX_PUBLISH_OBJECT_BYTES]
+                    if small:
+                        direct = [
+                            item for item in pending if len(item[1]) > MAX_PUBLISH_OBJECT_BYTES
+                        ]
+                        limit = PROOF_PUBLICATION_BATCH_OBJECTS
+                        batches = [[] for _ in range(min(2, (len(small) + limit - 1) // limit))]
+                        for number, item in enumerate(small):
+                            batches[(number // limit) % len(batches)].append(item)
+                        # Large direct objects overlap small batches, rather
+                        # than waiting behind the entire small-object graph.
+                        pending = run_lanes(direct, batches)
+                        if not pending:
+                            return
                 if self._publish_batch_failure is not None:
                     fallback_keys = {
                         sha for sha, raw in pending if len(raw) <= MAX_PUBLISH_OBJECT_BYTES
@@ -795,21 +832,10 @@ class RemoteProofStore:
                             unit="objects",
                             planning_unit_seconds=(0.01, 60),
                         )
-            lanes = [[] for _ in range(min(PROOF_PUBLICATION_WORKERS, len(pending)))]
-            for number, item in enumerate(pending):
-                lanes[number % len(lanes)].append(item)
             with fallback if fallback is not None else nullcontext():
                 if fallback is not None:
                     fallback.emit("retrying", reason=self._publish_batch_failure)
-                if len(lanes) == 1:
-                    publish_lane(lanes[0])
-                    return
-                with ThreadPoolExecutor(
-                    max_workers=len(lanes), thread_name_prefix="umi-proof-publish"
-                ) as pool:
-                    futures = [pool.submit(publish_lane, lane) for lane in lanes]
-                    for future in futures:
-                        future.result()
+                run_lanes(pending)
 
     def _pending_publications(self, objects, progress):
         owner = self.receipt_source or self.journal
