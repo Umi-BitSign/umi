@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import hashlib
+import json
 from datetime import datetime, timezone
 
 import httpx
@@ -309,6 +311,150 @@ async def test_range_retry_discards_failed_partial_response(monkeypatch):
     assert all(r.headers["range"] == "bytes=0-3" for r in calls)
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        429,
+        500,
+        502,
+        503,
+        504,
+        httpx.ReadError,
+        httpx.ConnectError,
+        httpx.ReadTimeout,
+        httpx.RemoteProtocolError,
+    ],
+)
+async def test_range_retry_survives_five_transient_failures_in_same_scope(
+    monkeypatch, caplog, failure, http_log_redaction
+):
+    requests, waits = [], []
+
+    async def pause(seconds):
+        waits.append(seconds)
+
+    def send(request):
+        requests.append(request)
+        if len(requests) < 6:
+            if isinstance(failure, int):
+                return httpx.Response(failure, content=b"private provider detail")
+            raise failure("private provider detail", request=request)
+        return httpx.Response(206, headers={"Content-Range": "bytes 7-10/20"}, content=b"data")
+
+    monkeypatch.setattr(module.asyncio, "sleep", pause)
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    assert await client.read_range(KEY, offset=7, size_bytes=4, at=AT) == b"data"
+    assert len(requests) == 6 and waits == [1, 2, 4, 8, 16]
+    assert all(request.url == requests[0].url for request in requests)
+    assert all(request.headers == requests[0].headers for request in requests)
+    assert all(request.content == b"" for request in requests)
+    assert requests[0].headers["Range"] == "bytes=7-10"
+    events = [
+        json.loads(record.message.split(" ", 1)[1])
+        for record in caplog.records
+        if record.message.startswith("r2_request_status ")
+    ]
+    assert [event["attempt"] for event in events] == [1, 2, 3, 4, 5]
+    assert all(event["maximum_attempts"] == 6 for event in events)
+    assert all(event["eta_basis"] == "bounded_same_range_retry" for event in events)
+    assert all(event["stalled_or_retrying"] for event in events)
+    assert all(event["elapsed_seconds"] >= 0 for event in events)
+    assert all(
+        event["object_key_sha256"] == hashlib.sha256(KEY.encode()).hexdigest()
+        and event["byte_range"] == "bytes=7-10"
+        for event in events
+    )
+    assert KEY not in caplog.text and "private provider detail" not in caplog.text
+
+
+@pytest.mark.parametrize("transport", [False, True])
+async def test_range_retry_exhaustion_has_six_attempts_and_bounded_retry_after(
+    monkeypatch, caplog, transport
+):
+    calls, waits = [], []
+
+    async def pause(seconds):
+        waits.append(seconds)
+
+    def send(request):
+        calls.append(request)
+        if transport:
+            raise httpx.ReadError("private provider detail", request=request)
+        return httpx.Response(503, headers={"Retry-After": "3600"})
+
+    monkeypatch.setattr(module.asyncio, "sleep", pause)
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    with pytest.raises(OSError):
+        await client.read_range(KEY, offset=7, size_bytes=4, at=AT)
+    assert len(calls) == 6
+    assert waits == ([1, 2, 4, 8, 16] if transport else [30] * 5)
+    terminal = json.loads(caplog.records[-1].message.split(" ", 1)[1])
+    assert terminal["attempt"] == terminal["maximum_attempts"] == 6
+    assert terminal["retry_seconds"] is None
+    assert terminal["stalled_or_retrying"] is False
+    assert terminal["eta_seconds"] is None
+    assert terminal["eta_basis"] == "same_range_retry_exhausted"
+
+
+@pytest.mark.parametrize("retry_after,expected", [("3", 3), ("-2", 1), ("invalid", 1)])
+async def test_range_retry_after_retains_backoff_floor(monkeypatch, retry_after, expected):
+    requests, waits = [], []
+
+    async def pause(seconds):
+        waits.append(seconds)
+
+    def send(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(429, headers={"Retry-After": retry_after})
+        return httpx.Response(206, headers={"Content-Range": "bytes 0-3/4"}, content=b"data")
+
+    monkeypatch.setattr(module.asyncio, "sleep", pause)
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    assert await client.read_range(KEY, offset=0, size_bytes=4, at=AT) == b"data"
+    assert waits == [expected] and len(requests) == 2
+
+
+@pytest.mark.parametrize("status", [301, 400, 403, 404, 409, 412, 416])
+async def test_range_permanent_refusal_never_retries(monkeypatch, status):
+    calls = []
+
+    async def pause(_):
+        pytest.fail("permanent provider refusal must not retry")
+
+    def send(request):
+        calls.append(request)
+        return httpx.Response(status)
+
+    monkeypatch.setattr(module.asyncio, "sleep", pause)
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    with pytest.raises(OSError, match=f"HTTP {status}"):
+        await client.read_range(KEY, offset=0, size_bytes=4, at=AT)
+    assert len(calls) == 1
+
+
+async def test_range_retry_cancellation_during_backoff_stops_immediately(monkeypatch):
+    entered = asyncio.Event()
+    requests = []
+
+    async def pause(_):
+        entered.set()
+        await asyncio.Event().wait()
+
+    def send(request):
+        requests.append(request)
+        return httpx.Response(500)
+
+    monkeypatch.setattr(module.asyncio, "sleep", pause)
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    task = asyncio.create_task(client.read_range(KEY, offset=0, size_bytes=4, at=AT))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(requests) == 1
+
+
 @pytest.mark.asyncio
 async def test_success_response_stops_at_configured_byte_bound():
     chunks_read = 0
@@ -345,20 +491,31 @@ async def test_read_range_requires_exact_identity_encoded_bytes():
 
 
 @pytest.mark.asyncio
-async def test_read_range_rejects_partial_or_reencoded_response():
+async def test_read_range_rejects_partial_or_reencoded_response(monkeypatch):
+    async def pause(_):
+        pytest.fail("invalid range response must not retry")
+
+    monkeypatch.setattr(module.asyncio, "sleep", pause)
     for response in (
         httpx.Response(206, headers={"Content-Range": "bytes 7-9/20"}, content=b"data"),
+        httpx.Response(206, headers={"Content-Range": "bytes 7-10/20"}, content=b"dat"),
+        httpx.Response(206, headers={"Content-Range": "bytes 7-10/20"}, content=b"extra"),
         httpx.Response(
             206,
             headers={"Content-Range": "bytes 7-10/20", "Content-Encoding": "gzip"},
             content=gzip.compress(b"data"),
         ),
     ):
-        client = R2MultipartClient(
-            signer(), transport=httpx.MockTransport(lambda _, value=response: value)
-        )
+        calls = []
+
+        def send(request, value=response, observed=calls):
+            observed.append(request)
+            return value
+
+        client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
         with pytest.raises(ValueError):
             await client.read_range(KEY, offset=7, size_bytes=4, at=AT)
+        assert len(calls) == 1
 
 
 @pytest.mark.asyncio

@@ -3444,6 +3444,29 @@ Direct R2 promotion copies independent parts in bounded waves of at most four,
 also capped by the signed delivery profile. The owner drains a failed wave before
 aborting the multipart upload and still verifies the new preserved object.
 
+The shared R2 client's exact range reads retain the caller's unfinished object
+hash through up to six attempts for HTTP 429, 500, 502, 503 or 504 and classified
+network, timeout or remote-protocol failures. Each attempt repeats the same key,
+byte range and validation requirements. Backoff is 1, 2, 4, 8 and 16 seconds
+(31 seconds scheduled total); numeric provider `Retry-After` can extend each
+pause to at most 30 seconds (150 seconds scheduled total). These bounds exclude
+request I/O: the selected client's existing timeouts still apply per operation,
+and a progressing response is not cancelled by a new overall wall deadline.
+This tolerates brief provider outages; it is not a measured throughput gain or
+an overall model-completion ETA. Exhaustion still interrupts the unfinished
+object hash, while completed durable verification remains reusable.
+
+Native `r2_request` logs report attempt counts, elapsed time, the next pause and
+`bounded_same_range_retry` or `same_range_retry_exhausted`. The object key digest
+and byte range identify the failed operation without logging keys, URLs,
+credentials or response bodies. Cancellation, permanent refusals and invalid
+range responses stop immediately. HEAD, multipart metadata queries and exact
+copy-part retries keep their existing three-attempt policy. The shared client
+serves intake verification, preservation verification and supported model-byte
+readers; install it through the selected host's normal authenticated update
+path. No signed format, cohort clock, verification-result ABI or miner request
+changes are required, and destination verification remains mandatory.
+
 Paid-service origin confirmation requires the surrounding registration capture
 to reach the collected origin proof's owned block. An age-valid shared capture
 may be below that block; the owner requests a minimum-height refresh through the

@@ -649,7 +649,7 @@
     "r2_evidence.py": "8d80dbb282f772600862eae125f8ba3b704f3ed3cb6632c53929a96092ac6a0b",
     "r2_limits.py": "64588dde9a472c3a7387f1239e25fcd089e5ff6d239aae78ca7231a2571ada2a",
     "r2_metadata_batch.py": "5338c07ba5aca9df3eab32d8f4baa18189722832bbf875a3e26e7be8934c8a6b",
-    "r2_multipart.py": "8cb6f6416133ed824e699e3c533bfbb8ae3a6c48f9b0f047fbc542b476767446",
+    "r2_multipart.py": "3e14e59a01b146fec142646c630b78d54132835970210cb8008cbdc3d6ccb983",
     "r2_publish_batch.py": "c5656f482512b697a4714ad8c85b38131ec1618f0c6ae76403acfdb5789f907e",
     "r2_sigv4.py": "6259c45c0be588ddeffc7b11c53705f10b4d79f15847f13f0024ec4c6032a364",
     "registration_bridge.py": "4bc2940b3c598c1aeeb93d82c0bff0d23a1b6ebcd675237c57cd8c8b92a0843c",

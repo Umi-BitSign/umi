@@ -1646,6 +1646,77 @@ async def test_remote_verification_rechecks_only_changed_context(direct, monkeyp
     assert direct.multipart.read_calls > reads
 
 
+async def test_remote_range_retry_preserves_live_hash_and_completed_restart(
+    direct, tmp_path, monkeypatch
+):
+    from umi import competition_remote_model_verification as remote
+    from umi import r2_multipart as multipart
+
+    bundle = direct.request.signed_submission.submission.model_bundle
+    payload = direct.payload.payload
+    data = direct.multipart.payload_bytes
+    range_bytes = 31
+    assert len(data) > range_bytes * 2
+    calls, waits, failures, events = [], [], [], []
+    real_sleep = asyncio.sleep
+
+    async def pause(seconds):
+        if seconds:
+            waits.append(seconds)
+        else:
+            await real_sleep(0)
+
+    def send(request):
+        if request.method == "HEAD":
+            return httpx.Response(200, headers={"Content-Length": str(len(data)), "ETag": "v1"})
+        byte_range = request.headers["Range"]
+        calls.append(byte_range)
+        start, end = (int(value) for value in byte_range.removeprefix("bytes=").split("-"))
+        if start == range_bytes and len(failures) < 5:
+            failures.append(True)
+            return httpx.Response(500)
+        return httpx.Response(
+            206,
+            headers={"Content-Range": f"bytes {start}-{end}/{len(data)}"},
+            content=data[start : end + 1],
+        )
+
+    monkeypatch.setattr(multipart.asyncio, "sleep", pause)
+    monkeypatch.setattr(remote, "MAXIMUM_RANGE_BYTES", range_bytes)
+    arguments = dict(
+        root=tmp_path / "retained-range-retry",
+        context={"cohort": "same-authenticated-owner"},
+        document_paths=(bundle.files[0].path,),
+        report=events.append,
+    )
+    client = multipart.R2MultipartClient(
+        direct.multipart.signer, transport=httpx.MockTransport(send)
+    )
+    async with client.connection_scope():
+        documents, _ = await remote.verify_remote_model(
+            client, "immutable/model/payload", bundle, payload, **arguments
+        )
+    assert waits == [1, 2, 4, 8, 16]
+    expected = [
+        f"bytes={offset}-{min(offset + range_bytes, len(data)) - 1}"
+        for offset in range(0, len(data), range_bytes)
+    ]
+    assert calls == expected[:1] + [expected[1]] * 5 + expected[1:]
+    assert documents[bundle.files[0].path] == data[: bundle.files[0].size_bytes]
+    assert events[-1]["status"] == "completed"
+    assert events[-1]["native_units"] == payload.total_bytes
+    # A fresh client reuses the completed object fact without another range GET.
+    reopened = multipart.R2MultipartClient(
+        direct.multipart.signer, transport=httpx.MockTransport(send)
+    )
+    before = list(calls)
+    restored, _ = await remote.verify_remote_model(
+        reopened, "immutable/model/payload", bundle, payload, **arguments
+    )
+    assert restored == documents and calls == before
+    assert events[-1]["restored_units"] == payload.total_bytes
+
+
 @pytest.mark.parametrize("range_bytes", [1, 17, 64, 4096])
 async def test_remote_ranges_span_files_and_reuse_completed_verification(
     direct, monkeypatch, tmp_path, range_bytes

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -107,13 +108,27 @@ class R2MultipartClient:
         return self._connections.scope()
 
     async def _exchange(
-        self, method: str, key: str, *, retry_copy_part: bool = False, **options
+        self,
+        method: str,
+        key: str,
+        *,
+        retry_copy_part: bool = False,
+        retry_range: bool = False,
+        **options,
     ) -> httpx.Response:
         if type(retry_copy_part) is not bool or (retry_copy_part and method != "PUT"):
             raise ValueError("R2 copy-part retry scope differs")
+        if type(retry_range) is not bool or (retry_range and method != "GET"):
+            raise ValueError("R2 range retry scope differs")
         # Only copy_part opts a validated same-upload, same-part PUT into retry.
         # Replacing that exact slot is idempotent even if its reply was lost.
-        maximum_attempts = 3 if method in {"HEAD", "GET"} or retry_copy_part else 1
+        # read_range keeps the caller's unfinished SHA live while retrying the
+        # same bounded range. This is an attempt/backoff bound, not an I/O
+        # deadline: never cancel a progressing response to enforce a wall cap.
+        maximum_attempts = (
+            6 if retry_range else 3 if method in {"HEAD", "GET"} or retry_copy_part else 1
+        )
+        backoff_seconds = 1.0 if retry_range else 0.25
         started = time.monotonic()
         for attempt in range(1, maximum_attempts + 1):
             try:
@@ -126,18 +141,22 @@ class R2MultipartClient:
                 )
                 if status is None and not transport:
                     raise
-                retry = (
-                    (transport or status in {429, 500, 502, 503, 504})
-                    and attempt < maximum_attempts
-                )
+                transient = transport or status in {429, 500, 502, 503, 504}
+                retry = transient and attempt < maximum_attempts
                 retry_after = error.retry_after if isinstance(error, _R2HTTPFailure) else 0
-                delay = max(0.25 * 2 ** (attempt - 1), retry_after) if retry else None
+                delay = max(backoff_seconds * 2 ** (attempt - 1), retry_after) if retry else None
                 _LOG.warning(
                     "r2_request_status %s",
                     json.dumps(
                         dict(
                             stage="r2_request",
                             method=method,
+                            object_key_sha256=hashlib.sha256(key.encode()).hexdigest()
+                            if retry_range
+                            else None,
+                            byte_range=(options.get("extra_headers") or {}).get("Range")
+                            if retry_range
+                            else None,
                             http_status=status,
                             transport_error_type=type(error.__cause__).__name__
                             if transport
@@ -149,11 +168,15 @@ class R2MultipartClient:
                             elapsed_seconds=time.monotonic() - started,
                             eta_seconds=None,
                             eta_basis=(
-                                "bounded_copy_part_retry"
+                                "bounded_same_range_retry"
+                                if retry_range
+                                else "bounded_copy_part_retry"
                                 if retry_copy_part
                                 else "bounded_read_retry"
                             )
                             if retry
+                            else "same_range_retry_exhausted"
+                            if retry_range and transient
                             else "transport_unavailable"
                             if transport
                             else "provider_refusal",
@@ -403,6 +426,7 @@ class R2MultipartClient:
         response = await self._exchange(
             "GET",
             key,
+            retry_range=True,
             expected_status=(206,),
             extra_headers={"Range": f"bytes={offset}-{end}"},
             maximum_response_bytes=size_bytes,
