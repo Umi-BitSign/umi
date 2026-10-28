@@ -1176,8 +1176,8 @@ exporters. Cache and index limits are explicit host capacities; size them for th
 cohort's retained range and full supported object size. An exhausted capacity
 holds visibly without silently evicting durable verification state. The payload
 cache is bounded, disposable and separate from private acknowledged receipts
-under the original archive's `.remote-state` directory. Each store serializes
-bounded transfers; active payload leases prevent eviction.
+under the original archive's `.remote-state` directory. Each store bounds
+concurrent transfers; active payload leases prevent eviction.
 
 The private receipt index uses capability generation 4 and a separate immutable
 completion ledger. Startup upgrades older indexes transactionally using only
@@ -1192,6 +1192,18 @@ the original payload. A 412 response or missing ETag still requires exact HEAD
 verification; an explicit mismatched ETag fails without a receipt. Lost-acknowledgement
 retries first inspect the existing generation, avoiding another upload. Completed
 local receipts remain reusable without remote I/O.
+
+For a new remote frame, already prepared proof encodings combine adjacent
+segments smaller than 4 KiB into literal objects while retaining larger shared
+objects. The original `/1` decoder, expanded proof identity and native verification
+remain unchanged. Existing destination frames retain their exact recipes, and
+local archives keep their existing representation. This reduces tiny-object
+requests but can increase stored bytes when small objects are shared across
+frames; compare newly uploaded bytes as well as throughput. Large prepared object
+identities are reused without rehashing, while newly joined partial slices need
+their first content digest. Existing transfer, cache, chunk and publication limits
+still apply. Completed transport receipts and native checkpoints remain reusable;
+the representation change does not authorize replaying completed proof work.
 
 Objects use content-addressed keys. Complete original `/1` frames publish after
 their dependencies using conditional single PUT, SHA metadata and exact single-PUT
