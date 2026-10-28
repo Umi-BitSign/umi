@@ -587,7 +587,10 @@ an armed timed cohort transition to the installed owner source before rearming i
 
 An announced intake deadline is separate from roster sealing. Configure the
 same `admission_deadlines` selection in every `CohortIntakeConfig` owned by the
-host (public intake, lifecycle input source and order queue). Each selection uses
+host (public intake and lifecycle input source). The separate order outbox uses
+`CohortOrderQueueConfig`, not `CohortIntakeConfig`; preserve its configuration
+unchanged. It consumes sealed, prepared inputs and does not admit model uploads.
+Each deadline selection uses
 `umi-cohort-operator-admission-deadline/1`, the cohort and authority hashes,
 `authorized_history_tip_sha256`, `close_new_admissions_at_unix_ms`, the retained
 operator message `source_sha256`, immutable `operator_plan_sha256`, and reason.
