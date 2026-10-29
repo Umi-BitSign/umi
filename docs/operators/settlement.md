@@ -3750,8 +3750,15 @@ restart that requires a new miner signature still needs the original client.
 Existing verified reservations are discovered before the next long payload
 stream; retained participation evidence can finish after replacement or phase
 advancement. Selected ready requests and historical receipt recovery have
-separate bounded, rotating allowances; an excluded historical backlog cannot
-consume the selected-request allowance. Historical recovery still checks for an
+alternating slots in one bounded batch; an excluded historical backlog cannot
+consume every slot. The service host's local `reserved_participation_batch_size`
+defaults to **8**, accepts explicit values **1–16**, and is separate from direct
+payload `verification_batch_size`. Each serial visit rotates to one cohort and
+attempts at most that many participation checkpoints, sharing slots between the
+selected and historical lanes; a batch of one alternates lanes between visits.
+The same visit has a separate upload-completion receipt recovery allowance of
+at most the configured batch size. No additional workers are started. Historical
+recovery still checks for an
 existing native receipt before applying the current selection fence, so an old
 committed request can finish its original evidence preservation.
 
@@ -3761,6 +3768,15 @@ selected ready requests; nested
 `historical_recovery` describes the separate receipt-recovery scope, with its own
 elapsed time, samples and ETA. `queue_completed`/`queue_total` count all retained
 readiness/completion checkpoints and are not counts of newly admitted miners.
+The selected ETA uses completion cadence across at least two cohort visits,
+including time spent in other cohorts, poll sleeps and recovery. It does not
+extrapolate short individual request execution times. Before those observations
+exist, the API labels its range as planning and states its serial scheduling and
+per-attempt assumptions. Samples are process-local and restart when the immutable
+ready selection or its authority changes. Repeated snapshots without progress
+cannot move an issued finish time forward: an overdue forecast is withdrawn and
+marked stalled until completion advances. Historical requests whose prior native
+receipt existence is unknown have no completion ETA.
 An unavailable selection keeps the selected denominator unknown while historical
 receipt recovery can continue. Probing an excluded request does not reduce the
 selected denominator. Retried work reports its stage, typed underlying cause and
@@ -3774,7 +3790,10 @@ Retaining participation does not grant its admission certificate or model-artifa
 acceptance; the ordinary independent certification and roster-sealing checks
 still apply. Select this owner implementation through the supported admission
 host update path; source publication alone does not establish deployment.
-The existing owner configuration and signed journal bindings remain unchanged;
+Omitting the new local batch override preserves the exact canonical bytes of
+existing owner configurations while selecting the effective default of eight.
+Explicit overrides require the updated host reader; do not send them to an older
+installation. Signed journal bindings remain unchanged;
 new readiness/completion records are additive metadata within the existing
 capacity. Current clients and older readers continue to use their original
 participation protocol. Source selection does not publish a new client release.

@@ -568,7 +568,7 @@ async def test_selected_work_does_not_wait_for_historical_queue_or_inherit_its_t
     assert (history["completed"], history["total"], history["eta_samples"]) == (0, 2, 0)
     assert history["excluded_without_receipt_this_poll"] == 1
     assert history["eta_seconds"] is None
-    assert first["eta_samples"] == 1
+    assert first["eta_samples"] == 0  # A first visit cannot measure scheduler cadence.
     second = await worker.poll_once()
     assert (second["completed"], second["total"]) == (1, 1)
     assert second["historical_recovery"]["total"] == 2
@@ -597,7 +597,7 @@ async def test_batch_one_alternates_selected_failures_and_historical_receipt_rec
     results = [await worker.poll_once() for _ in range(4)]
     assert calls == [uploads[-1], uploads[0], uploads[-1], uploads[1]]
     assert all((r["completed"], r["total"]) == (0, 1) for r in results)
-    assert results[-1]["eta_samples"] == 0
+    assert results[-1]["eta_samples"] == 3  # Three observed inter-visit intervals, no gains.
     assert results[-1]["historical_recovery"]["eta_samples"] == 2
     assert results[-1]["historical_recovery"]["completed"] == 2
 
