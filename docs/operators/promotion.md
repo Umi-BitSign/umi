@@ -69,12 +69,23 @@ locally applied cohort-baseline receipt, including the exact target cohort,
 sequence and model, before selecting reference bytes. If the winner is already
 a preserved participant in an authenticated legacy inventory, the sandbox restores
 that exact original through its R2 association into the bounded model cache.
-A later direct-upload winner uses its retained source-cohort review request and
-matching private acceptance intent to select the preserved R2 object. The source
-submission, contributor, policy and complete bundle must match the certified
-baseline. Unknown models still require their original authenticated source;
-a missing or damaged promotion receipt requires repair. Candidate admission,
-rights review and execution-order checks are unchanged.
+A later direct-upload winner uses its original certified source metadata to
+select the preserved R2 object. An evaluator that retained the source-cohort
+review request and matching private acceptance intent can reuse them. An
+evaluator that did not perform that review obtains the original metadata from
+the configured owner's authenticated execution-source endpoint. It checks the
+original cohort authority, admission and acceptance certificate against the
+locally applied baseline and the frozen execution incumbent. The full acceptance
+certificate, source submission, contributor, policy, content and complete bundle
+must match; a model digest alone does not authorize the source.
+
+Successful source verification is retained separately from private reviewer
+requests and votes, then reused across candidate jobs and restart. Restoring
+execution metadata does not create a review intent or claim this evaluator
+signed the original acceptance. Unknown models still require their original
+authenticated source; a missing or damaged promotion or completed verification
+receipt requires explicit repair. Candidate admission, rights review and
+execution-order checks are unchanged.
 
 Retain those source records and the applied baseline receipt while any cohort
 uses the reference. Missing or damaged source records require explicit repair;

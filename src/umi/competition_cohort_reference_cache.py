@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from .competition_cohort_direct_model_review import DirectModelArtifactReviewer
 from .competition_cohort_model_acceptance import ModelAcceptanceIntent, ModelReviewRequest
 from .competition_transport_verification import TransferProgress
+from .concurrency import run_owned_thread
 from .open_competition import digest, identity
 from .protocol import canonical_json_bytes
 
@@ -20,10 +21,16 @@ class CertifiedReferenceSource:
     legacy: bool
 
 
+@dataclass(frozen=True)
+class _ReferenceMetadataNeeded:
+    review: object
+
+
 class CohortReferenceModelCache:
-    def __init__(self, artifacts, *, legacy, journal, reference):
+    def __init__(self, artifacts, *, legacy, journal, reference, metadata=None):
         self.artifacts, self.legacy = artifacts, legacy
         self.journal, self.reference = journal, reference
+        self.metadata = metadata
         # A previous winner may have been delivered by a different policy
         # evaluator. Native baseline authority below selects that exact source;
         # the direct reviewer still checks its evaluator and bundle bindings.
@@ -76,6 +83,14 @@ class CohortReferenceModelCache:
             raw = self.journal.get("model_request", slot)
             raw_intent = self.journal.get("model_intent", slot)
             if raw is None or raw_intent is None:
+                if self.metadata is not None:
+                    progress.emit(
+                        "metadata_required", reason="certified_reference_metadata_required"
+                    )
+                    # Selection is complete; the awaited reader owns metadata
+                    # fetch/verification progress, not this local lookup scope.
+                    progress.advance(1)
+                    return _ReferenceMetadataNeeded(review)
                 progress.emit("repair_required", reason="certified_reference_source_missing")
                 raise ValueError("certified reference source requires retained-journal repair")
             retained = ModelReviewRequest.model_validate_json(canonical_json_bytes(raw))
@@ -94,6 +109,15 @@ class CohortReferenceModelCache:
                 raise ValueError("certified reference changes its retained reviewed source")
             progress.advance(1)
             return CertifiedReferenceSource(retained, legacy=False)
+
+    async def resolve_execution_source(self, job, role, bundle, request=None):
+        source = await run_owned_thread(self.execution_source, job, role, bundle, request)
+        if not isinstance(source, _ReferenceMetadataNeeded):
+            return source
+        retained = await self.metadata(job, source.review)
+        if retained.direct_artifact is None:
+            raise ValueError("certified reference metadata lacks its original direct artifact")
+        return CertifiedReferenceSource(retained, legacy=False)
 
     def _materializer(self, source):
         return self.legacy if source.legacy else self.references
