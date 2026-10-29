@@ -101,6 +101,29 @@ async def test_completed_and_terminal_owners_yield_but_new_work_is_discovered():
     assert calls == [A, B, B, B, A, A]
 
 
+async def test_dirty_hint_survives_active_zero_report_and_preserves_background_budget():
+    calls = []
+    owners = {c: Owner(c, calls, pending=0) for c in (A, B, C)}
+    manager = DirectModelUploadOwners(owners, priority_cohorts=(A, B, C))
+    owners[A].gate = asyncio.Event()
+    active = asyncio.create_task(manager.poll_once())
+    await asyncio.sleep(0)
+    assert calls == [A]
+    for _ in range(20):
+        manager.mark_pending(A)
+    owners[A].gate.set()
+    await active
+    assert manager._reports[A]["objects_pending"] == 0
+    assert manager._pending(A) is None
+    for _ in range(9):
+        manager.mark_pending(A)
+        await manager.poll_once()
+    assert calls == [A, A, A, A, B, A, A, A, A, C]
+    assert manager._dirty == {A}  # The background pass did not consume A's hint.
+    with pytest.raises(ValueError, match="outside configured"):
+        manager.mark_pending("d" * 64)
+
+
 @pytest.mark.parametrize("error", [OSError("provider unavailable"), asyncio.CancelledError()])
 async def test_failed_or_cancelled_dispatch_cannot_starve_background(error):
     calls = []

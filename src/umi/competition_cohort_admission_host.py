@@ -446,19 +446,28 @@ async def run_admission_owner(
         async def poll(worker):
             # Each reviewer has its own loop. A slow peer cannot starve another
             # peer or stall the public intake's readiness/cache worker.
+            with preparation.queue.intake.readiness_wakes.subscribe("admissions") as wake:
+                await poll_reviewer(worker, wake)
+
+        async def poll_reviewer(worker, wake):
             while not stop.is_set():
+                wake.begin()
                 provider.ensure_observer_running()
                 report = await worker.poll_once()
+                retrying = bool(report["retry_count"])
+                wake.finish(retrying=retrying)
+                report["readiness_wake"] = wake.snapshot()
                 app.state.admission_reports[identity(worker.votes.signer)] = report
                 logger.info(
-                    "cohort_admission_votes reviewer=%s status=%s votes=%s retries=%s",
+                    "cohort_admission_votes reviewer=%s status=%s votes=%s retries=%s "
+                    "readiness_wake=%s",
                     worker.votes.signer,
                     report["status"],
                     report["votes_published"],
                     report["retry_count"],
+                    canonical_json_bytes(report["readiness_wake"]).decode("ascii"),
                 )
-                with suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(stop.wait(), timeout=config.poll_seconds)
+                await wake.wait(stop, config.poll_seconds, retrying=retrying)
 
         serving = asyncio.create_task(server.serve())
         workers = []

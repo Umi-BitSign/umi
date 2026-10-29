@@ -3891,6 +3891,32 @@ recovery still checks for an
 existing native receipt before applying the current selection fence, so an old
 committed request can finish its original evidence preservation.
 
+The intake host coalesces local readiness notifications after a new durable
+upload-object receipt, payload/review readiness checkpoint, preserved
+participation or membership certificate. A notification advances the existing
+serial owner's next scheduling boundary; work already running finishes first.
+Backfilled participation readiness wakes its owner only after the retained
+selection fence is available. Direct-upload scheduling marks only the affected
+cohort pending and preserves the four-priority-poll/background rotation. The
+supported chunk-upload path wakes its existing finalizer when newly appended
+bytes complete a declared file. HTTP handlers do no additional payload hashing
+or certification.
+
+These notifications are process-local: the admission owner's existing independent
+reviewer request loops each receive their own coalesced hint; remote signer
+processes keep their existing request path. Startup scans and configured polling
+recover lost notifications, external-process commits and interrupted work.
+Exact retained retries emit no new hint, and contention retains its configured
+retry delay. Host reconciliation reports and admission reviewer reports include
+`readiness_wake` counts, queued state, queue time, elapsed time and pass duration
+as observed at the end of each pass. Its ETA scope is only the next scheduling
+boundary; active work and
+fairness rotation can leave that ETA unknown. The existing per-cohort stage
+progress remains the source for verification and certification completion.
+Select the change through the supported intake-host source update, preserving
+the installed config, state directories and signed clocks. Miner upload requests,
+validator readers and retained artifacts use their existing formats.
+
 The cached progress API exposes this work under `components.reserved_participation`.
 During the ready-participation stage, its top-level counts and ETA describe
 selected ready requests; nested

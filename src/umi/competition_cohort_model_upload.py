@@ -497,8 +497,14 @@ class CohortModelUploads:
                 os.fsync(stream.fileno())
                 with _directory(staging) as descriptor:
                     os.fsync(descriptor)
+                newly_complete = (
+                    before.st_size < record.size_bytes
+                    and chunk.offset + len(data) == record.size_bytes
+                )
         finally:
             os.close(lease)
+        if newly_complete:
+            self.intake.readiness_wakes.notify("legacy_uploads")
 
     def complete(self, key: str) -> bool:
         bundle, staging = self._paths(key)

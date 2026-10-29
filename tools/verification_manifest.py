@@ -76,6 +76,9 @@ seeds = [
     "competition_cohort_model_delivery_candidate",
     "competition_cohort_review_config",
     "competition_cohort_service_host",
+    # The signed batch-adoption producer uses runpy and imports its stable
+    # request model, operator and series path outside the standing host graph.
+    "competition_cohort_model_batch_adoption_cli",
     "competition_model_byte_store_cli",
     "competition_miner_transition_cli",
 ]

@@ -157,6 +157,27 @@ def upload_all(h, owner, key):
     assert owner.poll_once()["models_preserved"] == 1
 
 
+def test_newly_completed_file_hints_finalizer_but_partial_and_exact_retry_do_not(delivery):
+    h = delivery
+    key = h.owner.reserve(h.request, capture_at(210))
+    first = h.request.signed_submission.submission.model_bundle.files[0]
+    data = (h.source / first.path).read_bytes()
+    assert len(data) > 1
+    notifications = []
+
+    def notify(component):
+        assert h.owner.status(key)["file_offsets"][0] == len(data)
+        notifications.append(component)
+
+    h.intake.readiness_wakes.notify = notify
+    put(h.owner, key, 0, data[:-1])
+    assert notifications == []
+    put(h.owner, key, 0, data[-1:], len(data) - 1)
+    assert notifications == ["legacy_uploads"]
+    put(h.owner, key, 0, data[-1:], len(data) - 1)
+    assert notifications == ["legacy_uploads"]
+
+
 def test_completed_upload_prefix_is_not_rehashed_after_restart(delivery, monkeypatch):
     from umi import competition_cohort_model_upload as upload
 

@@ -101,6 +101,12 @@ class ParticipationDelivery:
             raise ParticipationUnavailable(
                 "retained cohort intake unavailable; retry unchanged", stage="receipt_lookup"
             ) from error
+        newly_retained = False
+
+        def retained():
+            nonlocal newly_retained
+            newly_retained = True
+
         if prior is None:
             if before_retain is not None:
                 await run_owned_thread(before_retain)
@@ -135,6 +141,7 @@ class ParticipationDelivery:
                             reservation_provider=getattr(
                                 self.models, "admission_reservation", None
                             ),
+                            on_retained=retained,
                         )
                     )
             except CohortAdmissionClosed:
@@ -143,14 +150,18 @@ class ParticipationDelivery:
                 raise ParticipationUnavailable(
                     "cohort intake unavailable; retry unchanged", stage="native_retention"
                 ) from error
-        await self._preserve(signed)
+        already_preserved = await self._preserve(signed)
+        if newly_retained and already_preserved:
+            # Archives are shared across consents: a new participation can be
+            # ready without inserting any additional evidence blob.
+            self.intake.readiness_wakes.notify("admissions")
         return prior
 
     async def _preserve(self, signed):
         # Production supplies the archive. Rehearsal routers may omit it;
         # participation without its original proof remains pending certification.
         if self.archive is None:
-            return
+            return False
         cohort = signed.consent.consent.cohort_sha256
         consent = digest(signed.consent.consent)
         try:
@@ -163,6 +174,9 @@ class ParticipationDelivery:
                 await run_owned_thread(
                     self.queue.attach_evidence, cohort, consent, evidence, metadata
                 )
+                # The new evidence commit already notified admission owners.
+                return False
+            return True
         except (ValueError, OSError, sqlite3.Error) as error:
             raise ParticipationUnavailable(
                 "admission evidence unavailable; retry unchanged", stage="evidence_preservation"

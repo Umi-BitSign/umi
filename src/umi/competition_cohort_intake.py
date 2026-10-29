@@ -48,6 +48,7 @@ from .competition_cohort_participation import (
     CohortParticipationRequest,
     admit_recovery_participant,
 )
+from .competition_cohort_readiness_wake import CohortReadinessWakes
 from .competition_cohort_recovery import CohortRecoveryTransition
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_cohort_seal_reuse import (
@@ -208,6 +209,7 @@ class CohortIntake:
             raise ValueError("read-only cohort intake cannot initialize or migrate state")
         self._admission_drain_progress = {}
         self._admission_deadlines = {}
+        self.readiness_wakes = CohortReadinessWakes()
         self.pending_admission_uploads = None
         self._model_delivery_states = {}
         self._model_delivery_state_lock = Lock()
@@ -823,6 +825,7 @@ class CohortIntake:
         *,
         reservation=None,
         reservation_provider=None,
+        on_retained=None,
     ):
         request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(request))
         cohort = request.consent.consent.cohort_sha256
@@ -837,6 +840,7 @@ class CohortIntake:
             observation,
             reservation,
             defer_reservation=reservation_provider is not None,
+            on_retained=on_retained,
         )
         if receipt is not None:
             return receipt
@@ -845,10 +849,19 @@ class CohortIntake:
         # reservation after releasing intake.lock; the caller's issuance fence
         # remains held. The final attempt rechecks current native authority.
         reservation = reservation_provider(request)
-        return self._retain_attempt(request, capture, observation, reservation)
+        return self._retain_attempt(
+            request, capture, observation, reservation, on_retained=on_retained
+        )
 
     def _retain_attempt(
-        self, request, capture, observation, reservation, *, defer_reservation=False
+        self,
+        request,
+        capture,
+        observation,
+        reservation,
+        *,
+        defer_reservation=False,
+        on_retained=None,
     ):
         """Return a receipt, or None solely to resolve a reservation outside the lock."""
         cohort = request.consent.consent.cohort_sha256
@@ -941,7 +954,10 @@ class CohortIntake:
                     raw,
                 ),
             )
-            return self._receipt(raw, store, request)
+            receipt = self._receipt(raw, store, request)
+        if on_retained is not None:
+            on_retained()
+        return receipt
 
     def _records(self, db, history, *, track: str | None = None, hotkey: str | None = None):
         for consent, raw, _ in self._parsed_records(db, history, track=track, hotkey=hotkey):
