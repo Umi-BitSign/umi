@@ -488,6 +488,8 @@ async def test_cancelled_waiter_does_not_cancel_active_refresh():
 
 
 async def test_cancelled_refresh_closes_stream_before_waiter_retries():
+    import anyio
+
     entered, closing, release_close, closed = (asyncio.Event() for _ in range(4))
     calls = []
 
@@ -498,9 +500,12 @@ async def test_cancelled_refresh_closes_stream_before_waiter_retries():
             await asyncio.Event().wait()
 
         async def aclose(self):
-            closing.set()
-            await release_close.wait()
-            closed.set()
+            # Model HTTPCore's shielded pool/connection cleanup. The test
+            # still requires the observer to retain its lock and capacity.
+            with anyio.CancelScope(shield=True):
+                closing.set()
+                await release_close.wait()
+                closed.set()
 
     def respond(request):
         calls.append(request)

@@ -22,6 +22,7 @@ from threading import RLock
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 
+from .competition_cohort_observation import observe_http
 from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
 from .competition_cohort_review_http import _credential
 from .competition_public_results_directory import atomic_write
@@ -466,7 +467,7 @@ class SettlementProgressObservations:
 
         async def read(evaluator, epoch):
             try:
-                return await asyncio.wait_for(fetch(evaluator, epoch), timeout=3)
+                return await observe_http(fetch(evaluator, epoch), timeout=3)
             except (
                 httpx.HTTPError,
                 OSError,
