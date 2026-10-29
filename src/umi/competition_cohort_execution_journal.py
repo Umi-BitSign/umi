@@ -67,6 +67,14 @@ class _StepRecords:
     result: bytes | None
 
 
+@dataclass(frozen=True, slots=True)
+class ExecutionScopeState:
+    """Private scheduling result of the ordinary retained-evidence validation."""
+
+    evidence: RecoverableExecutionEvidence | RecoverableSharedIncumbentEvidence | None
+    model_roles: tuple[str, ...] = ("candidate", "incumbent")
+
+
 class PartialExportSourceRepairRequired(ValueError):
     """A previously verified immutable source disappeared or changed."""
 
@@ -690,6 +698,13 @@ class CohortExecutionJournal:
         return self.reuse_incumbent(slot, job, observed)
 
     def reuse_incumbent(self, slot, job, observed):
+        return self._reuse_incumbent(slot, job, observed)
+
+    def prepare_execution_scope(self, slot, job, observed):
+        """Return roles from the same authenticated reuse pass, without replaying it."""
+        return self._reuse_incumbent(slot, job, observed, for_scope=True)
+
+    def _reuse_incumbent(self, slot, job, observed, *, for_scope=False):
         """Reserve one future source, keeping legacy executions in place.
 
         Existing attempts remain independent. Endpoint reuse retains its /1
@@ -698,10 +713,12 @@ class CohortExecutionJournal:
         observations keep their original times and have no consumer attempts.
         """
         started_clock = time.monotonic()
+        read_evidence = self.execution_scope_state if for_scope else self.evidence
+        independent = ExecutionScopeState(None) if for_scope else None
         if self.journal.get("incumbent_reuse", digest(job)) is not None:
-            return self.evidence(slot)
+            return read_evidence(slot)
         if job.mode == "paired_model" and job.incumbent_observation_mode is None:
-            return None
+            return independent
         if self._execution_started(job):
             if job.mode == "paired_model":
                 source = self._incumbent_source(job)
@@ -711,7 +728,7 @@ class CohortExecutionJournal:
                     or source.source_job_sha256 != digest(job)
                 ):
                     raise ValueError("started shared incumbent source selection requires repair")
-            return None
+            return independent
         if job.mode == "paired_model" and not self.config.share_paired_incumbent:
             source = self._incumbent_source(job)
             if (
@@ -719,7 +736,7 @@ class CohortExecutionJournal:
                 and source.source_slot == slot
                 and source.source_job_sha256 == digest(job)
             ):
-                return None
+                return independent
             raise OSError("shared incumbent order awaits reader-enabled producer")
         _, retained_job = self.assignment_and_job(slot)
         if retained_job != job:
@@ -728,7 +745,7 @@ class CohortExecutionJournal:
         if source.source_slot == slot:
             if source.source_job_sha256 != digest(job):
                 raise ValueError("shared incumbent source changed its job")
-            return None
+            return independent
         evidence = self._source_evidence(job, source)
         if evidence is None:
             raise IncumbentSourcePending("shared incumbent source remains unfinished")
@@ -778,7 +795,7 @@ class CohortExecutionJournal:
                 separators=(",", ":"),
             )
         )
-        return self.evidence(slot)
+        return read_evidence(slot)
 
     def _reused_incumbent(self, slot, job, raw):
         value = CohortIncumbentReuse.model_validate_json(canonical_json_bytes(raw))
@@ -1159,19 +1176,27 @@ class CohortExecutionJournal:
 
     @canonical_json_reuse()
     def evidence(self, slot: str) -> RecoverableExecutionEvidence | None:
+        return self.execution_scope_state(slot).evidence
+
+    @canonical_json_reuse()
+    def execution_scope_state(self, slot: str) -> ExecutionScopeState:
         _, job = self._validated_assignment(slot)
         shared = self.journal.get("incumbent_reuse", digest(job))
         if shared is not None:
-            return self._reused_incumbent(slot, job, shared)
+            evidence = self._reused_incumbent(slot, job, shared)
+            roles = ("candidate",) if job.mode == "paired_model" else ("incumbent",)
+            return ExecutionScopeState(evidence, roles)
         steps = []
         # Copy one committed snapshot; decoding and output checks must not keep
         # an exporter read lock open while another case commits its highwater.
         for step in self.steps_snapshot(job, shared=False, stop_at_missing=True):
             if step is None:
-                return None
+                return ExecutionScopeState(None)
             if steps:
                 check_boundary(step.started, steps[-1].finished)
             steps.append(step)
-        return RecoverableExecutionEvidence(
-            schema="umi-recoverable-execution-evidence/1", job=job, steps=tuple(steps)
+        return ExecutionScopeState(
+            RecoverableExecutionEvidence(
+                schema="umi-recoverable-execution-evidence/1", job=job, steps=tuple(steps)
+            )
         )

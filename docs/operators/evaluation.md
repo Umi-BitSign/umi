@@ -769,7 +769,12 @@ not downgrade any consumer that may read `/2` evidence.
 With an explicit boot-disk model cache, CPU model evaluation retains a bounded
 set of model archives under the existing shared allocation and filesystem reserves. It
 finishes a paired assignment's case/role steps before rotating to another model,
-keeping candidate and reference bytes resident when they fit. Each step still
+keeping the models needed for remaining inference resident when they fit. An
+authenticated shared-incumbent consumer reserves and restores only its candidate;
+the reference observations retain their original source evidence. The ordinary
+evidence/reuse pass supplies this private scheduling decision, including after
+restart. A readiness hint alone cannot omit the reference, and the first source
+producer and legacy independent jobs retain both models. Each step still
 uses its original authority checks, inference deadline and durable result.
 Candidate observations are never borrowed from another assignment. The original
 `archive` slot and interrupted transfers stay in place across upgrades. The idle
@@ -799,6 +804,12 @@ so an ordinary long inference is not classified as a sixty-second byte-transfer
 stall. This changes telemetry only; signed clocks and inference deadlines remain
 unchanged. `model_pair_queue` and `model_cache_capacity` distinguish initial
 physical admission and a subsequent external capacity loss.
+The queue reason distinguishes allocation ownership, an individual model's size,
+incoming or active exclusive work, pair concurrency, slot count and cumulative
+model bytes. Matching `model_pair_capacity` events include the decision's existing
+counts and limits without another filesystem scan. Waiting has no measured ETA
+until the blocking owner or capacity changes; these diagnostics do not raise the
+cache limit or relax host reserves.
 On startup, the worker reads only directory names in its bounded managed cache
 and a small set of recent assignment IDs. It gives matching acknowledged jobs
 one scheduling turn before continuing the unchanged fair cursor. This preference

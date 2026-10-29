@@ -12,11 +12,16 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import Protocol
 
-from .competition_cohort_execution import RecoverableExecutionEvidence, RecoverableExecutionJob
+from .competition_cohort_execution import (
+    RecoverableExecutionEvidence,
+    RecoverableExecutionJob,
+    RecoverableSharedIncumbentEvidence,
+)
 from .competition_cohort_execution_journal import (
     CohortExecutionAssignment,
     CohortExecutionAttempt,
     CohortExecutionJournal,
+    ExecutionScopeState,
     IncumbentSourcePending,
     step_count,
 )
@@ -220,11 +225,15 @@ class CohortExecutor(CohortExecutionAuthority):
         if scope is None:
             return await self.advance(assignment)
         slot = order_slot(assignment.certificate.order)
-        evidence = await self._completed(assignment, slot)
+        role_aware = getattr(self.sandbox, "execution_scope_roles", False)
+        state = await self._completed(assignment, slot, scope_state=role_aware)
+        evidence = state.evidence if role_aware and state is not None else state
         if evidence is not None:
             return evidence
         job = await self._journal_progress(assignment, self.journal.validate_assignment, assignment)
         scope_options = {}
+        if role_aware and state is not None:
+            scope_options["model_roles"] = state.model_roles
         if job.mode == "paired_model" and job.incumbent_observation_mode is not None:
             status = getattr(self.journal, "incumbent_source_status", None)
             if status is None:
@@ -238,6 +247,9 @@ class CohortExecutor(CohortExecutionAuthority):
                 # source plans and fixed size bounds, without acquiring capacity.
                 async def before_reserve():
                     with self.journal.locked(slot):
+                        if role_aware:
+                            prepared = await self._prepare_scope(assignment, slot)
+                            return prepared.model_roles
                         await self._prepare_current(assignment, slot)
 
                 if getattr(self.sandbox, "execution_scope_before_reserve", False):
@@ -247,6 +259,14 @@ class CohortExecutor(CohortExecutionAuthority):
                     await before_reserve()
             elif readiness != "ready":
                 raise RuntimeError("shared incumbent scheduling status is invalid")
+            elif role_aware and (state is None or state.model_roles != ("candidate",)):
+                # A ready hint also includes first producers. Only the ordinary
+                # current-authority/reuse path may establish candidate-only work.
+                with self.journal.locked(slot):
+                    prepared = await self._prepare_scope(assignment, slot)
+                if prepared.evidence is not None:
+                    return prepared.evidence
+                scope_options["model_roles"] = prepared.model_roles
         scope_input = (
             job
             if getattr(self.sandbox, "prepared_execution_scope", False)
@@ -287,20 +307,36 @@ class CohortExecutor(CohortExecutionAuthority):
                 raise RuntimeError("paired execution batch did not finish its retained steps")
 
     async def _completed(
-        self, assignment: CohortExecutionAssignment, slot: str
-    ) -> RecoverableExecutionEvidence | None:
+        self, assignment: CohortExecutionAssignment, slot: str, *, scope_state=False
+    ) -> (
+        RecoverableExecutionEvidence
+        | RecoverableSharedIncumbentEvidence
+        | ExecutionScopeState
+        | None
+    ):
         existing = await run_owned_thread(self.journal.journal.get, "assignment", slot)
         if existing is not None:
             if canonical_json_bytes(existing) != canonical_json_bytes(assignment):
                 raise ValueError("execution slot already contains another assignment")
-            return await run_owned_thread(self.journal.evidence, slot)
+            reader = self.journal.execution_scope_state if scope_state else self.journal.evidence
+            return await run_owned_thread(reader, slot)
         return None
 
-    async def _prepare_current(self, assignment, slot):
+    async def _retain_current(self, assignment):
         source, started = await self.current(assignment)
         job = await self._journal_progress(
             assignment, self.journal.retain, assignment, source, started.block
         )
+        return job, source, started
+
+    async def _prepare_scope(self, assignment, slot):
+        job, _, started = await self._retain_current(assignment)
+        return await self._journal_progress(
+            job, self.journal.prepare_execution_scope, slot, job, started
+        )
+
+    async def _prepare_current(self, assignment, slot):
+        job, source, started = await self._retain_current(assignment)
         shared = await self._journal_progress(job, self.journal.reuse_incumbent, slot, job, started)
         return job, source, started, shared
 

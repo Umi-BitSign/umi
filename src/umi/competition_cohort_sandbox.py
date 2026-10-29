@@ -202,6 +202,10 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
     def execution_scope_before_reserve(self):
         return getattr(self, "parallel", None) is not None
 
+    @property
+    def execution_scope_roles(self):
+        return getattr(self, "parallel", None) is not None
+
     async def models_available(self, orders):
         """Check one authenticated source per model, without filling the local cache."""
         plans, local, resolved = {}, {}, set()
@@ -263,7 +267,9 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         return tuple(sorted(revisions))
 
     @asynccontextmanager
-    async def execution_scope(self, order, *, before_reserve=None):
+    async def execution_scope(
+        self, order, *, before_reserve=None, model_roles=("candidate", "incumbent")
+    ):
         """Finish a paired job while its bounded working set remains resident.
 
         This changes scheduling only. Every step retains its own authority,
@@ -283,6 +289,7 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
                     order,
                     runtime_authorization=prepared_runtime_authorization(order.round, self.policy),
                     before_reserve=before_reserve,
+                    model_roles=model_roles,
                 ) as active:
                     yield active
             finally:

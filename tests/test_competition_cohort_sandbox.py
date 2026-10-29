@@ -807,8 +807,9 @@ async def test_resident_pair_scope_cancellation_releases_real_scheduler(cpu):
     assert PUBLIC_COHORT_SCOPE.get() == initial
 
 
+@pytest.mark.parametrize("reused", [False, True])
 async def test_selected_parallel_port_executes_distinct_models_with_one_reference(
-    cpu, tmp_path, monkeypatch
+    cpu, tmp_path, monkeypatch, reused
 ):
     from umi.competition_model_cache_space import BootDiskModelCacheConfig
     from umi.private_files import ensure_private_directory
@@ -885,7 +886,8 @@ async def test_selected_parallel_port_executes_distinct_models_with_one_referenc
     monkeypatch.setattr(port, "_invoke", invoke)
 
     async def run(selected):
-        async with port.execution_scope(selected):
+        options = {"model_roles": ("candidate",)} if reused else {}
+        async with port.execution_scope(selected, **options):
             return await port.invoke(
                 selected, attempt.model_copy(update={"job_sha256": digest(selected)})
             )
@@ -893,7 +895,10 @@ async def test_selected_parallel_port_executes_distinct_models_with_one_referenc
     tasks = [asyncio.create_task(run(selected)) for selected in (job, second)]
     try:
         await asyncio.wait_for(entered.wait(), 5)
-        assert len(loaded) == 3 and len(source_calls) == 4
+        assert len(loaded) == (2 if reused else 3)
+        assert len(source_calls) == (2 if reused else 4)
+        if reused:
+            assert all(role == "candidate" for _, role in source_calls)
     finally:
         release.set()
         await asyncio.gather(*tasks)
