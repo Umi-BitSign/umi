@@ -233,8 +233,15 @@ current session, assumes comparable remaining cost and steady export delivery,
 and excludes subsequent certification and rewards. Overall ETA remains separate.
 Authenticated reviewer-epoch probes use a separate bounded HTTP pool so long
 admission/review requests cannot consume their connections. Cached `rate_probe_*`
-fields report availability, numeric HTTP status, attempts, failures and timeouts;
-probe failures still withdraw the rate rather than borrowing an older epoch.
+fields report availability, numeric HTTP status, attempts, failures and timeouts.
+Concurrent observers share one refresh per peer. Additional cached diagnostics
+identify the failed phase and timeout type, queue and HTTP duration, response
+bytes, observation timestamps and cache age at sampling. Deadline overrun reports
+elapsed time beyond the diagnostic deadline; it does not attribute that delay to
+the network or CPU. Counters cover this owner's lifetime across cohorts and peers.
+Probe failures still withdraw the rate rather than borrowing an older epoch.
+Deploy sampler changes through the owner's supported source-selection path;
+unchanged evaluator endpoints, miner uploads and signed artifacts need no upgrade.
 
 Prepared-round delivery reuses the native owner's immutable canonical snapshot.
 Fresh history, authority, retained-row and requests-stage bindings remain required
