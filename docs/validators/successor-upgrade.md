@@ -3210,8 +3210,11 @@ transport damage holds remain repair holds.
 
 Reviewer assignment reads reuse private parsed objects after static proof
 verification, with fresh retained-input and conflict checks on every read.
-The exact assignment is read in a short read-only snapshot; static verification
-runs after releasing the journal lock. Endpoint grant delivery, dispatch,
+Assignment and partial-export source readers copy bounded originals in a short
+snapshot, then release it before canonical validation, hashing and static proof
+checks. Select the updated source for both evaluator and settlement readers;
+configuration, interpreters, signed evidence and journals remain intact. Miner
+upload protocols are unchanged. Endpoint grant delivery, dispatch,
 response recovery and retirement use owned worker threads for retained-selection
 reads, so a slow proof cannot block the main event loop. Cancellation drains
 that read before releasing its existing operation lock. Paid-service history

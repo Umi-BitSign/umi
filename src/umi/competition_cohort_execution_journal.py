@@ -49,6 +49,7 @@ from .competition_execution import ExecutionBoundary, ExecutionStep, PendingExec
 from .competition_round_journal import RecordReservation, RoundJournal
 from .competition_runner import OfflineCaseExecution, validate_case_execution
 from .competition_verification_rules import runtime_identity
+from .host_memory_request_bounds import stage_limit
 from .open_competition import CompetitionPolicy, digest, digest_canonical_bytes, identity
 from .private_files import ensure_private_directory, lock_private_file
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -303,37 +304,75 @@ class CohortExecutionJournal:
         return assignment, job
 
     def partial_export_unchanged(self, checkpoint: PartialExportCheckpoint) -> bool:
-        """Fresh exact source reads; never cache conflict holds or new steps."""
+        """Check fresh original bytes after releasing their coherent snapshot."""
         if not self.partial_export_context_matches(checkpoint):
             return False
-        with self.journal.read_transaction() as db:
-            raw = self.journal.get_raw("assignment", checkpoint.slot, db=db)
-            if raw is None:
-                _partial_export_source_repair(checkpoint, "assignment_missing")
-            if digest_canonical_bytes(raw) != checkpoint.assignment_sha256:
-                _partial_export_source_repair(checkpoint, "assignment_changed")
-            for index, (key, expected) in enumerate(
-                zip(checkpoint.step_keys, checkpoint.step_sha256s, strict=True)
-            ):
-                raw = self.journal.get_raw("step", key, db=db)
-                if (None if raw is None else digest_canonical_bytes(raw)) != expected:
-                    if expected is not None:
-                        _partial_export_source_repair(
-                            checkpoint,
-                            "completed_step_missing" if raw is None else "completed_step_changed",
-                            index,
-                        )
-                    return False
-            if isinstance(checkpoint, SharedPartialExportCheckpoint):
-                for ref in checkpoint.source_records:
-                    raw = self.journal.get_raw(ref.kind, ref.key, db=db)
-                    if raw is None or digest_canonical_bytes(raw) != ref.sha256:
-                        _partial_export_source_repair(
-                            checkpoint, "shared_source_missing_or_changed"
-                        )
-            elif self.journal.get_raw("incumbent_reuse", checkpoint.job_sha256, db=db) is not None:
-                # An unchanged /1 partial fact cannot authorize a new /2 source.
+        # Published objects bound assignment/step bodies. A borrowed step can
+        # occur under both consumer and source keys; allow two copies plus the
+        # three native source bindings and a newly appeared record. Retain the
+        # journal's existing per-record envelope, including legacy originals,
+        # rather than applying the current 48 KiB step reservation to all kinds.
+        remaining = stage_limit(
+            "maximum_input_bytes",
+            min(
+                self.journal.maximum_bytes,
+                2 * checkpoint.maximum_bytes + 4 * self.journal.maximum_record_bytes,
+            ),
+        )
+        records = {}
+
+        def copy(db, kind, key):
+            nonlocal remaining
+            if (kind, key) not in records:
+                raw = self.journal._copy_raw(db, kind, key, maximum_bytes=remaining)
+                remaining -= 0 if raw is None else len(raw)
+                records[kind, key] = raw
+            return records[kind, key]
+
+        with self.journal.read_transaction(coordinated=True) as db:
+            copy(db, "assignment", checkpoint.slot)
+            changed_prefix = False
+            for key, expected in zip(checkpoint.step_keys, checkpoint.step_sha256s, strict=True):
+                if copy(db, "step", key) is not None and expected is None:
+                    # The first new step already invalidates this prefix. Its
+                    # original bytes are still checked below, in the same order.
+                    changed_prefix = True
+                    break
+            if not changed_prefix:
+                if isinstance(checkpoint, SharedPartialExportCheckpoint):
+                    for ref in checkpoint.source_records:
+                        copy(db, ref.kind, ref.key)
+                else:
+                    copy(db, "incumbent_reuse", checkpoint.job_sha256)
+
+        def checked(kind, key):
+            return self.journal._check_record_bytes(records[kind, key], kind)
+
+        raw = checked("assignment", checkpoint.slot)
+        if raw is None:
+            _partial_export_source_repair(checkpoint, "assignment_missing")
+        if digest_canonical_bytes(raw) != checkpoint.assignment_sha256:
+            _partial_export_source_repair(checkpoint, "assignment_changed")
+        for index, (key, expected) in enumerate(
+            zip(checkpoint.step_keys, checkpoint.step_sha256s, strict=True)
+        ):
+            raw = checked("step", key)
+            if (None if raw is None else digest_canonical_bytes(raw)) != expected:
+                if expected is not None:
+                    _partial_export_source_repair(
+                        checkpoint,
+                        "completed_step_missing" if raw is None else "completed_step_changed",
+                        index,
+                    )
                 return False
+        if isinstance(checkpoint, SharedPartialExportCheckpoint):
+            for ref in checkpoint.source_records:
+                raw = checked(ref.kind, ref.key)
+                if raw is None or digest_canonical_bytes(raw) != ref.sha256:
+                    _partial_export_source_repair(checkpoint, "shared_source_missing_or_changed")
+        elif checked("incumbent_reuse", checkpoint.job_sha256) is not None:
+            # An unchanged /1 partial fact cannot authorize a new /2 source.
+            return False
         return True
 
     def partial_export_checkpoint(
@@ -468,10 +507,11 @@ class CohortExecutionJournal:
         # Static proof verification must not reserve the journal writer or keep
         # unrelated reads waiting on its process lock. This read grants no
         # current authority; dispatch still checks its owned fresh capture.
-        with self.journal.read_transaction() as db:
-            raw = self.journal.get_raw("assignment", slot, db=db)
-            if raw is None:
-                raise FileNotFoundError("execution assignment has not been retained")
+        with self.journal.read_transaction(coordinated=True) as db:
+            raw = self.journal._copy_raw(db, "assignment", slot)
+        raw = self.journal._check_record_bytes(raw, "assignment")
+        if raw is None:
+            raise FileNotFoundError("execution assignment has not been retained")
         key = assignment_reuse_key(
             self.journal, slot, (raw,), self.config, self.policy, self.cohorts
         )
@@ -860,11 +900,7 @@ class CohortExecutionJournal:
 
     def _copy_step_records(self, db, key):
         def read(kind, ident):
-            if db.execute("SELECT 1 FROM holds WHERE id=?", (ident,)).fetchone():
-                raise ValueError("round journal conflict held")
-            return self.journal._copy_record_bytes(
-                db, kind, ident, maximum_bytes=_STEP_RECORD_BYTES
-            )
+            return self.journal._copy_raw(db, kind, ident, maximum_bytes=_STEP_RECORD_BYTES)
 
         step = read("step", key)
         if step in (None, b"null"):

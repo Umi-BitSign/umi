@@ -754,9 +754,12 @@ Recurring evaluator partial exports retain small source facts in
 `<request-export-directory>/.model-partial-export`. For an unfinished public-model
 job, these bind the actual journal file, assignment, policy/verifier semantics,
 precomputed step identities and the already reviewed partial manifest. Each poll
-still checks fresh assignment/step conflict fences and exact committed metadata,
-plus the existing output-publication file stamps. An unchanged job skips evidence
-collection, repeated job hashing, assignment copies and native partial review.
+still checks fresh assignment/step conflict fences, exact committed original bytes
+and the existing output-publication file stamps. Originals, including shared-baseline
+bindings, are copied within one coherent, aggregate-bounded read snapshot; canonical
+validation and hashing run after it closes. This still reads unchanged originals.
+An unchanged job skips evidence collection, repeated job hashing, assignment
+reconstruction and native partial review.
 The first changed step invalidates only that job's source fact; completing all
 steps always resumes normal terminal sealing. Endpoint retirement and request
 inventory continuation keep their original paths.

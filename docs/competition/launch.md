@@ -231,9 +231,10 @@ is reported as requiring repair and never treated as completion. The scoped ETA
 requires at least three new complete models over five minutes in the sampler's
 current session, assumes comparable remaining cost and steady export delivery,
 and excludes subsequent certification and rewards. Overall ETA remains separate.
-Execution evidence readers copy bounded original step, attempt and result rows
-from one committed journal snapshot, then release SQLite before decoding,
-digesting and checking outputs. Bulk snapshots coordinate with the same owner's
+Execution evidence readers copy bounded original assignment, step, attempt, result
+and partial-export source rows from one committed journal snapshot, then release
+SQLite before decoding, digesting and checking outputs. Bulk snapshots coordinate
+with the same owner's
 writers; ordinary bounded probes remain independent. Reviewer and settlement
 consumers that share an execution directory both need the updated reader.
 Inventory collection retains its original writer reservation, but semantic review
