@@ -2773,8 +2773,11 @@ growing roster cannot be silently omitted. Use the existing authenticated
 operator deadline/closure selection described in [evaluation](evaluation.md).
 An elapsed native phase target or a temporarily empty pending queue does not
 close issuance. Selecting the batch format adds no new intake cutoff or clock.
-Upload-time preparation and replacement handling remain continuous intake work,
-separate from the final cohort signing boundary.
+While intake remains open, prospective format selection preserves the existing
+individual independent-certification path. The retained admission cutoff switches
+dispatch to the final batch, which reuses completed individual certificates.
+Upload-time triggering and replacement handling remain separate from the final
+cohort signing boundary.
 
 The worker checks the original proposal, quorum, submission and model bytes
 before retaining acceptance. It exports review documents under `objects/` before

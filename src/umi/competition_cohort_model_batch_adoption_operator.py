@@ -120,6 +120,7 @@ class SelectedBatchAdoptionTarget:
     cohorts: tuple[CohortIntakeBinding, ...]
     signer: str | None = None
     peers: tuple = ()
+    cohort_sequences: tuple[tuple[str, int], ...] = ()
 
 
 def load_adoption_target(target):
@@ -140,6 +141,7 @@ def load_adoption_target(target):
             config.policy_sha256,
             intake.cohorts,
             peers=host.model_review_peers,
+            cohort_sequences=tuple((digest(plan), plan.sequence) for plan in host.series.cohorts),
         )
     else:
         model = config.model_signing

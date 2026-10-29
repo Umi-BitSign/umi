@@ -207,6 +207,7 @@ def adoption_operator(adoption, tmp_path, monkeypatch):
         digest(a.policy),
         a.r.owner.intake.config.cohorts,
         peers=peers,
+        cohort_sequences=((a.r.cohort, a.history.plan.sequence),),
     )
     ensure_private_directory(selected_owner.directory)
     selected = [selected_owner]

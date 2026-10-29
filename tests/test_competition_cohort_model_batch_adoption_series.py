@@ -1,5 +1,6 @@
 """Automatic successor adoption resumes the same signed jobs and repairs delivery."""
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,60 @@ async def test_series_automatically_materializes_future_job_and_reuses_signed_co
     before = list(o.state.calls)
     second = await run(read_history=False)
     assert second["cohorts"][0]["status"] == "reused"
+    assert o.state.calls == before
+
+
+async def test_series_mixed_C5_C6_C7_selection_never_loads_excluded_histories(
+    series_job, monkeypatch
+):
+    o, config, _ = series_job
+    original = o.selected[0]
+    binding = original.cohorts[0]
+    owner = replace(
+        original,
+        cohorts=(
+            binding.model_copy(update={"cohort_sha256": "05" * 32}),
+            binding.model_copy(update={"cohort_sha256": "06" * 32}),
+            *original.cohorts,
+        ),
+        cohort_sequences=(
+            ("04" * 32, 4),
+            ("05" * 32, 5),
+            ("06" * 32, 6),
+            *original.cohort_sequences,
+        ),
+    )
+    targets = {t.target.service_unit: t for t in (owner, *o.selected[1:])}
+    monkeypatch.setattr(series, "load_adoption_target", lambda t: targets[t.service_unit])
+    histories = []
+
+    def load_history(path):
+        histories.append(path.name)
+        assert path.name == o.a.r.cohort + ".json"
+        return o.a.history
+
+    async def run_job(job, policy, history, *, client):
+        return await operator.run_model_batch_adoption(
+            job, policy, history, client=client, publish=o.publish, peer_factory=o.peer_factory
+        )
+
+    async def run():
+        return await series.run_model_batch_adoption_series(
+            config,
+            o.a.policy,
+            client=None,
+            run_job=run_job,
+            load_history=load_history,
+            select=lambda t: targets[t.service_unit],
+            publish=o.publish,
+        )
+
+    first = await run()
+    before = list(o.state.calls)
+    second = await run()
+    assert first["completed"] == second["completed"] == first["total"] == 1
+    assert second["cohorts"][0]["status"] == "reused"
+    assert histories == [o.a.r.cohort + ".json"]
     assert o.state.calls == before
 
 

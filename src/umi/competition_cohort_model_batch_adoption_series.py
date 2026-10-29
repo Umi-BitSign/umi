@@ -215,7 +215,19 @@ async def run_model_batch_adoption_series(
     owner = targets[0]
     if owner.policy_sha256 != digest(policy):
         raise ModelBatchAdoptionRefused("batch adoption series changed the selected policy")
-    cohorts = tuple(c.cohort_sha256 for c in owner.cohorts)
+    sequences = dict(owner.cohort_sequences)
+    if len(sequences) != len(owner.cohort_sequences) or not {
+        c.cohort_sha256 for c in owner.cohorts
+    } <= set(sequences):
+        raise ModelBatchAdoptionRefused("selected batch series plans differ from intake bindings")
+    # The root-protected selected owner configuration already binds its signed
+    # series plans. Earlier cohorts need neither exports nor repeated history
+    # verification merely to establish that this prospective format excludes them.
+    cohorts = tuple(
+        c.cohort_sha256
+        for c in owner.cohorts
+        if sequences[c.cohort_sha256] >= config.minimum_cohort_sequence
+    )
     outcomes = []
     with (
         work_heartbeats(),

@@ -18,6 +18,7 @@ from umi.competition_cohort_model_acceptance_store import (
     CohortModelAcceptances,
     PendingModelArtifacts,
 )
+from umi.competition_cohort_model_acceptance_worker import ModelAcceptanceWorker
 from umi.competition_cohort_model_batch import (
     SignedModelBatchCertificationAdoption,
     prepare_model_batch_certification_adoption,
@@ -135,6 +136,46 @@ async def test_real_batch_preserves_prior_individual_publication_and_older_inten
     assert late.certificate.batch_proof.certificate.batch.certified_at_block == 230
     assert earlier.accepted_at_block == 220
     assert reopened.export(r.cohort, digest(r.subs[1]), r.worker.output) == late
+
+
+@pytest.mark.parametrize("deadline", ["open", "absent", "closed"])
+async def test_prospective_selection_preserves_scalar_intake_until_retained_cutoff(
+    batch_owner, monkeypatch, deadline
+):
+    r = batch_owner
+    batch = r.create()
+    publish_private_model(batch.directory / (r.cohort + ".json"), r.adoption)
+    if deadline == "absent":
+        r.owner.intake._admission_deadlines.clear()
+    elif deadline == "open":
+        original = r.owner.intake._admission_deadlines[r.cohort]
+        r.owner.intake._admission_deadlines[r.cohort] = original.model_copy(
+            update={"close_new_admissions_at_unix_ms": 9999999999999}
+        )
+    worker = ModelAcceptanceWorker(
+        r.owner,
+        r.worker.capture,
+        r.worker.inputs,
+        r.worker.output,
+        batch_certification_adoptions_directory=batch.directory,
+    )
+    scalar, final = [], []
+
+    async def scalar_review(cohort, submission):
+        assert deadline != "closed", "closed selected cohort must use final batch"
+        scalar.append(digest(submission))
+
+    async def final_batch(cohort, adoption):
+        assert deadline == "closed", "open intake must retain independent scalar review"
+        final.append(cohort)
+        return {"status": "completed"}
+
+    monkeypatch.setattr(worker, "_one", scalar_review)
+    monkeypatch.setattr(worker.batch_worker, "poll_cohort", final_batch)
+    await worker.poll_once()
+    assert set(scalar) == (set() if deadline == "closed" else {digest(s) for s in r.subs})
+    assert final == ([r.cohort] if deadline == "closed" else [])
+    assert r.state.captures == 0
 
 
 async def test_completed_batch_restarts_after_phase_advance_without_capture_or_reselection(
