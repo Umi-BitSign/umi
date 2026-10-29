@@ -73,7 +73,7 @@ def test_legacy_frozen_operator_bundle_remains_valid() -> None:
     assert bundle.signed_policy.body.registration_snapshot.finalized_block == 9_076_034
 
 
-def test_first_install_pin_matches_published_churn_operator_bundle() -> None:
+def test_legacy_churn_operator_bundle_remains_valid() -> None:
     payload = (
         (ROOT / "tests/fixtures/validator-supervisor/churn-registration-bridge.json")
         .read_bytes()
@@ -83,8 +83,10 @@ def test_first_install_pin_matches_published_churn_operator_bundle() -> None:
         "52261aad8957cb7b2823ad688754e9ad567a0e9a06c9dd92003c277f36e8faa6"
     )
     bundle = _parse_bootstrap_input_bundle(payload)
-    assert (DEPLOYMENT / "CURRENT_RELEASE_REVISION").read_text().strip() == (
-        bundle.signed_policy.body.umi_git_revision
+    # This signed historical input retains its original source identity when
+    # the independently signed installer host advances to a newer release.
+    assert bundle.signed_policy.body.umi_git_revision == (
+        "5f9d189f819f5fca7572dd830ab080730edefe7e"
     )
     assert bundle.signed_policy.body.lifetime == "until_superseded"
     assert getattr(bundle.signed_policy.body, "registration_snapshot", None) is None

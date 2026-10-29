@@ -18,6 +18,7 @@ from .competition_cohort_legacy_model_selection import (
     selected_legacy_model_readers,
 )
 from .competition_cohort_model_transport_selection import selected_direct_model_review
+from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_cohort_request_export_worker import RequestExportWorker
 from .competition_cohort_request_files import RequestCompletionFiles
@@ -240,6 +241,21 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
         )
         nodes = []
         direct_by_cohort = {}
+
+        def certification_history(cohort):
+            selected = read_private_model(
+                Path(config.history_directory) / (cohort + ".json"),
+                CohortOrderHistory,
+                maximum_bytes=config.maximum_package_bytes,
+            ).history
+            if (
+                selected.plan not in config.series.cohorts
+                or digest(selected.plan) != cohort
+                or selected.authority != config.series.recovery
+            ):
+                raise ValueError("legacy batch history differs from selected settlement series")
+            return selected
+
         for plan in config.series.cohorts:
             store = resources.enter_context(
                 settlement_store(root / digest(plan), config.maximum_state_bytes)
@@ -252,6 +268,7 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
                     promotion.directory / "model-reward-artifacts",
                     root / digest(plan) / "direct-model-settlement-receipts",
                     legacy_readers=legacy_readers,
+                    certification_history=certification_history,
                 )
             )
             if model_artifacts is not None:

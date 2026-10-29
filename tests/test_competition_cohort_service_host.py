@@ -53,6 +53,60 @@ def host_config(h, root):
     )
 
 
+def test_batch_configuration_preserves_old_bytes_and_explicit_bounds(lifecycle, tmp_path):
+    legacy = host_config(lifecycle, tmp_path / "host")
+    raw = canonical_json_bytes(legacy)
+    assert b"batch_certification_adoptions_directory" not in raw
+    assert b"model_preparation_concurrency" not in raw
+    reopened = ServiceAdmissionHostConfig.model_validate_json(raw)
+    assert canonical_json_bytes(reopened) == raw
+    assert reopened.model_preparation_concurrency == 10
+    for value in (1, 10, 16):
+        selected = ServiceAdmissionHostConfig.model_validate(
+            {
+                **legacy.model_dump(by_alias=True),
+                "model_preparation_concurrency": value,
+                "batch_certification_adoptions_directory": str(tmp_path / "adoptions"),
+            }
+        )
+        encoded = canonical_json_bytes(selected)
+        assert b'"model_preparation_concurrency":' in encoded
+        assert (
+            canonical_json_bytes(ServiceAdmissionHostConfig.model_validate_json(encoded)) == encoded
+        )
+    for value in (0, 17, True, 1.5, "10"):
+        with pytest.raises(ValueError):
+            ServiceAdmissionHostConfig.model_validate(
+                {
+                    **legacy.model_dump(by_alias=True),
+                    "model_preparation_concurrency": value,
+                }
+            )
+
+
+@pytest.mark.parametrize("overlap", ["queue", "inputs_child", "service_state"])
+def test_batch_adoptions_are_disjoint_from_state(lifecycle, config, tmp_path, overlap):
+    selected = host_config(lifecycle, tmp_path / "host")
+    path = {
+        "queue": selected.queue_directory,
+        "inputs_child": str(Path(selected.inputs_directory) / "adoptions"),
+        "service_state": config.state_directory,
+    }[overlap]
+    selected = selected.model_copy(update={"batch_certification_adoptions_directory": path})
+    with pytest.raises(ValueError):
+        CompetitionServiceConfig.model_validate_json(
+            canonical_json_bytes(
+                config.model_copy(
+                    update={
+                        "schema_": "umi-competition-service-config/3",
+                        "recoverable_intake": lifecycle.intake.config,
+                        "recoverable_service": selected,
+                    }
+                )
+            )
+        )
+
+
 def test_continuation_budget_preserves_legacy_canonical_bytes_and_explicit_bounds(
     lifecycle, tmp_path
 ):

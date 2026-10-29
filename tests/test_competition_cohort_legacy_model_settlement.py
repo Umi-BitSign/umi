@@ -11,6 +11,7 @@ from umi.competition_cohort_direct_model_review import (
     DirectModelReviewSourceConfig,
     DirectModelSettlementVerifier,
 )
+from umi.competition_cohort_intake import history_tip
 from umi.competition_cohort_legacy_model_readers import LegacyModelStorageReaders
 from umi.competition_cohort_legacy_model_settlement import (
     LegacyModelSettlementStorage,
@@ -19,6 +20,13 @@ from umi.competition_cohort_legacy_model_settlement import (
 )
 from umi.competition_cohort_legacy_model_storage import LegacyModelStorageRepairRequired
 from umi.competition_cohort_model_acceptance import CertifiedModelArtifactAcceptance
+from umi.competition_cohort_model_batch import (
+    CertifiedModelAcceptanceBatch,
+    SignedModelBatchCertificationAdoption,
+    build_model_acceptance_batch,
+    model_acceptance_batch_proofs,
+    prepare_model_batch_certification_adoption,
+)
 from umi.competition_cohort_model_static_review import StandingModelReviewPolicy
 from umi.competition_cohort_roster import RecoverableRosterParticipant
 from umi.competition_cohort_settlement_preparation import SettlementArtifactPreparation
@@ -56,12 +64,20 @@ pytestmark = [
 ]
 
 
-def consumer(case, tmp_path, auth=None):
+def consumer(case, tmp_path, auth=None, *, original=None):
     auth = auth or authenticated(case)
-    original = next(e for e in case.legacy.entries if e.certificate_raw_sha256 is not None)
+    original = original or next(
+        e for e in case.legacy.entries if e.certificate_raw_sha256 is not None
+    )
     request = next(r for r in case.requests if digest(r.record.request) == original.request_sha256)
-    certificate = CertifiedModelArtifactAcceptance.model_validate_json(
-        case.objects[original.certificate_raw_sha256]
+    certificate = (
+        CertifiedModelArtifactAcceptance.model_validate_json(
+            case.objects[original.certificate_raw_sha256]
+        )
+        if original.certificate_raw_sha256 is not None
+        else CertifiedModelArtifactAcceptance(
+            acceptance=request.acceptance, signatures=signatures(request.acceptance)
+        )
     )
     bundle = request.record.request.signed_submission.submission.model_bundle
     local = case.owner.archive / digest(bundle) / "model"
@@ -109,7 +125,10 @@ def consumer(case, tmp_path, auth=None):
     )
     participant = RecoverableRosterParticipant(record=request.record, admission=request.admission)
     package = SimpleNamespace(
-        inputs=SimpleNamespace(roster=SimpleNamespace(participants=(participant,)))
+        inputs=SimpleNamespace(
+            roster=SimpleNamespace(participants=(participant,)),
+            history=case.owner.intake.history(case.cohort),
+        )
     )
     prepared = SimpleNamespace(
         allocation=SimpleNamespace(model_award=SimpleNamespace(acceptances=(certificate,)))
@@ -135,6 +154,103 @@ def remote_case(case, tmp_path):
     selected = consumer(case, tmp_path)
     shutil.rmtree(case.owner.archive)
     return selected
+
+
+def batch_certificate(c):
+    history = c.package.inputs.history
+    adoption = prepare_model_batch_certification_adoption(
+        history,
+        c.case.policy,
+        expected_tip_sha256=history_tip(history),
+        effective_at_block=222,
+    )
+    signed = SignedModelBatchCertificationAdoption(
+        adoption=adoption, signatures=signatures(adoption)
+    )
+    acceptances = (c.certificate.acceptance,)
+    body = build_model_acceptance_batch(
+        acceptances,
+        signed,
+        history,
+        c.case.policy,
+        candidate_snapshot_sha256="ad" * 32,
+        roster_sha256=digest([digest(p) for p in c.package.inputs.roster.participants]),
+        certified_at_block=223,
+    )
+    certified = CertifiedModelAcceptanceBatch(
+        batch=body, adoption=signed, signatures=signatures(body)
+    )
+    return CertifiedModelArtifactAcceptance(
+        acceptance=acceptances[0],
+        batch_proof=model_acceptance_batch_proofs(acceptances, certified)[0],
+    )
+
+
+@pytest.fixture
+def unsigned_batch_case(case, tmp_path):
+    original = next(e for e in case.legacy.entries if e.certificate_raw_sha256 is None)
+    c = consumer(case, tmp_path, original=original)
+    c.certificate = batch_certificate(c)
+    c.prepared.allocation.model_award.acceptances = (c.certificate,)
+    shutil.rmtree(case.owner.archive)
+    return c
+
+
+@pytest.mark.parametrize("selection", ["absent", "stale", "forked"])
+async def test_legacy_batch_requires_selected_original_history_before_bytes(
+    unsigned_batch_case, selection
+):
+    c = unsigned_batch_case
+    history = c.package.inputs.history
+    if selection == "absent":
+        selected = None
+    elif selection == "stale":
+        selected = c.case.history
+    else:
+        selected = history.model_copy(update={"genesis_signatures": ()})
+    with pytest.raises(ValueError, match="history"):
+        await c.verifier.ensure(c.participant, c.certificate, certification_history=selected)
+    assert c.remote.reads == []
+    assert not c.verifier._path(c.certificate).exists()
+
+
+async def test_unsigned_legacy_intent_gains_batch_and_reuses_bytes_across_consumers(
+    unsigned_batch_case,
+):
+    c = unsigned_batch_case
+    history = c.package.inputs.history
+    original_body = canonical_json_bytes(c.certificate.acceptance)
+    original_storage = canonical_json_bytes(c.legacy.authenticated.original_history)
+    await c.verifier.ensure_all((c.participant,), (c.certificate,), certification_history=history)
+    assert len(c.remote.reads) == 7
+    c.verifier.verify_candidate(c.certificate, c.participant, certification_history=history)
+    restarted = DirectModelSettlementVerifier(
+        c.artifacts,
+        c.verifier.archive,
+        c.verifier.receipts,
+        legacy_readers=c.readers,
+        certification_history=lambda cohort: history if cohort == c.case.cohort else None,
+    )
+    reads = tuple(c.remote.reads)
+    await restarted.ensure(c.participant, c.certificate)
+    restarted.verify_candidate(c.certificate, c.participant)
+    c.preparation.model_artifacts = restarted
+    coverage = await capture_coverage_model_dependencies(c.preparation, c.package, c.prepared)
+    assert await restore_coverage_model_dependencies(c.preparation, coverage)
+    assert tuple(c.remote.reads) == reads
+    assert canonical_json_bytes(c.certificate.acceptance) == original_body
+    assert canonical_json_bytes(c.legacy.authenticated.original_history) == original_storage
+    assert c.certificate.signatures == ()
+
+
+async def test_batch_cannot_replace_original_individual_certificate(remote_case):
+    c = remote_case
+    certificate = batch_certificate(c)
+    with pytest.raises(ValueError, match="original certificate"):
+        await c.verifier.ensure(
+            c.participant, certificate, certification_history=c.package.inputs.history
+        )
+    assert c.remote.reads == []
 
 
 async def test_independent_full_bytes_then_fresh_consumers_reuse_without_local_archive(remote_case):

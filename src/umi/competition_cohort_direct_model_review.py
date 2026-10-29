@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 import shutil
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
@@ -74,6 +74,7 @@ class DirectModelReviewSourceConfig(StrictProtocolModel):
     standing_review_policy: StandingModelReviewPolicy
     r2_timeout_seconds: Annotated[int, Field(ge=1, le=300)] = 60
     verification_directory: Directory | None = None
+    verification_concurrency: Annotated[int, Field(ge=1, le=16)] = 10
     maximum_materialized_bytes: Annotated[int, Field(ge=1024**2, le=R2_MAXIMUM_MULTIPART_BYTES)] = (
         64 * 1024**3
     )
@@ -96,6 +97,8 @@ class DirectModelReviewSourceConfig(StrictProtocolModel):
             value.pop("materialization_boot_disk_cache", None)
         if self.verification_directory is None:
             value.pop("verification_directory", None)
+        if "verification_concurrency" not in self.model_fields_set:
+            value.pop("verification_concurrency", None)
         return value
 
     @model_validator(mode="after")
@@ -196,7 +199,8 @@ class DirectModelArtifactReviewer:
         if verification_root is not None:
             private_path(str(verification_root))
         self.verification_root = verification_root
-        self.verification_serial = asyncio.Lock()
+        self.verification_slots = asyncio.Semaphore(self.config.verification_concurrency)
+        self._verification_locks = {}
         self.materialization_serial = asyncio.Lock()
         boot = self.config.materialization_boot_disk_cache
         if boot is not None and (
@@ -267,7 +271,7 @@ class DirectModelArtifactReviewer:
             > standing.maximum_total_document_bytes
         ):
             raise StaticModelReviewHeld("review_documents_exceed_total_policy")
-        async with self.verification_serial, r2_connection_scope(self.multipart):
+        async with self._verification_slot(object_key), r2_connection_scope(self.multipart):
             verified, head = await verify_remote_model(
                 self.multipart,
                 object_key,
@@ -281,6 +285,22 @@ class DirectModelArtifactReviewer:
             build_standing_model_review_from_documents(bundle, self.policy, standing, verified),
             head,
         )
+
+    @asynccontextmanager
+    async def _verification_slot(self, key):
+        # Different immutable objects may stream concurrently. Requests sharing
+        # a checkpoint must finish the first check before reusing its result.
+        lock, users = self._verification_locks.get(key, (asyncio.Lock(), 0))
+        self._verification_locks[key] = (lock, users + 1)
+        try:
+            async with lock, self.verification_slots:
+                yield
+        finally:
+            _, users = self._verification_locks[key]
+            if users == 1:
+                del self._verification_locks[key]
+            else:
+                self._verification_locks[key] = (lock, users - 1)
 
     def _verification_context(self, request):
         return {
@@ -564,12 +584,14 @@ class DirectModelSettlementVerifier:
         *,
         legacy_storage: LegacyModelSettlementStorage | None = None,
         legacy_readers: LegacyModelStorageReaders | None = None,
+        certification_history=None,
     ) -> None:
         self.artifacts = artifacts
         if legacy_storage is not None and legacy_readers is not None:
             raise ValueError("legacy settlement selection is ambiguous")
         self.legacy_storage = legacy_storage
         self.legacy_readers = legacy_readers
+        self.certification_history = certification_history
         sources = legacy_storage.sources if legacy_storage is not None else legacy_readers
         self.archive, self.receipts = Path(archive), Path(receipts)
         if sources is not None and (
@@ -594,13 +616,22 @@ class DirectModelSettlementVerifier:
         ):
             raise ValueError("direct settlement receipts and legacy archive must be disjoint")
 
-    def legacy_for(self, cohort):
+    def legacy_for(self, cohort, *, certification_history=None):
         """Choose by the original certificate cohort; other cohorts keep native storage."""
-        if self.legacy_storage is not None:
-            return self.legacy_storage if self.legacy_storage.cohort == cohort else None
-        if self.legacy_readers is not None and self.legacy_readers.has_cohort(cohort):
-            return LegacyModelSettlementStorage(self.legacy_readers, cohort)
-        return None
+        selected = self.legacy_storage
+        if selected is not None and selected.cohort != cohort:
+            return None
+        sources = selected.sources if selected is not None else self.legacy_readers
+        if sources is None or not sources.has_cohort(cohort):
+            return None
+        provider = self.certification_history
+        if certification_history is not None:
+
+            def provider(_):
+                return certification_history
+        if provider is None and selected is not None:
+            return selected
+        return LegacyModelSettlementStorage(sources, cohort, certification_history=provider)
 
     @staticmethod
     def _request(
@@ -646,18 +677,26 @@ class DirectModelSettlementVerifier:
         self,
         participant: RecoverableRosterParticipant,
         certificate: CertifiedModelArtifactAcceptance,
+        *,
+        certification_history=None,
     ) -> None:
         async with self.serial:
-            await self._ensure(participant, certificate)
+            await self._ensure(
+                participant, certificate, certification_history=certification_history
+            )
 
     async def _ensure(
         self,
         participant: RecoverableRosterParticipant,
         certificate: CertifiedModelArtifactAcceptance,
+        *,
+        certification_history=None,
     ) -> None:
         request = self._request(participant, certificate)
         if request is None:
-            legacy = self.legacy_for(certificate.acceptance.cohort_sha256)
+            legacy = self.legacy_for(
+                certificate.acceptance.cohort_sha256, certification_history=certification_history
+            )
             if legacy is not None:
                 await legacy.ensure(participant, certificate, self.receipts, repairing=True)
                 return
@@ -701,6 +740,8 @@ class DirectModelSettlementVerifier:
         self,
         participants: tuple[RecoverableRosterParticipant, ...],
         certificates: tuple[CertifiedModelArtifactAcceptance, ...],
+        *,
+        certification_history=None,
     ) -> None:
         async with self.serial:
             submissions = tuple(
@@ -712,16 +753,22 @@ class DirectModelSettlementVerifier:
             ):
                 raise ValueError("direct settlement acceptances differ from the model roster")
             for participant, certificate in zip(participants, certificates, strict=True):
-                await self._ensure(participant, certificate)
+                await self._ensure(
+                    participant, certificate, certification_history=certification_history
+                )
 
     def verify_candidate(
         self,
         certificate: CertifiedModelArtifactAcceptance,
         participant: RecoverableRosterParticipant,
+        *,
+        certification_history=None,
     ) -> None:
         request = self._request(participant, certificate)
         if request is None:
-            legacy = self.legacy_for(certificate.acceptance.cohort_sha256)
+            legacy = self.legacy_for(
+                certificate.acceptance.cohort_sha256, certification_history=certification_history
+            )
             if legacy is not None:
                 legacy.verify_candidate(participant, certificate, self.receipts)
                 return

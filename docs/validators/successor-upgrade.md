@@ -51,6 +51,37 @@ and completed work after startup; `systemctl start` alone is insufficient.
 
 ## Supervisor maintenance for an installed successor
 
+### Cohort artifact certificate readers
+
+Batch artifact certification adds an authenticated membership proof to each
+model's acceptance. Install its reader before selecting the prospective batch
+adoption; retain support for original individual signatures. The
+[batch adoption procedure](../operators/settlement.md) supplies the independently
+approved format selection and recoverable owner/reviewer handoff.
+
+| Consumer | Required delivery path |
+| --- | --- |
+| Intake owner/export, independent reviewers and evaluator execution sources | Select the qualified immutable source through each existing service's maintenance path. Preserve accounts, journals and accepted inputs; select the owner last. |
+| Settlement preparation and full native reward replay, including writer/package delivery | Select compatible source in every consuming host and any worker overlay. Settlement preparation also needs its existing protected `history_directory` with the original `<cohort>.json`; a certificate cannot supply its own authority history. |
+| Native public catalog and result projection | Update the actual publication service which parses retained acceptances, before it receives batch proofs. Public metadata transport alone does not update this reader. |
+| Model upload/consent client and model inference entrypoint | No protocol change. `submit-cohort-model` and `query-cohort-admission` consume upload/participation receipts, not artifact certificates. A client used for full offline evidence replay needs the compatible source. |
+| Automatic translation-reference follower | No batch-proof reader or image change: it consumes the signed approved row described below, not the cohort's model certificates. |
+
+The common supervisor channel updates signed worker releases and reference
+policies. It does not replace an installed host's Python source. Full native
+readers use the exact root-owned host-maintenance selection described below,
+including explicit version-2 worker-overlay authority where needed. Updating
+`CURRENT_RELEASE_REVISION` affects fresh installations only; changing the public
+channel's `host-artifacts.json` does not update either an existing host or the
+fresh installer's committed pin. Do not infer deployment from a source merge.
+
+The standalone model client likewise has no background source updater. When its
+reader scope changes, publish the exact qualified `runtime.revision` in
+`deploy/miner-upgrade/current.json`, preserving the existing deployment and
+endpoint-profile bindings, then use the supported installer rerun. Batch
+certification by itself requires no upload-only client release. Preserve source
+selection and restoration dependencies until every reader using them has moved.
+
 ### Automatic translation reference releases
 
 The fixed `umi-translation-validator/1` worker uses the supervisor's existing

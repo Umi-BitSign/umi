@@ -344,7 +344,12 @@ class StandingRewardPreparation:
             maximum_promotion_bytes=self.maximum_promotion_bytes,
             maximum_bytes=self.maximum_package_bytes,
             verify_model_artifact=(
-                None if self.model_artifacts is None else self.model_artifacts.verify_candidate
+                None
+                if self.model_artifacts is None
+                else partial(
+                    self.model_artifacts.verify_candidate,
+                    certification_history=package.inputs.history,
+                )
             ),
         )
         if adopted is not None:
@@ -499,7 +504,9 @@ class StandingRewardPreparation:
             if participant.record.request.signed_submission.submission.track == "model"
             and digest(participant.record.request.signed_submission.submission) in completed
         )
-        await self.model_artifacts.ensure_all(participants, award.acceptances)
+        await self.model_artifacts.ensure_all(
+            participants, award.acceptances, certification_history=package.inputs.history
+        )
 
     def _check_prepared(self, prepared: PreparedStandingReward) -> None:
         if (

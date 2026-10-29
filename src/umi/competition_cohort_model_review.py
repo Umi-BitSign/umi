@@ -12,7 +12,7 @@ from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_artifacts import verify_preserved_bundle
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
@@ -27,6 +27,8 @@ from .competition_cohort_model_acceptance import (
     check_model_vote,
     verify_model_acceptance_body,
 )
+from .competition_cohort_model_batch_adoption import attest_model_batch_adoption
+from .competition_cohort_model_batch_review import attest_model_batch
 from .competition_cohort_model_static_review import (
     StandingModelReviewPolicy,
     verify_standing_review_policy,
@@ -55,6 +57,17 @@ class ModelReviewConfig(StrictProtocolModel):
     maximum_votes: Annotated[int, Field(ge=1, le=65536)] = 4096
     maximum_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
     signing_timeout_seconds: Annotated[int, Field(ge=1, le=1200)] = 300
+    preparation_concurrency: Annotated[int, Field(ge=1, le=16)] = 10
+    batch_certification_adoptions_directory: Directory | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if "preparation_concurrency" not in self.model_fields_set:
+            value.pop("preparation_concurrency", None)
+        if self.batch_certification_adoptions_directory is None:
+            value.pop("batch_certification_adoptions_directory", None)
+        return value
 
     @model_validator(mode="after")
     def ordered(self):
@@ -64,6 +77,8 @@ class ModelReviewConfig(StrictProtocolModel):
         roots = [
             Path(p) for p in (self.directory, self.approvals_directory, self.archive_directory)
         ]
+        if self.batch_certification_adoptions_directory is not None:
+            roots.append(Path(self.batch_certification_adoptions_directory))
         if any(
             a == b or a in b.parents or b in a.parents
             for i, a in enumerate(roots)
@@ -133,15 +148,16 @@ class ModelArtifactReviewer:
             )
         self.serial = asyncio.Lock()
 
-    def _validate(self, request, history, block):
+    def _validate(self, request, history, block, *, history_verified=False):
         a = request.acceptance
         if self.cohorts.get(a.cohort_sha256) != a.authority_sha256:
             raise ValueError("model review is outside configured cohort authority")
-        view = verify_cohort_history(
-            history, self.policy, expected_tip_sha256=history_tip(history), current_block=block
-        )
-        if view.state.phase != "intake":
-            raise ValueError("new model acceptance requires open intake")
+        if not history_verified:
+            view = verify_cohort_history(
+                history, self.policy, expected_tip_sha256=history_tip(history), current_block=block
+            )
+            if view.state.phase != "intake":
+                raise ValueError("new model acceptance requires open intake")
         verify_model_acceptance_body(a, request.record, history, self.policy, maximum_block=block)
         admission = replay_participation(request.record, history, self.policy)
         if request.admission.admission != admission:
@@ -253,6 +269,94 @@ class ModelArtifactReviewer:
             with self.journal.locked():
                 return await run_owned_thread(repair)
 
+    async def _review_inputs(self, request, *, verified_snapshot=None):
+        """Perform the original independent artifact checks without signing."""
+        a = request.acceptance
+
+        async def source_snapshot():
+            if verified_snapshot is not None:
+                return verified_snapshot
+            source = await self.history(a.cohort_sha256)
+            block = execution_boundary(await self.capture()).block
+            self._validate(request, source.history, block)
+            return source.history, block
+
+        sub = request.record.request.signed_submission.submission
+        if sub.track != "model" or sub.model_bundle is None:
+            raise ValueError("artifact review requires a complete model submission")
+        if request.direct_artifact is not None:
+            # A staged R2 reader is capability, never cohort authority.
+            # Reject an unauthorized artifact before remote byte work;
+            # the normal fresh check below runs again before signing.
+            await source_snapshot()
+            if self.direct_review is None:
+                raise ValueError("direct model review source is unavailable")
+            inputs = await self.direct_review(request)
+        else:
+            approval_path = Path(self.config.approvals_directory) / (a.model_sha256 + ".json")
+            try:
+                inputs = await run_owned_thread(
+                    partial(
+                        read_private_model,
+                        approval_path,
+                        ModelArtifactReviewInputs,
+                        maximum_bytes=33 * 1024**2,
+                    )
+                )
+            except FileNotFoundError:
+                if self.legacy_standing_policy is None or not self.legacy_readers.has_cohort(
+                    a.cohort_sha256
+                ):
+                    raise
+                await source_snapshot()
+                await run_owned_thread(
+                    partial(
+                        self.legacy_readers.accepted,
+                        a.cohort_sha256,
+                        record=request.record,
+                        admission=request.admission,
+                        acceptance=a,
+                    )
+                )
+                inputs = await self.legacy_readers.review_inputs(
+                    a.cohort_sha256, sub.model_bundle, self.legacy_standing_policy
+                )
+                await run_owned_thread(
+                    partial(
+                        publish_private_model,
+                        approval_path,
+                        inputs,
+                        maximum_bytes=33 * 1024**2,
+                    )
+                )
+            # R2 byte provenance never approves the owner's rights
+            # claims. These exact privately reviewed documents must
+            # match the original /1 body before any remote work.
+            ModelAcceptanceIntent(acceptance=a, inputs=inputs)
+            legacy = self.legacy_readers
+            if legacy is not None and legacy.has_cohort(a.cohort_sha256):
+                await source_snapshot()
+                resolved = await run_owned_thread(
+                    partial(
+                        legacy.accepted,
+                        a.cohort_sha256,
+                        record=request.record,
+                        admission=request.admission,
+                        acceptance=a,
+                    )
+                )
+                await legacy.reader(resolved).verify()
+            else:
+                await run_owned_thread(
+                    verify_preserved_bundle,
+                    request.record.request.signed_submission.submission.model_bundle,
+                    Path(self.config.archive_directory),
+                    self.policy,
+                )
+        if inputs.model_sha256 != a.model_sha256:
+            raise ValueError("model review documents differ from the artifact")
+        return ModelAcceptanceIntent(acceptance=a, inputs=inputs)
+
     async def attest(self, request: ModelReviewRequest) -> ModelArtifactVote:
         request = ModelReviewRequest.model_validate_json(canonical_json_bytes(request))
         a = request.acceptance
@@ -283,90 +387,7 @@ class ModelArtifactReviewer:
                     await run_owned_thread(self._qualify_transport, a)
                     return vote
                 if saved is None:
-                    sub = request.record.request.signed_submission.submission
-                    if sub.track != "model" or sub.model_bundle is None:
-                        raise ValueError("artifact review requires a complete model submission")
-                    if request.direct_artifact is not None:
-                        # A staged R2 reader is capability, never cohort authority.
-                        # Reject an unauthorized artifact before remote byte work;
-                        # the normal fresh check below runs again before signing.
-                        source = await self.history(a.cohort_sha256)
-                        block = execution_boundary(await self.capture()).block
-                        self._validate(request, source.history, block)
-                        if self.direct_review is None:
-                            raise ValueError("direct model review source is unavailable")
-                        inputs = await self.direct_review(request)
-                    else:
-                        approval_path = Path(self.config.approvals_directory) / (
-                            a.model_sha256 + ".json"
-                        )
-                        try:
-                            inputs = await run_owned_thread(
-                                partial(
-                                    read_private_model,
-                                    approval_path,
-                                    ModelArtifactReviewInputs,
-                                    maximum_bytes=33 * 1024**2,
-                                )
-                            )
-                        except FileNotFoundError:
-                            if (
-                                self.legacy_standing_policy is None
-                                or not self.legacy_readers.has_cohort(a.cohort_sha256)
-                            ):
-                                raise
-                            source = await self.history(a.cohort_sha256)
-                            block = execution_boundary(await self.capture()).block
-                            self._validate(request, source.history, block)
-                            await run_owned_thread(
-                                partial(
-                                    self.legacy_readers.accepted,
-                                    a.cohort_sha256,
-                                    record=request.record,
-                                    admission=request.admission,
-                                    acceptance=a,
-                                )
-                            )
-                            inputs = await self.legacy_readers.review_inputs(
-                                a.cohort_sha256, sub.model_bundle, self.legacy_standing_policy
-                            )
-                            await run_owned_thread(
-                                partial(
-                                    publish_private_model,
-                                    approval_path,
-                                    inputs,
-                                    maximum_bytes=33 * 1024**2,
-                                )
-                            )
-                        # R2 byte provenance never approves the owner's rights
-                        # claims. These exact privately reviewed documents must
-                        # match the original /1 body before any remote work.
-                        ModelAcceptanceIntent(acceptance=a, inputs=inputs)
-                        legacy = self.legacy_readers
-                        if legacy is not None and legacy.has_cohort(a.cohort_sha256):
-                            source = await self.history(a.cohort_sha256)
-                            block = execution_boundary(await self.capture()).block
-                            self._validate(request, source.history, block)
-                            resolved = await run_owned_thread(
-                                partial(
-                                    legacy.accepted,
-                                    a.cohort_sha256,
-                                    record=request.record,
-                                    admission=request.admission,
-                                    acceptance=a,
-                                )
-                            )
-                            await legacy.reader(resolved).verify()
-                        else:
-                            await run_owned_thread(
-                                verify_preserved_bundle,
-                                request.record.request.signed_submission.submission.model_bundle,
-                                Path(self.config.archive_directory),
-                                self.policy,
-                            )
-                    if inputs.model_sha256 != a.model_sha256:
-                        raise ValueError("model review documents differ from the artifact")
-                    intent = ModelAcceptanceIntent(acceptance=a, inputs=inputs)
+                    intent = await self._review_inputs(request)
                 source = await self.history(a.cohort_sha256)
                 block = execution_boundary(await self.capture()).block
                 self._validate(request, source.history, block)
@@ -379,3 +400,9 @@ class ModelArtifactReviewer:
                 check_model_vote(vote, a, self.policy, signer=self.config.signer)
                 await run_owned_thread(self.journal.put, "model_vote", slot, vote)
                 return vote
+
+    async def attest_batch(self, request):
+        return await attest_model_batch(self, request)
+
+    async def attest_batch_adoption(self, request):
+        return await attest_model_batch_adoption(self, request)

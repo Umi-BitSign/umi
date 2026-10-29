@@ -21,7 +21,9 @@ from .competition_cohort_direct_model_review import DirectModelSettlementVerifie
 from .competition_cohort_model_acceptance import (
     CertifiedModelArtifactAcceptance,
     ModelReviewRequest,
+    verify_model_acceptance,
 )
+from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_recovery import verify_recovery_quorum
 from .competition_cohort_roster import RecoverableRosterParticipant
 from .competition_cohort_settlement_config import SettlementServiceConfig
@@ -56,6 +58,9 @@ class SettlementArtifactPreparation:
         self.policy = config.policy
         self.authority = digest(config.series.recovery.authority)
         self.cohorts = {digest(plan) for plan in config.series.cohorts}
+        self.plans = {digest(plan): plan for plan in config.series.cohorts}
+        self.recovery = config.series.recovery
+        self.history_directory = getattr(config, "history_directory", None)
         self.root = promotion.directory
         self.archive = self.root / "model-reward-artifacts"
         ensure_private_directory(self.archive)
@@ -132,7 +137,31 @@ class SettlementArtifactPreparation:
         ):
             raise ValueError("settlement preparation differs from its certified model")
         verify_signature(sub, signed.signature)
-        verify_recovery_quorum(a, certificate.signatures, self.policy)
+        if certificate.batch_proof is None:
+            verify_recovery_quorum(a, certificate.signatures, self.policy)
+        else:
+            if self.history_directory is None:
+                raise ValueError("batch artifact preparation requires selected original history")
+            source = read_private_model(
+                Path(self.history_directory) / (cohort + ".json"),
+                CohortOrderHistory,
+                maximum_bytes=64 * 1024**2,
+            )
+            if (
+                source.history.plan != self.plans[cohort]
+                or source.history.authority != self.recovery
+            ):
+                raise ValueError("batch artifact preparation changes selected history authority")
+            # This configured private handoff supplies original authority. Full
+            # native finality and closed-roster replay remain settlement duties;
+            # preparation cannot select history from a submitted certificate.
+            verify_model_acceptance(
+                certificate,
+                record,
+                source.history,
+                self.policy,
+                maximum_block=certificate.batch_proof.certificate.batch.certified_at_block,
+            )
         verify_recovery_quorum(admission, request.admission.signatures, self.policy)
         return RecoverableRosterParticipant(record=record, admission=request.admission), certificate
 

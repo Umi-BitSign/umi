@@ -6,6 +6,13 @@ from pydantic import Field, JsonValue, model_serializer, model_validator
 
 from .competition_cohort_direct_model_upload import SignedDirectModelUploadReservation
 from .competition_cohort_intake_records import RetainedCohortParticipation
+from .competition_cohort_model_batch import (
+    CertifiedModelAcceptanceBatch,
+    ModelAcceptanceBatchProof,
+    model_acceptance_batch_proofs,
+    verify_model_acceptance_batch,
+    verify_model_acceptance_batch_proof,
+)
 from .competition_cohort_model_transport import verify_direct_model_transport
 from .competition_cohort_participation import AttestedCohortParticipantAdmission
 from .competition_cohort_recovery import Block, ModelRewardCohortAuthority, verify_recovery_quorum
@@ -71,7 +78,60 @@ class ModelArtifactAcceptance(StrictProtocolModel):
 
 class CertifiedModelArtifactAcceptance(StrictProtocolModel):
     acceptance: ModelArtifactAcceptance
-    signatures: Annotated[tuple[Signature, ...], Field(min_length=1, max_length=64)]
+    signatures: Annotated[tuple[Signature, ...], Field(max_length=64)] = ()
+    batch_proof: ModelAcceptanceBatchProof | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_certificate(self, handler):
+        value = handler(self)
+        if self.batch_proof is None:
+            value.pop("batch_proof", None)
+        elif not self.signatures:
+            value.pop("signatures", None)
+        return value
+
+    @model_validator(mode="after")
+    def exactly_one_proof(self):
+        if bool(self.signatures) == (self.batch_proof is not None):
+            raise ValueError("model acceptance requires exactly one individual or batch proof")
+        return self
+
+
+class ModelAcceptanceBatchManifest(StrictProtocolModel):
+    schema_: Literal["umi-cohort-model-acceptance-manifest/1"] = Field(alias="schema")
+    certificate: CertifiedModelAcceptanceBatch
+    acceptances: Annotated[tuple[ModelArtifactAcceptance, ...], Field(max_length=512)]
+
+    @model_validator(mode="after")
+    def exact_manifest(self):
+        if tuple(a.submission_sha256 for a in self.acceptances) != tuple(
+            sorted(a.submission_sha256 for a in self.acceptances)
+        ):
+            raise ValueError("model acceptance manifest must use canonical submission order")
+        model_acceptance_batch_proofs(self.acceptances, self.certificate)
+        return self
+
+
+def model_acceptance_batch_certificates(manifest):
+    """Project actual membership evidence; no per-model signature is implied."""
+    manifest = ModelAcceptanceBatchManifest.model_validate_json(canonical_json_bytes(manifest))
+    proofs = model_acceptance_batch_proofs(manifest.acceptances, manifest.certificate)
+    return tuple(
+        CertifiedModelArtifactAcceptance(acceptance=acceptance, batch_proof=proof)
+        for acceptance, proof in zip(manifest.acceptances, proofs, strict=True)
+    )
+
+
+def verify_model_acceptance_batch_manifest(manifest, history, policy, *, maximum_block):
+    """Verify complete artifact scope; roster completeness remains the owner's check."""
+    manifest = ModelAcceptanceBatchManifest.model_validate_json(canonical_json_bytes(manifest))
+    verify_model_acceptance_batch(
+        manifest.certificate, history, policy, maximum_block=maximum_block
+    )
+    signers = {identity(s.hotkey) for s in manifest.certificate.signatures}
+    if any(identity(a.recipient_hotkey) in signers for a in manifest.acceptances):
+        raise ValueError("model submitters cannot certify their own batch membership")
+    return manifest
 
 
 class ModelArtifactReviewInputs(StrictProtocolModel):
@@ -169,8 +229,16 @@ def verify_model_acceptance_body(a, record, history, policy, *, maximum_block):
 
 
 def verify_model_acceptance(certificate, record, history, policy, *, maximum_block):
+    certificate = CertifiedModelArtifactAcceptance.model_validate_json(
+        canonical_json_bytes(certificate)
+    )
     a = certificate.acceptance
     verify_model_acceptance_body(a, record, history, policy, maximum_block=maximum_block)
+    if certificate.batch_proof is not None:
+        verify_model_acceptance_batch_proof(
+            a, certificate.batch_proof, history, policy, maximum_block=maximum_block
+        )
+        return
     verify_recovery_quorum(a, certificate.signatures, policy)
     if identity(a.recipient_hotkey) in {identity(s.hotkey) for s in certificate.signatures}:
         raise ValueError("model submitters cannot certify their own artifact acceptance")
