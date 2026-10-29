@@ -2,7 +2,7 @@
 
 import asyncio
 from collections import Counter
-from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 
 from .competition_cohort_public_progress import execution_job_scope
@@ -118,7 +118,7 @@ class ParallelModelCache:
             raise OSError("selected model exceeds the bounded boot cache")
         if before_reserve is not None:
             await before_reserve()
-        async with self._reserve_pair(job, plans, budget, sizes, runtime_options) as exclusive:
+        async with self._reserve_pair(job, plans, budget, sizes) as exclusive:
             if not exclusive:
                 async with self.admission.hold(job.runtime, preparation=True, **runtime_options):
                     selected = []
@@ -149,43 +149,33 @@ class ParallelModelCache:
         return exclusive
 
     @asynccontextmanager
-    async def _reserve_pair(self, job, plans, budget, sizes, runtime_options):
+    async def _reserve_pair(self, job, plans, budget, sizes):
         key = digest(job)
-        async with AsyncExitStack() as ownership:
-            with TransferProgress("model_pair_queue", 1, unit="jobs") as progress:
-                while True:
-                    async with self.condition:
-                        exclusive = await self._selection(plans, budget, sizes)
-                        if exclusive is None:
-                            progress.emit("waiting", reason="resident_model_working_set")
-                            await self._capacity_changed()
-                            continue
-                    async with AsyncExitStack() as candidate:
-                        await candidate.enter_async_context(
-                            self.admission.hold(job.runtime, exclusive=exclusive, **runtime_options)
-                        )
-                        async with self.condition:
-                            # Hardware admission may have waited while peers or
-                            # disk usage changed. A non-fitting waiter releases
-                            # its token so a smaller ready pair can use it.
-                            if await self._selection(plans, budget, sizes) != exclusive:
-                                continue
-                            if key in self.pairs:
-                                raise ValueError("paired job already owns resident capacity")
-                            self.pairs[key] = plans
-                            self.exclusive = exclusive
-                            self.pins.update(p.identity for p in plans.values() if p)
-                        ownership.push_async_callback(candidate.pop_all().aclose)
-                        progress.advance(1)
-                        break
-            # Queue diagnostics complete now; only hardware/cache ownership
-            # continues throughout the model execution.
-            completed = False
-            try:
-                yield exclusive
-                completed = True
-            finally:
-                await self._release_pair(key, plans, completed)
+        with TransferProgress("model_pair_queue", 1, unit="jobs") as progress:
+            while True:
+                async with self.condition:
+                    exclusive = await self._selection(plans, budget, sizes)
+                    if exclusive is None:
+                        progress.emit("waiting", reason="resident_model_working_set")
+                        await self._capacity_changed()
+                        continue
+                    if key in self.pairs:
+                        raise ValueError("paired job already owns resident capacity")
+                    self.pairs[key] = plans
+                    self.exclusive = exclusive
+                    self.pins.update(p.identity for p in plans.values() if p)
+                    progress.advance(1)
+                    break
+        # Pairs own disk residency only. Native invocation admission follows
+        # preparation and ends after container cleanup, before another swap.
+        # Holding model-memory slots here lets idle pairs exhaust the headroom
+        # their preparation needs, preventing every owner from reaching work.
+        completed = False
+        try:
+            yield exclusive
+            completed = True
+        finally:
+            await self._release_pair(key, plans, completed)
 
     async def _release_pair(self, key, plans, completed):
         async def release():

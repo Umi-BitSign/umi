@@ -1,6 +1,7 @@
 """Real file leases across independent owners, with synthetic memory readings."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -45,6 +46,7 @@ def capacity(provisioned, monkeypatch):
         schema="umi-host-model-execution-admission/1",
         minimum_available_bytes=4 * 1024**3,
         incremental_budget_bytes=17 * 1024**3,
+        background_reservation_bytes=2 * 1024**3,
         protocol_policy_sha256=digest(policy),
         evaluation_runtime_sha256=digest(runtime),
         container_cgroup_roots=("/sys/fs/cgroup/umi-isolated-test-absent",),
@@ -102,7 +104,7 @@ def test_later_grants_charge_busy_signed_reservations(capacity, monkeypatch):
     single.close()
 
 
-async def test_nested_native_invocation_keeps_its_pair_lease(capacity):
+async def test_nested_native_invocation_keeps_its_explicit_lease(capacity):
     a = capacity.start()
     async with a.hold(capacity.runtime, exclusive=True), a.invocation(capacity.runtime):
         assert a.controller.try_acquire_group("transient", 1) is None
@@ -130,6 +132,37 @@ async def test_cancelled_waiter_never_claims_released_slots(capacity):
     held = a.controller.try_acquire_group("transient", 2)
     assert held
     held.close()
+
+
+@pytest.mark.parametrize("preparation", [False, True])
+async def test_capacity_wait_identifies_preparation_or_invocation(
+    capacity, monkeypatch, caplog, preparation
+):
+    caplog.set_level("INFO", logger="umi.competition.progress")
+    a = capacity.start()
+    monkeypatch.setattr(native, "_available_memory", lambda: 0)
+
+    async def waiting():
+        async with a.hold(capacity.runtime, preparation=preparation):
+            pytest.fail("unavailable memory cannot admit work")
+
+    task = asyncio.create_task(waiting())
+    try:
+        await asyncio.sleep(0)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    waits = [
+        event
+        for record in caplog.records
+        if record.name == "umi.competition.progress"
+        if (event := json.loads(record.message))["status"] == "waiting"
+    ]
+    assert len(waits) == 1
+    assert waits[0]["reason_code"] == (
+        "host_model_preparation_capacity" if preparation else "host_model_invocation_capacity"
+    )
 
 
 def test_changed_runtime_cannot_borrow_a_smaller_reservation(capacity):

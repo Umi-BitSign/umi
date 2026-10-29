@@ -14,12 +14,20 @@ from umi.open_competition import digest
 from umi.private_files import ensure_private_directory
 from umi.protocol import StrictProtocolModel
 
+from .test_host_memory_admission import provisioned as provisioned
+from .test_host_model_execution import Runtime
+from .test_host_model_execution import capacity as capacity
 from .test_open_competition import bundle_at
 
 
 class Job(StrictProtocolModel):
     name: str
     runtime: str = "inert"
+
+
+class ExecutionJob(StrictProtocolModel):
+    name: str
+    runtime: Runtime
 
 
 class Capacity:
@@ -139,7 +147,8 @@ async def test_source_reservation_callback_precedes_capacity_and_materialization
 
     async with s.helper.scope(Job(name="a"), before_reserve=before_reserve):
         assert callbacks == ["reserved"]
-        assert s.admission.active == 1 and sorted(s.calls) == ["a", "reference"]
+        assert s.admission.active == 0 and sorted(s.calls) == ["a", "reference"]
+        assert len(s.helper.pairs) == 1
     assert s.admission.active == 0 and not s.helper.pairs
 
 
@@ -197,7 +206,8 @@ async def test_two_pairs_share_reference_and_keep_ready_reads_off_the_transfer_l
     third = None
     try:
         await asyncio.wait_for(asyncio.gather(entered["a"].wait(), entered["b"].wait()), 3)
-        assert s.admission.active == 2 and sorted(s.calls) == ["a", "b", "reference"]
+        assert s.admission.active == 0 and sorted(s.calls) == ["a", "b", "reference"]
+        assert len(s.helper.pairs) == 2
         assert sum(s.helper.readers.values()) == 2
         s.block.clear()
         third = asyncio.create_task(pair(c, c_exit))
@@ -290,7 +300,7 @@ async def test_large_pair_keeps_exclusive_single_model_fallback(cache, monkeypat
 
         monkeypatch.setattr(space.shutil, "disk_usage", usage)
     async with s.helper.scope(job):
-        assert s.helper.exclusive and s.admission.active == 2 and s.calls == []
+        assert s.helper.exclusive and s.admission.active == 0 and s.calls == []
         candidate = s.helper.plan(job, "candidate")
         reference = s.helper.plan(job, "incumbent")
         first = await s.helper.acquire(candidate, job.runtime)
@@ -415,10 +425,12 @@ async def test_nonfitting_pair_does_not_block_a_smaller_ready_pair(cache, monkey
         await asyncio.wait_for(entered["a"].wait(), 3)
         tasks.append(asyncio.create_task(pair("b")))
         await asyncio.sleep(0.05)
-        assert s.admission.active == 1 and not entered["b"].is_set()
+        assert s.admission.active == 0 and not entered["b"].is_set()
+        assert len(s.helper.pairs) == 1
         tasks.append(asyncio.create_task(pair("c")))
         await asyncio.wait_for(entered["c"].wait(), 3)
-        assert not entered["b"].is_set() and s.admission.active == 2
+        assert not entered["b"].is_set() and s.admission.active == 0
+        assert len(s.helper.pairs) == 2
         assert sorted(s.calls) == ["a", "c", "reference"]
     finally:
         stop.set()
@@ -443,7 +455,174 @@ async def test_cancelled_transfer_keeps_other_pairs_readable(cache):
             with pytest.raises(asyncio.CancelledError):
                 await pending
             assert (path / digest(plan.bundle) / "model").is_dir()
-            assert s.admission.active == 1 and s.helper.readers[path] == 1
+            assert s.admission.active == 0 and s.helper.readers[path] == 1
         finally:
             s.block.set()
             await s.helper.release(path)
+
+
+async def test_real_admission_prepares_two_pairs_then_runs_with_2034_gib(
+    cache, capacity, monkeypatch
+):
+    from umi import host_memory_admission as native
+
+    s, admission = cache, capacity.start()
+    s.helper = ParallelModelCache(s.port, admission, 2)
+    # Reproduce the old hold-and-wait envelope with actual root-bound leases:
+    # 2 * 8 GiB model slots + 1 GiB preparation + 4 GiB reserve + 2 GiB background.
+    first = admission.controller.try_acquire_group("transient", 1)
+    second = admission.controller.try_acquire_group("transient", 1)
+    assert first and second
+    monkeypatch.setattr(native, "_available_memory", lambda: 21_332_116 * 1024)
+    try:
+        assert admission.controller.try_acquire_group("owner_export", 1) is None
+    finally:
+        first.close()
+        second.close()
+
+    prepared, invoked = asyncio.Queue(), asyncio.Queue()
+    begin = asyncio.Event()
+    finished = {name: asyncio.Event() for name in ("a", "b")}
+    active = 0
+
+    async def pair(name):
+        nonlocal active
+        job = ExecutionJob(name=name, runtime=capacity.runtime)
+        async with s.helper.scope(job):
+            await prepared.put(name)
+            await begin.wait()
+            path = await s.helper.acquire(s.helper.plan(job, "candidate"), job.runtime)
+            try:
+                async with admission.invocation(job.runtime):
+                    active += 1
+                    try:
+                        assert active == 1
+                        assert admission.controller.try_acquire_group("transient", 1) is None
+                        await invoked.put(name)
+                        await finished[name].wait()
+                    finally:
+                        active -= 1
+            finally:
+                await s.helper.release(path)
+
+    tasks = [asyncio.create_task(pair(name)) for name in ("a", "b")]
+    try:
+        assert set(await asyncio.wait_for(asyncio.gather(prepared.get(), prepared.get()), 5)) == {
+            "a",
+            "b",
+        }
+        assert len(s.helper.pairs) == 2 and sorted(s.calls) == ["a", "b", "reference"]
+        # Both resident pairs leave native slots unowned, so the feasible
+        # single-model-plus-preparation envelope still has its full headroom.
+        model = admission.controller.try_acquire_group("transient", 1)
+        assert model
+        try:
+            preparation = admission.controller.try_acquire_group("owner_export", 1)
+            assert preparation
+            preparation.close()
+        finally:
+            model.close()
+        begin.set()
+        first_name = await asyncio.wait_for(invoked.get(), 5)
+        await asyncio.sleep(0)
+        assert invoked.empty()
+        finished[first_name].set()
+        second_name = await asyncio.wait_for(invoked.get(), 5)
+        assert first_name != second_name
+        finished[second_name].set()
+        await asyncio.wait_for(asyncio.gather(*tasks), 5)
+    finally:
+        begin.set()
+        for event in finished.values():
+            event.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    assert not s.helper.pairs and not any(s.helper.readers.values())
+
+
+async def test_real_admission_exclusive_swaps_release_native_slots_between_models(
+    cache, capacity, monkeypatch
+):
+    from umi import host_memory_admission as native
+
+    s, admission = cache, capacity.start()
+    s.helper = ParallelModelCache(s.port, admission, 2)
+    for name in ("a", "reference"):
+        bundle = s.bundles[name]
+        s.bundles[name] = bundle.model_copy(
+            update={
+                "files": tuple(
+                    f.model_copy(update={"size_bytes": 4 * 1024**2}) if f.role == "weights" else f
+                    for f in bundle.files
+                )
+            }
+        )
+    s.port.boot = s.port.boot.model_copy(update={"maximum_allocated_bytes": 6 * 1024**2})
+    monkeypatch.setattr(native, "_available_memory", lambda: 21_332_116 * 1024)
+    job = ExecutionJob(name="a", runtime=capacity.runtime)
+
+    async def run():
+        async with s.helper.scope(job):
+            assert s.helper.exclusive
+            for role in ("candidate", "incumbent"):
+                plan = s.helper.plan(job, role)
+                path = await s.helper.acquire(plan, job.runtime)
+                try:
+                    async with admission.invocation(job.runtime):
+                        assert (path / digest(plan.bundle) / "model").is_dir()
+                        assert admission.controller.try_acquire_group("transient", 1) is None
+                finally:
+                    await s.helper.release(path)
+                # A completed invocation has released its capacity even while
+                # the pair still owns the exclusive single-model swap path.
+                available = admission.controller.try_acquire_group("transient", 1)
+                assert available
+                available.close()
+
+    await asyncio.wait_for(run(), 5)
+    assert sorted(s.calls) == ["a", "reference"]
+    assert not s.helper.pairs and not s.helper.exclusive and not any(s.helper.readers.values())
+
+
+async def test_cancelled_native_waiter_releases_readers_and_reuses_prepared_models(
+    cache, capacity, monkeypatch
+):
+    from umi import host_memory_admission as native
+
+    s, admission = cache, capacity.start()
+    s.helper = ParallelModelCache(s.port, admission, 2)
+    monkeypatch.setattr(native, "_available_memory", lambda: 13 * 1024**3)
+    job = ExecutionJob(name="a", runtime=capacity.runtime)
+    reading = asyncio.Event()
+
+    async def waiting():
+        async with s.helper.scope(job):
+            path = await s.helper.acquire(s.helper.plan(job, "candidate"), job.runtime)
+            try:
+                reading.set()
+                async with admission.invocation(job.runtime):
+                    pytest.fail("native memory reserve is unavailable")
+            finally:
+                await s.helper.release(path)
+
+    task = asyncio.create_task(waiting())
+    try:
+        await asyncio.wait_for(reading.wait(), 5)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert not s.helper.pairs and not any(s.helper.readers.values())
+    assert not any(s.helper.pins.values())
+    assert sorted(s.calls) == ["a", "reference"]
+    before = list(s.calls)
+    monkeypatch.setattr(native, "_available_memory", lambda: 21_332_116 * 1024)
+    s.port.slot_identities.clear()
+    restarted = ParallelModelCache(s.port, admission, 2)
+    async with restarted.scope(job), admission.invocation(job.runtime):
+        assert s.calls == before
+    available = admission.controller.try_acquire_group("transient", 1)
+    assert available
+    available.close()

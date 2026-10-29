@@ -126,7 +126,14 @@ class ModelExecutionAdmission:
                     break
                 now = time.monotonic()
                 if last_wait is None or now - last_wait >= 10:
-                    progress.emit("waiting", reason="host_model_execution_capacity")
+                    progress.emit(
+                        "waiting",
+                        reason=(
+                            "host_model_preparation_capacity"
+                            if preparation
+                            else "host_model_invocation_capacity"
+                        ),
+                    )
                     last_wait = now
                 await asyncio.sleep(0.5)
             progress.advance(count)
