@@ -734,6 +734,13 @@ reruns would be identical. Failures remain failures, and an unfinished source
 holds its consumers. Started legacy jobs keep their original recovery path and
 cannot be retroactively selected as the source.
 
+Consumers waiting for that fixed source defer before reserving model-cache,
+preparation or inference capacity. This leaves capacity available when an
+interrupted source resumes its saved steps. The scheduling check grants no
+execution authority: the normal current-history, source and reuse checks still
+apply before inference. A missing or damaged selected source requires repair;
+waiting never replaces it or repeats completed source inference.
+
 Shared evidence, execution archives and partial manifests use `/2`, explicitly
 referencing the original signed source terminal and the original reservation and
 reuse observations. Readers authenticate the source assignment and participation,

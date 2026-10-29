@@ -17,6 +17,7 @@ from .competition_cohort_execution_journal import (
     CohortExecutionAssignment,
     CohortExecutionAttempt,
     CohortExecutionJournal,
+    IncumbentSourcePending,
     step_count,
 )
 from .competition_cohort_order_inbox import CohortOrderInbox
@@ -223,12 +224,35 @@ class CohortExecutor(CohortExecutionAuthority):
         if evidence is not None:
             return evidence
         job = await self._journal_progress(assignment, self.journal.validate_assignment, assignment)
+        scope_options = {}
+        if job.mode == "paired_model" and job.incumbent_observation_mode is not None:
+            status = getattr(self.journal, "incumbent_source_status", None)
+            if status is None:
+                raise RuntimeError("shared incumbent scheduling requires its journal reader")
+            readiness = await self._journal_progress(job, status, slot, job)
+            if readiness == "pending":
+                raise IncumbentSourcePending("shared incumbent source remains unfinished")
+            if readiness == "unselected":
+                # The first source uses the ordinary authenticated reservation
+                # before any model resources. Supported caches first check their
+                # source plans and fixed size bounds, without acquiring capacity.
+                async def before_reserve():
+                    with self.journal.locked(slot):
+                        await self._prepare_current(assignment, slot)
+
+                if getattr(self.sandbox, "execution_scope_before_reserve", False):
+                    scope_options["before_reserve"] = before_reserve
+                else:
+                    # Legacy/simple scopes have no pre-reservation cache checks.
+                    await before_reserve()
+            elif readiness != "ready":
+                raise RuntimeError("shared incumbent scheduling status is invalid")
         scope_input = (
             job
             if getattr(self.sandbox, "prepared_execution_scope", False)
             else (assignment.certificate.order)
         )
-        async with scope(scope_input) as enabled:
+        async with scope(scope_input, **scope_options) as enabled:
             if not enabled:
                 return await self.advance(assignment)
             total = step_count(job)
@@ -272,6 +296,14 @@ class CohortExecutor(CohortExecutionAuthority):
             return await run_owned_thread(self.journal.evidence, slot)
         return None
 
+    async def _prepare_current(self, assignment, slot):
+        source, started = await self.current(assignment)
+        job = await self._journal_progress(
+            assignment, self.journal.retain, assignment, source, started.block
+        )
+        shared = await self._journal_progress(job, self.journal.reuse_incumbent, slot, job, started)
+        return job, source, started, shared
+
     async def advance(
         self, assignment: CohortExecutionAssignment
     ) -> RecoverableExecutionEvidence | None:
@@ -287,13 +319,7 @@ class CohortExecutor(CohortExecutionAuthority):
             evidence = await self._completed(assignment, slot)
             if evidence is not None:
                 return evidence
-            source, started = await self.current(assignment)
-            job = await self._journal_progress(
-                assignment, self.journal.retain, assignment, source, started.block
-            )
-            shared = await self._journal_progress(
-                job, self.journal.reuse_incumbent, slot, job, started
-            )
+            job, source, started, shared = await self._prepare_current(assignment, slot)
             if shared is not None:
                 return shared
             with review_scope("execution_journal", job.round.cohort_sha256, reads=0):
@@ -488,6 +514,8 @@ class CohortExecutionWorker:
                 advance = getattr(self.executor, "advance_batch", self.executor.advance)
                 result = await advance(assignment)
                 return slot, "complete" if result is not None else "progress", ""
+            except IncumbentSourcePending:
+                return slot, "deferred", "incumbent_source_pending"
             except (
                 OSError,
                 ValueError,
