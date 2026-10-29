@@ -1,16 +1,13 @@
 """Record an exact operator release without stopping the recurring owner."""
 
-from pathlib import Path
-
+from .competition_reward_operator_signing import sign_operator_approval
 from .competition_reward_transition_controls import (
     RewardTransitionApproval,
     RewardTransitionControlReader,
-    SignedRewardTransitionApproval,
     approval_path,
     publish_reward_transition_approval,
 )
-from .named_hotkey import load_named_hotkey
-from .open_competition import digest, sign_object
+from .open_competition import digest
 
 
 def approve_successor(config, *, predecessor, cohort, package, reason):
@@ -38,8 +35,9 @@ def approve_successor(config, *, predecessor, cohort, package, reason):
             raise ValueError("successor approval already retains a different exact request")
         path = approval_path(config.reward_transition, cohort, package)
     else:
-        key = load_named_hotkey(Path(config.control_key_file), config.series.control_hotkey)
-        signed = SignedRewardTransitionApproval(approval=body, signature=sign_object(body, key))
+        signed = sign_operator_approval(config, body)
+        if controls.held(cohort):
+            raise ValueError("successor progression became explicitly held during approval")
         path = publish_reward_transition_approval(
             config.reward_transition, signed, series=config.series
         )
