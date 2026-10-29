@@ -13,7 +13,7 @@ import os
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import AsyncExitStack, suppress
+from contextlib import AsyncExitStack
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
@@ -723,6 +723,10 @@ class ServiceAdmissionHost:
             async def sign(body):
                 return await run_owned_thread(sign_object, body, direct_signer_key)
 
+            def object_ready(cohort):
+                self.direct_uploads.mark_pending(cohort)
+                intake.readiness_wakes.notify("direct_uploads")
+
             owners = {}
             for plan in c.series.cohorts:
                 if plan.eligible_tracks is not None and "model" not in plan.eligible_tracks:
@@ -757,6 +761,10 @@ class ServiceAdmissionHost:
                     selection_context=intake.direct_upload_selection_context,
                     selection_authority=intake.direct_upload_selection_authority,
                     participation_ready=queue_ready_participation,
+                    continuation_ready=lambda: intake.readiness_wakes.notify(
+                        "reserved_participation"
+                    ),
+                    object_ready=object_ready,
                 )
             self.direct_uploads = DirectModelUploadOwners(
                 owners,
@@ -1221,11 +1229,18 @@ class ServiceAdmissionHost:
                         raise RuntimeError("service reconciliation exited before shutdown")
 
     async def _poll_component(self, stop, component, callback):
+        with self.intake.readiness_wakes.subscribe(component) as wake:
+            await self._poll_component_wake(stop, component, callback, wake)
+
+    async def _poll_component_wake(self, stop, component, callback, wake):
         while not stop.is_set():
+            wake.begin()
             started = time.monotonic()
+            retrying = False
             try:
                 report = {**await callback(), "component": component}
             except (PrivateStateBusyError, DirectModelSelectionChanged) as error:
+                retrying = True
                 # A nonblocking journal mutex can be held by a concurrent
                 # request. Keep this reconciliation owner and its checkpoints;
                 # retry on the normal poll, without restarting all other work.
@@ -1250,6 +1265,7 @@ class ServiceAdmissionHost:
                     "retry_seconds": self.config.poll_seconds,
                     "certification_authority": False,
                 }
+            wake.finish(retrying=retrying)
+            report["readiness_wake"] = wake.snapshot()
             logger.info("cohort_service_admission %s", canonical_json_bytes(report).decode("ascii"))
-            with suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(stop.wait(), timeout=self.config.poll_seconds)
+            await wake.wait(stop, self.config.poll_seconds, retrying=retrying)

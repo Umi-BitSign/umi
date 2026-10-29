@@ -605,6 +605,13 @@ async def test_fenced_generation_rejects_capabilities_and_completion_before_repl
 
 @pytest.mark.asyncio
 async def test_completion_reconciles_lost_provider_response_and_is_idempotent(direct):
+    notifications = []
+
+    def ready(cohort):
+        assert direct.owner.journal.keys("direct-object")
+        notifications.append(cohort)
+
+    direct.owner.object_ready = ready
     reservation = await direct.owner.reserve(
         direct.request, direct.payload, now_unix_ms=1_800_000_000_000
     )
@@ -622,10 +629,13 @@ async def test_completion_reconciles_lost_provider_response_and_is_idempotent(di
     assert await direct.owner.complete(signed, now_unix_ms=1_800_000_011_000) == result
     assert len(direct.multipart.complete_calls) == 1
     direct.owner.require_payload(direct.request)
+    assert notifications == [direct.owner.config.cohort_sha256]
 
 
 @pytest.mark.asyncio
 async def test_reservation_reconciles_completed_object_after_owner_restart_boundary(direct):
+    notifications = []
+    direct.owner.object_ready = notifications.append
     reservation = await direct.owner.reserve(
         direct.request, direct.payload, now_unix_ms=1_800_000_000_000
     )
@@ -647,6 +657,7 @@ async def test_reservation_reconciles_completed_object_after_owner_restart_bound
     status = direct.owner.status(reservation_sha256)
     assert status.object_complete is True
     assert status.payload_verified is False
+    assert notifications == [direct.owner.config.cohort_sha256]
 
 
 @pytest.mark.asyncio

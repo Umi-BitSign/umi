@@ -46,8 +46,10 @@ def queue_ready_participation(owner, reservation):
     prior = owner.journal.get(_READY, upload)
     if prior is None:
         owner.journal.put(_READY, upload, expected)
+        return True
     elif prior != expected:
         raise ValueError("retained participation readiness differs; repair required")
+    return False
 
 
 class ReservedParticipationWorker:

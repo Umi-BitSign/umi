@@ -98,7 +98,19 @@ async def status(h):
 
 async def test_two_automatic_reviewers_publish_native_certificate_visible_to_miner(relay):
     h = relay
+    notifications = []
+
+    def notify(component):
+        if component == "models":
+            assert h.queue.certificate(h.cohort, h.consent) is not None
+        else:
+            assert h.queue.evidence(h.cohort, h.consent)
+        notifications.append(component)
+
+    h.intake.readiness_wakes.notify = notify
     receipt = await submit(h)
+    await submit(h)
+    assert notifications == ["admissions"]
     assert receipt.record_sha256 == digest(read_participation(h.raw))
     assert h.queue.evidence(h.cohort, h.consent) == (h.raw, h.archive.raw, h.archive.metadata)
     assert (await status(h)).status == "pending_attestation"
@@ -115,6 +127,7 @@ async def test_two_automatic_reviewers_publish_native_certificate_visible_to_min
     assert result.chain_submission_authorized is False
     assert (await h.reviewer("Charlie").poll_once())["votes_published"] == 0
     assert len(h.calls) == 2
+    assert notifications == ["admissions", "models"]
 
 
 async def test_admission_reads_progress_during_writer_and_see_new_certificate(relay):
@@ -227,6 +240,8 @@ async def test_api_retries_original_archive_without_requiring_new_capture(relay,
 
 async def test_archive_capacity_failure_is_atomic_and_can_be_enlarged(relay):
     h = relay
+    notifications = []
+    h.intake.readiness_wakes.notify = notifications.append
     h.intake.capacity = AdmissionCapacity(
         maximum_bytes=len(h.raw) + len(h.archive.raw) + len(h.archive.metadata) - 1
     )
@@ -234,8 +249,10 @@ async def test_archive_capacity_failure_is_atomic_and_can_be_enlarged(relay):
         h.queue.attach_evidence(h.cohort, h.consent, h.archive.raw, h.archive.metadata)
     with h.queue._connection() as (db, _):
         assert db.execute("SELECT COUNT(*) FROM cohort_admission_artifacts").fetchone()[0] == 0
+    assert notifications == []
     h.intake.capacity = AdmissionCapacity()
     assert (await submit(h)).proposed_admission == h.receipt.proposed_admission
+    assert notifications == ["admissions"]
 
 
 @pytest.mark.parametrize("failure", ["artifact", "vote", "certificate"])
@@ -403,6 +420,8 @@ async def test_public_client_rejects_wrong_certificate_or_scope(relay, failure):
 async def test_certificate_commit_failure_rolls_back_vote_and_reuses_signature(relay):
     h = relay
     await submit(h)
+    notifications = []
+    h.intake.readiness_wakes.notify = notifications.append
     await h.reviewer("Charlie").poll_once()
     with h.queue._connection() as (db, _):
         db.execute(
@@ -411,12 +430,14 @@ async def test_certificate_commit_failure_rolls_back_vote_and_reuses_signature(r
         )
     assert (await h.reviewer("Dave").poll_once())["retry_count"] == 1
     assert len(h.calls) == 2
+    assert notifications == []
     with h.queue._connection() as (db, _):
         assert db.execute("SELECT COUNT(*) FROM cohort_admission_votes").fetchone()[0] == 1
         assert db.execute("SELECT COUNT(*) FROM cohort_admission_certificates").fetchone()[0] == 0
         db.execute("DROP TRIGGER deny_certificate")
     assert (await h.reviewer("Dave").poll_once())["certificates_published"] == 1
     assert len(h.calls) == 2
+    assert notifications == ["models"]
 
 
 def second_request(h, scenario):
@@ -435,6 +456,56 @@ def second_request(h, scenario):
             signature=sign_object(body, wallet("Bob")),
         ),
     )
+
+
+async def test_new_consent_with_shared_archive_wakes_once_despite_concurrent_retry(relay, scenario):
+    from umi.competition_cohort_participation_delivery import ParticipationDelivery
+
+    h = relay
+    await submit(h)
+    second = second_request(h, scenario)
+    notifications = []
+    h.intake.readiness_wakes.notify = notifications.append
+    captures = 0
+    both = asyncio.Event()
+
+    async def capture():
+        nonlocal captures
+        captures += 1
+        if captures == 2:
+            both.set()
+        await both.wait()
+        return h.archive.capture
+
+    archive = AsyncMock(side_effect=AssertionError("shared proof must be reused"))
+    delivery = ParticipationDelivery(h.intake, capture, archive=archive)
+    first, retry = await asyncio.wait_for(
+        asyncio.gather(delivery.retain(second), delivery.retain(second)), 30
+    )
+    assert first == retry
+    assert notifications == ["admissions"]
+    assert await delivery.retain(second) == first
+    assert notifications == ["admissions"]
+    assert captures == 2
+    archive.assert_not_called()
+
+
+async def test_new_consent_and_new_evidence_emit_one_readiness_hint(relay, scenario):
+    from umi.competition_cohort_participation_delivery import ParticipationDelivery
+
+    h = relay
+    second = second_request(h, scenario)
+    notifications = []
+    h.intake.readiness_wakes.notify = notifications.append
+    archive = AsyncMock(return_value=(h.archive.raw, h.archive.metadata))
+    delivery = ParticipationDelivery(
+        h.intake, AsyncMock(return_value=h.archive.capture), archive=archive
+    )
+    receipt = await delivery.retain(second)
+    assert notifications == ["admissions"]
+    assert await delivery.retain(second) == receipt
+    assert notifications == ["admissions"]
+    archive.assert_awaited_once()
 
 
 async def test_missing_archive_does_not_starve_later_record_and_is_retried(relay, scenario):
