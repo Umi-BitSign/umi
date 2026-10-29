@@ -459,6 +459,19 @@ configuration. Complete these checks in order:
    No pair retains native memory slots while waiting to prepare a model.
    Configure only the number of model slots qualified for the host's memory.
 
+   The supported retained CPU runner can bind its active invocation lease to
+   the full container ID from its own private Podman CID file. It confirms the
+   exact container ID/name and reported cgroup, then admission verifies the
+   selected kernel cgroup identity. Only that process-local live acquisition
+   can credit a matching container ceiling already covered by its held slot;
+   PID similarity, name prefixes and low observed RSS do not establish ownership.
+   Unknown, unbound, foreign-process and orphan containers retain their full
+   charges. CID discovery runs alongside inference without extending its signed
+   deadline or changing evidence. Missing ownership evidence leaves conservative
+   accounting in place. The lease remains held through cleanup; failed cleanup
+   clears the binding so a surviving container is fully charged. Standalone CPU,
+   MPS and older callers keep their existing optional-admission behavior.
+
    Admitted pairs share one reference materialization, pin active model bytes,
    and project the complete resident working set before transfer. Resident reads
    can continue while another pair downloads. A pair larger than the bounded

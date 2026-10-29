@@ -16,6 +16,7 @@ import json
 import os
 import re
 import stat
+import weakref
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
@@ -191,6 +192,53 @@ def _available_memory() -> int:
     raise AdmissionBindingError("host available memory could not be measured")
 
 
+def _open_cgroup_directory(path: Path) -> int:
+    """Open an actual directory through no-link components, including its roots."""
+    descriptor = os.open("/", _DIRECTORY_FLAGS)
+    try:
+        for part in _absolute(str(path)).parts[1:]:
+            child = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _require_cgroup2(descriptor: int) -> None:
+    # Kernel mount metadata supplies the filesystem type without an FFI ABI or
+    # trusting similarly named files in an ordinary userspace directory.
+    with Path("/proc/self/mountinfo").open("rb") as stream:
+        raw = stream.read(1024**2 + 1)
+    if len(raw) > 1024**2:
+        raise AdmissionBindingError("kernel mount inventory exceeds its bound")
+    device = os.fstat(descriptor).st_dev
+    for line in raw.splitlines():
+        sides = line.split(b" - ", 1)
+        if len(sides) != 2:
+            continue
+        fields, filesystem = sides[0].split(), sides[1].split()
+        if len(fields) < 5 or not filesystem:
+            continue
+        if fields[4] == b"/sys/fs/cgroup" and filesystem[0] == b"cgroup2":
+            major, minor = (int(value) for value in fields[2].split(b":"))
+            if device == os.makedev(major, minor):
+                return
+    raise AdmissionBindingError("model container must use the selected kernel cgroup2 filesystem")
+
+
+def _cgroup_value(descriptor: int, name: str) -> str:
+    child = os.open(name, _FILE_FLAGS, dir_fd=descriptor)
+    try:
+        raw = os.read(child, 4097)
+        if not stat.S_ISREG(os.fstat(child).st_mode) or len(raw) > 4096:
+            raise AdmissionBindingError("native cgroup metadata exceeds its bound")
+        return raw.decode("ascii").strip()
+    finally:
+        os.close(child)
+
+
 def _read_policy(path: Path) -> bytes:
     parent = _open_directory(path.parent)
     descriptor = None
@@ -236,18 +284,27 @@ class HostMemoryLease:
         self._descriptor: int | None = descriptor
         self._group: tuple[int, ...] = tuple(group)
         self.slot = slot
+        self._creator_pid = os.getpid()
+        self._generation = object()
+        self._model_container = None
 
     @property
     def closed(self) -> bool:
         return self._descriptor is None
 
     def close(self) -> None:
+        self.clear_model_container()
         descriptor, self._descriptor = self._descriptor, None
         if descriptor is not None:
             os.close(descriptor)
         group, self._group = self._group, ()
         for descriptor in group:
             os.close(descriptor)
+
+    def clear_model_container(self) -> None:
+        binding, self._model_container = self._model_container, None
+        if binding is not None:
+            os.close(binding[2])
 
     def __del__(self):
         self.close()
@@ -283,6 +340,8 @@ class HostMemoryAdmission:
         else:
             self.policy = HostMemoryAdmissionPolicy.model_validate_json(raw)
         self.policy_sha256 = expected_sha256
+        self._model_leases = weakref.WeakSet()
+        self.last_model_admission = None
         if self.policy.host_identity_sha256 != _host_identity(host_identity_path):
             raise AdmissionBindingError("host admission policy belongs to another host")
         self._validate_all()
@@ -388,6 +447,7 @@ class HostMemoryAdmission:
             # against a stale memory sample. Measurements must qualify this
             # conservative admission envelope, including downstream owner work.
             pending = selected.reservation_bytes
+            busy = set()
             for slot in self.policy.slots:
                 if slot.name == selected.name:
                     continue
@@ -397,35 +457,109 @@ class HostMemoryAdmission:
                         fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     except BlockingIOError:
                         pending += slot.reservation_bytes
+                        busy.add((slot.device, slot.inode))
                 finally:
                     os.close(other)
-            if (
-                _available_memory()
-                < self.policy.minimum_available_bytes
+            containers = self._model_container_reservations(busy)
+            available = _available_memory()
+            required = (
+                self.policy.minimum_available_bytes
                 + pending
                 + self.policy.background_reservation_bytes
-                + self._model_container_reservations()
-            ):
+                + containers
+            )
+            if self.model_execution_stage:
+                self.last_model_admission.update(
+                    available_bytes=available,
+                    required_available_bytes=required,
+                    pending_reservation_bytes=pending,
+                    minimum_available_bytes=self.policy.minimum_available_bytes,
+                    background_reservation_bytes=self.policy.background_reservation_bytes,
+                    shortfall_bytes=max(0, required - available),
+                )
+            if available < required:
                 return None
             lease = HostMemoryLease(descriptor, selected)
+            if self.model_execution_stage:
+                self._model_leases.add(lease)
             descriptor = None
             return lease
         finally:
             if descriptor is not None:
                 os.close(descriptor)
 
-    def _model_container_reservations(self) -> int:
-        """Charge native ceilings too, including children of a dead reviewer.
+    def bind_model_container(self, lease, container_id: str, path: Path) -> bool:
+        """Bind only the trusted runner's exact CID to this live acquisition.
 
-        Rootless containers can outlive their caller in a separate systemd
-        scope. A released flock alone therefore never establishes free native
-        capacity. Count every populated selected container conservatively in
-        addition to still-held job reservations; do not infer it is accounted
-        from its current RSS or an owner's PID.
+        The runner first authenticates its own full container ID and name.
+        No ownership is inferred from a process ID, service account or RSS.
+        """
+        path = _absolute(str(path))
+        if (
+            not self.model_execution_stage
+            or lease not in self._model_leases
+            or lease.closed
+            or lease._creator_pid != os.getpid()
+            or lease.slot.lane != "transient"
+            or type(container_id) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", container_id) is None
+            or path.name != "container"
+            or path.parent.name != "libpod-" + container_id + ".scope"
+            or str(path.parent.parent) not in self.policy.container_cgroup_roots
+        ):
+            raise AdmissionBindingError("container binding differs from its live model acquisition")
+        descriptor = None
+        try:
+            descriptor = _open_cgroup_directory(path)
+            _require_cgroup2(descriptor)
+            events = dict(
+                line.split() for line in _cgroup_value(descriptor, "cgroup.events").splitlines()
+            )
+            if events.get("populated") != "1":
+                return False
+            limit = _cgroup_value(descriptor, "memory.max")
+            if not limit.isdecimal() or not 0 < int(limit) <= 1024**4:
+                raise AdmissionBindingError("native container has no bounded memory ceiling")
+            details = os.fstat(descriptor)
+            identity = (details.st_dev, details.st_ino)
+            existing = lease._model_container
+            if existing is not None:
+                if existing[:2] != (str(path), identity):
+                    raise AdmissionBindingError(
+                        "one model acquisition cannot cover another container"
+                    )
+                return True
+            if any(
+                other is not lease
+                and not other.closed
+                and other._creator_pid == os.getpid()
+                and other._model_container is not None
+                and other._model_container[1] == identity
+                for other in tuple(self._model_leases)
+            ):
+                raise AdmissionBindingError(
+                    "container already belongs to another model acquisition"
+                )
+            lease._model_container = (str(path), identity, descriptor, lease._generation)
+            descriptor = None
+            return True
+        except FileNotFoundError:
+            return False
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def _model_container_reservations(self, busy=()) -> int:
+        """Charge every ceiling; credit only a live local lease already counted.
+
+        Bindings disappear with their process and acquisition. Other processes,
+        old acquisitions and orphaned containers therefore remain fully charged.
+        A pending lease is never credited before its exact native binding exists.
         """
         if not self.model_execution_stage:
             return 0
-        total = 0
+        total = credit_total = count = 0
+        credited = set()
         for value in self.policy.container_cgroup_roots:
             root = Path(value)
             try:
@@ -439,22 +573,67 @@ class HostMemoryAdmission:
                     continue
                 target = entry / "container"
                 try:
-                    if entry.is_symlink() or target.is_symlink():
-                        raise AdmissionBindingError("native container cgroup changed its identity")
-                    events = dict(
-                        line.split() for line in (target / "cgroup.events").read_text().splitlines()
-                    )
-                    if events.get("populated") != "1":
-                        continue
-                    limit = (target / "memory.max").read_text().strip()
-                    if not limit.isdecimal() or not 0 < int(limit) <= 1024**4:
-                        raise AdmissionBindingError(
-                            "native container has no bounded memory ceiling"
+                    descriptor = _open_cgroup_directory(target)
+                    try:
+                        _require_cgroup2(descriptor)
+                        events = dict(
+                            line.split()
+                            for line in _cgroup_value(descriptor, "cgroup.events").splitlines()
                         )
-                    total += int(limit)
+                        if events.get("populated") != "1":
+                            continue
+                        limit = _cgroup_value(descriptor, "memory.max")
+                        if not limit.isdecimal() or not 0 < int(limit) <= 1024**4:
+                            raise AdmissionBindingError(
+                                "native container has no bounded memory ceiling"
+                            )
+                        ceiling, credit = int(limit), 0
+                        details = os.fstat(descriptor)
+                        identity = (details.st_dev, details.st_ino)
+                        for lease in tuple(self._model_leases):
+                            binding = lease._model_container
+                            if (
+                                lease not in credited
+                                and not lease.closed
+                                and lease._creator_pid == os.getpid()
+                                and (lease.slot.device, lease.slot.inode) in busy
+                                and binding is not None
+                                and binding[:2] == (str(target), identity)
+                                and binding[3] is lease._generation
+                            ):
+                                lease_descriptor = lease._descriptor
+                                try:
+                                    held = os.fstat(binding[2])
+                                    slot = os.fstat(lease_descriptor)
+                                except (OSError, TypeError):
+                                    # Cleanup may invalidate a copied witness.
+                                    # Uncertain ownership receives no credit.
+                                    continue
+                                if (
+                                    (held.st_dev, held.st_ino) == identity
+                                    and (slot.st_dev, slot.st_ino)
+                                    == (lease.slot.device, lease.slot.inode)
+                                    and lease._descriptor == lease_descriptor
+                                    and lease._model_container is binding
+                                    and binding[3] is lease._generation
+                                ):
+                                    credit = min(ceiling, lease.slot.reservation_bytes)
+                                    credited.add(lease)
+                                    break
+                        total += ceiling - credit
+                        credit_total += credit
+                        count += 1
+                    finally:
+                        os.close(descriptor)
                 except FileNotFoundError:
                     # A deleted scope cannot allocate another native byte.
                     continue
+        self.last_model_admission = dict(
+            populated_containers=count,
+            container_ceiling_bytes=total + credit_total,
+            owned_container_credit_bytes=credit_total,
+            unreserved_container_bytes=total,
+        )
         return total
 
     def try_acquire(
@@ -530,6 +709,7 @@ class HostMemoryAdmission:
         slots = tuple(slot for slot in self.policy.slots if slot.lane == lane)
         if type(count) is not int or not 1 <= count <= len(slots):
             raise ValueError("model execution slot count is outside its qualified capacity")
+        self.last_model_admission = None
         parent, transaction, leases = self._open_root(), None, []
         try:
             transaction = self._transaction(parent)
@@ -539,6 +719,8 @@ class HostMemoryAdmission:
                 lease = self._reserve(parent, slot)
                 if lease is not None:
                     leases.append(lease)
+                if self.last_model_admission is not None:
+                    self.last_model_admission["group_acquired_slots"] = len(leases)
                 if len(leases) == count:
                     result = leases.pop(0)
                     result._group = tuple(lease._descriptor for lease in leases)

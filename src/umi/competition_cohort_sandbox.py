@@ -95,7 +95,7 @@ class CohortCpuSandbox:
         )
         path = self._path(attempt)
 
-        async def execute():
+        async def execute(native_capacity=None):
             video = await run_owned_thread(
                 read_case_video, self.videos, case.video_sha256, job.runtime.maximum_video_bytes
             )
@@ -109,13 +109,16 @@ class CohortCpuSandbox:
                 video=video,
                 invocation_sha256=digest(attempt),
                 workspace=path,
+                **({} if native_capacity is None else {"native_capacity": native_capacity}),
                 **runtime_options,
             )
 
         if self.execution_admission is None:
             return await execute()
-        async with self.execution_admission.invocation(job.runtime, **runtime_options):
-            return await execute()
+        async with self.execution_admission.invocation(
+            job.runtime, **runtime_options
+        ) as native_capacity:
+            return await execute(native_capacity)
 
 
 def _direct_model_cache_path(workspace: Path, boot) -> Path:
