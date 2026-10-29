@@ -12,6 +12,44 @@ from umi.competition_cohort_public_progress import CohortProgressSnapshots
 C = "c" * 64
 
 
+def test_epoch_failure_diagnostics_are_cached_without_private_transport_details():
+    state = CohortProgressSnapshots()
+    diagnostics = dict(
+        rate_probe_status="timeout",
+        rate_probe_failure_type="http_read_timeout",
+        rate_probe_phase="http_body",
+        rate_probe_http_status=200,
+        rate_probe_attempts=3,
+        rate_probe_failures=1,
+        rate_probe_timeouts=1,
+        rate_probe_started_unix_ms=1000,
+        rate_probe_finished_unix_ms=4000,
+        rate_probe_elapsed_seconds=3.0,
+        rate_probe_queue_seconds=0.01,
+        rate_probe_http_seconds=2.99,
+        rate_probe_cache_age_seconds=5.0,
+        rate_probe_received_bytes=32,
+        rate_probe_in_flight=0,
+        rate_probe_coalesced_waiters=1,
+        rate_probe_counter_scope="observer_lifetime_all_peers_and_cohorts",
+        rate_probe_deadline_seconds=3,
+        rate_probe_deadline_overrun_seconds=0.0,
+    )
+    state.record(
+        "execution",
+        dict(
+            cohort_sha256=C,
+            **diagnostics,
+            rate_probe_origin="private-origin",
+            rate_probe_token="private-token",
+            rate_probe_error="private-error",
+        ),
+    )
+    snapshot = state.snapshot(C)["components"]["execution"]
+    assert {k: snapshot[k] for k in diagnostics} == diagnostics
+    assert "private-" not in str(snapshot)
+
+
 def test_progress_is_bounded_redacted_and_returns_independent_snapshots():
     state = CohortProgressSnapshots(maximum_cohorts=1)
     state.record(
