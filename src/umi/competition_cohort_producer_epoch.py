@@ -14,13 +14,13 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from .competition_cohort_execution_work import ExecutionWorkObservations, execution_work_routes
+from .competition_cohort_observation import observe_http
 from .competition_cohort_review_http import _credential
 from .competition_cohort_review_origin import private_review_origin
 from .competition_cohort_settlement_progress import (
     SettlementProgressObservations,
     settlement_progress_routes,
 )
-from .concurrency import wait_for_owned
 from .open_competition import identity
 from .protocol import canonical_json_bytes
 
@@ -200,7 +200,7 @@ class ExecutionProducerEpochs:
                 probe.update(status="unconfigured", failure_type="unconfigured")
             else:
                 origin, token = selected
-                value = await wait_for_owned(
+                value = await observe_http(
                     self._fetch(evaluator, origin, token, probe), timeout=_REFRESH_SECONDS
                 )
         except httpx.TimeoutException as error:

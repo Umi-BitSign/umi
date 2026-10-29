@@ -232,7 +232,11 @@ requires at least three new complete models over five minutes in the sampler's
 current session, assumes comparable remaining cost and steady export delivery,
 and excludes subsequent certification and rewards. Overall ETA remains separate.
 Authenticated reviewer-epoch probes use a separate bounded HTTP pool so long
-admission/review requests cannot consume their connections. Cached `rate_probe_*`
+admission/review requests cannot consume their connections, including on older
+lifecycle entry points. Epoch, work and settlement probes apply their deadlines
+through the HTTP transport's cancellation scopes and drain connection cleanup
+before releasing their slots. A cancelled or expired observation is not cached
+as a successful sample. Cached `rate_probe_*`
 fields report availability, numeric HTTP status, attempts, failures and timeouts.
 Concurrent observers share one refresh per peer. Additional cached diagnostics
 identify the failed phase and timeout type, queue and HTTP duration, response

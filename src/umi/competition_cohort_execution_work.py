@@ -17,6 +17,7 @@ from copy import deepcopy
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 
+from .competition_cohort_observation import observe_http
 from .competition_cohort_review_http import _credential
 from .protocol import canonical_json_bytes
 
@@ -186,7 +187,7 @@ class ExecutionWorkObservations:
                 result["stages"] = [aged_stage(s, now - old[0]) for s in result["stages"]]
                 return result
             try:
-                result = await asyncio.wait_for(self._fetch(evaluator, cohort, epoch), timeout=3)
+                result = await observe_http(self._fetch(evaluator, cohort, epoch), timeout=3)
             except (
                 httpx.HTTPError,
                 OSError,

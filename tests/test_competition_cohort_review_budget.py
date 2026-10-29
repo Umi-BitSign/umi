@@ -1,7 +1,7 @@
 """Host-only review allowances preserve supported layouts and durable bindings."""
 
 import json
-from contextlib import ExitStack
+from contextlib import AsyncExitStack
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -234,7 +234,9 @@ def test_owner_and_peer_preserve_legacy_canonical_bytes(selected, tmp_path):
 
 
 @pytest.mark.parametrize("use_budget", [False, True])
-def test_owner_export_is_independent_of_short_ordinary_peer_timeout(selected, tmp_path, use_budget):
+async def test_owner_export_is_independent_of_short_ordinary_peer_timeout(
+    selected, tmp_path, use_budget
+):
     config = selected.config
     budget = profile(config.policy) if use_budget else None
     owner = owner_config(selected, tmp_path, budget)
@@ -277,7 +279,7 @@ def test_owner_export_is_independent_of_short_ordinary_peer_timeout(selected, tm
         history=None,
     )
     credentials = ("private-reviewer-token" * 3,) * len(owner.reviewers)
-    with ExitStack() as resources:
+    async with AsyncExitStack() as resources:
         host = LifecycleHost(service, resources, None, credentials, None)
         assert host.readiness_timeout_seconds == 17
         assert host.timeout_seconds == (4000 if use_budget else 17)

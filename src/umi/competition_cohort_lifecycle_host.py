@@ -33,7 +33,7 @@ from .competition_cohort_phase_vote_http import PhaseVotePeer
 from .competition_cohort_preparation import PreparedCohortRound
 from .competition_cohort_preparation_phase import NativePreparationProgressSource
 from .competition_cohort_preparation_publisher import CohortPreparationPublisher
-from .competition_cohort_producer_epoch import ExecutionProducerEpochs
+from .competition_cohort_producer_epoch import ExecutionProducerEpochs, producer_epoch_client
 from .competition_cohort_progress_signer import CertifiedPhaseObserver
 from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
 from .competition_cohort_readiness import LiveIntakePhaseObserver
@@ -281,9 +281,12 @@ class LifecycleHost:
         self.last_reports = {}
         self.request_opening_clocks = {}
         self.execution_progress = {}
-        self.producer_epochs = ExecutionProducerEpochs(
-            client if epoch_client is None else epoch_client, owner.reviewers, credentials
-        )
+        if epoch_client is None:
+            # Older embedders omit the optional diagnostic client. Own the same
+            # isolated pool as current boot, never borrow a busy voting slot.
+            epoch_client = producer_epoch_client()
+            resources.push_async_callback(epoch_client.aclose)
+        self.producer_epochs = ExecutionProducerEpochs(epoch_client, owner.reviewers, credentials)
         # A request export can replay every retained service observation and
         # object in a cohort. Use the same operational budget as the configured
         # reviewers instead of cancelling that replay after a fixed 30 seconds.
