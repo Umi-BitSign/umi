@@ -323,6 +323,12 @@ class ModelBatchAcceptanceWorker:
         handled, reports = set(), []
         for binding in bindings:
             cohort = binding.cohort_sha256
+            # Prospective format selection must not suspend continuous scalar
+            # review during open intake. The existing authenticated deadline
+            # controls dispatch; final preparation still requires native drain.
+            admission = self.worker.owner.intake.admission_status(cohort)
+            if admission is None or admission["new_admissions_open"]:
+                continue
             try:
                 adoption = await run_owned_thread(
                     partial(
