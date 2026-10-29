@@ -195,6 +195,10 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
     def prepared_execution_scope(self):
         return getattr(self, "parallel", None) is not None
 
+    @property
+    def execution_scope_before_reserve(self):
+        return getattr(self, "parallel", None) is not None
+
     async def models_available(self, orders):
         """Check one authenticated source per model, without filling the local cache."""
         plans, local, resolved = {}, {}, set()
@@ -256,7 +260,7 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         return tuple(sorted(revisions))
 
     @asynccontextmanager
-    async def execution_scope(self, order):
+    async def execution_scope(self, order, *, before_reserve=None):
         """Finish a paired job while its bounded working set remains resident.
 
         This changes scheduling only. Every step retains its own authority,
@@ -265,6 +269,8 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         """
         enabled = self.boot is not None and order.submission.submission.track == "model"
         if not enabled:
+            if before_reserve is not None:
+                await before_reserve()
             yield False
             return
         if getattr(self, "parallel", None) is not None:
@@ -273,6 +279,7 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
                 async with self.parallel.scope(
                     order,
                     runtime_authorization=prepared_runtime_authorization(order.round, self.policy),
+                    before_reserve=before_reserve,
                 ) as active:
                     yield active
             finally:
@@ -280,6 +287,8 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
             return
         token = PUBLIC_COHORT_SCOPE.set(order.round.cohort_sha256)
         try:
+            if before_reserve is not None:
+                await before_reserve()
             with TransferProgress("model_pair_queue", 1, unit="jobs") as progress:
                 await self.paired_execution.acquire()
                 progress.advance(1)

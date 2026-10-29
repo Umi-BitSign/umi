@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from umi.competition_cohort_execution_journal import IncumbentSourcePending
 from umi.competition_cohort_parallel_cache import ModelPlan, ParallelModelCache
 from umi.competition_model_cache_space import BootDiskModelCache, BootDiskModelCacheConfig
 from umi.open_competition import digest
@@ -125,6 +126,55 @@ def cache(tmp_path):
         block=block,
         loading=loading,
     )
+
+
+async def test_source_reservation_callback_precedes_capacity_and_materialization(cache):
+    s = cache
+    callbacks = []
+
+    async def before_reserve():
+        assert s.admission.active == 0 and not s.admission.prepare.locked()
+        assert not s.calls and not s.helper.pairs and not s.helper.pins
+        callbacks.append("reserved")
+
+    async with s.helper.scope(Job(name="a"), before_reserve=before_reserve):
+        assert callbacks == ["reserved"]
+        assert s.admission.active == 1 and sorted(s.calls) == ["a", "reference"]
+    assert s.admission.active == 0 and not s.helper.pairs
+
+
+async def test_pending_source_callback_never_acquires_or_materializes(cache):
+    s = cache
+
+    async def before_reserve():
+        raise IncumbentSourcePending("shared incumbent source remains unfinished")
+
+    with pytest.raises(IncumbentSourcePending):
+        async with s.helper.scope(Job(name="a"), before_reserve=before_reserve):
+            pytest.fail("pending source cannot enter model execution")
+    assert not s.calls and not s.helper.pairs and not s.helper.pins
+    assert s.admission.active == 0 and not s.admission.prepare.locked()
+
+
+async def test_oversized_model_refuses_before_source_reservation_callback(cache):
+    s = cache
+    bundle = s.bundles["a"]
+    s.bundles["a"] = bundle.model_copy(
+        update={
+            "files": (
+                bundle.files[0].model_copy(update={"size_bytes": 32 * 1024**2}),
+                *bundle.files[1:],
+            )
+        }
+    )
+
+    async def forbidden():
+        pytest.fail("an infeasible first model must not reserve the shared source")
+
+    with pytest.raises(OSError, match="exceeds the bounded boot cache"):
+        async with s.helper.scope(Job(name="a"), before_reserve=forbidden):
+            pytest.fail("oversized model cannot enter execution")
+    assert not s.calls and not s.helper.pairs and s.admission.active == 0
 
 
 async def test_two_pairs_share_reference_and_keep_ready_reads_off_the_transfer_lane(cache):

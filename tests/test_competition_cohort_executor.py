@@ -409,6 +409,20 @@ async def test_resident_batch_reuses_completed_steps_and_native_evidence(executi
     assert all("eta_basis" in event and "elapsed_seconds" in event for event in batch)
 
 
+async def test_legacy_batch_does_not_require_shared_scheduling_reader(execution, monkeypatch):
+    e = execution
+    executor = e.executor()
+    monkeypatch.setattr(executor.journal, "incumbent_source_status", None)
+
+    @asynccontextmanager
+    async def execution_scope(order):
+        yield True
+
+    e.port.execution_scope = execution_scope
+    evidence = await executor.advance_batch(e.assignment)
+    assert evidence is not None and len(e.calls) == step_count(e.job)
+
+
 async def test_batch_cancellation_releases_scope_and_resumes_same_journal(execution):
     e = execution
     executor = e.executor()

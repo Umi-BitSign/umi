@@ -97,18 +97,18 @@ class ParallelModelCache:
             await asyncio.wait_for(self.condition.wait(), self.capacity_poll_seconds)
 
     @asynccontextmanager
-    async def scope(self, job, *, runtime_authorization=None):
+    async def scope(self, job, *, runtime_authorization=None, before_reserve=None):
         runtime_options = (
             {}
             if runtime_authorization is None
             else {"runtime_authorization": runtime_authorization}
         )
         with execution_job_scope(digest(job)):
-            async with self._scope(job, runtime_options) as enabled:
+            async with self._scope(job, runtime_options, before_reserve) as enabled:
                 yield enabled
 
     @asynccontextmanager
-    async def _scope(self, job, runtime_options):
+    async def _scope(self, job, runtime_options, before_reserve=None):
         plans = {
             role: await self.port._source_plan(job, role) for role in ("candidate", "incumbent")
         }
@@ -116,6 +116,8 @@ class ParallelModelCache:
         sizes = {p.identity: budget.model_bytes(p.bundle) for p in plans.values() if p}
         if any(size > budget.maximum_bytes for size in sizes.values()):
             raise OSError("selected model exceeds the bounded boot cache")
+        if before_reserve is not None:
+            await before_reserve()
         async with self._reserve_pair(job, plans, budget, sizes, runtime_options) as exclusive:
             if not exclusive:
                 async with self.admission.hold(job.runtime, preparation=True, **runtime_options):

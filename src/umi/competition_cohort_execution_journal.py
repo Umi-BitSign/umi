@@ -57,6 +57,10 @@ class PartialExportSourceRepairRequired(ValueError):
     """A previously verified immutable source disappeared or changed."""
 
 
+class IncumbentSourcePending(OSError):
+    """The fixed source must finish before this consumer can prepare models."""
+
+
 def _partial_export_source_repair(checkpoint, reason, index=None):
     logging.getLogger("umi.competition.progress").warning(
         json.dumps(
@@ -517,7 +521,7 @@ class CohortExecutionJournal:
             raise ValueError("shared incumbent source selection requires repair")
         return value
 
-    def _source_evidence(self, job, source):
+    def _source_job(self, job, source):
         _, original = self.assignment_and_job(source.source_slot)
         if (
             digest(original) != source.source_job_sha256
@@ -525,6 +529,10 @@ class CohortExecutionJournal:
             or self.journal.get("incumbent_reuse", digest(original)) is not None
         ):
             raise ValueError("shared incumbent source assignment differs or forms a cycle")
+        return original
+
+    def _source_evidence(self, job, source):
+        self._source_job(job, source)
         evidence = self.evidence(source.source_slot)
         if evidence is not None:
             check_boundary(evidence.steps[0].started, source.reserved_at)
@@ -550,6 +558,42 @@ class CohortExecutionJournal:
             if self._source_evidence(job, source) is None:
                 pending.append(source.source_slot)
         return tuple(pending)
+
+    def incumbent_source_status(
+        self, slot: str, job: RecoverableExecutionJob
+    ) -> Literal["ready", "pending", "unselected"]:
+        """Read-only scheduling hint; ordinary execution still checks authority.
+
+        Only opted-in, unstarted model consumers can wait here. Count retained
+        source step identities without loading outputs or replaying evidence.
+        The source reservation and all execution/reuse writes stay on their
+        existing authenticated path.
+        """
+        if job.mode != "paired_model" or job.incumbent_observation_mode is None:
+            return "ready"
+        if self.journal.get_raw("incumbent_reuse", digest(job)) is not None:
+            return "ready"
+        if self._execution_started(job):
+            return "ready"
+        source = self._incumbent_source(job)
+        if source is None:
+            return "unselected"
+        if source.source_slot == slot:
+            if source.source_job_sha256 != digest(job):
+                raise ValueError("shared incumbent source changed its job")
+            return "ready"
+        original = self._source_job(job, source)
+        with self.journal.read_transaction() as db:
+            if self._checkpoint_count(source.source_job_sha256, step_count(original), db) == (
+                step_count(original)
+            ):
+                return "ready"
+            if (
+                self.journal.get_raw("incumbent_source_complete", digest(source), db=db) is not None
+                or self.journal.get_raw("request_terminal", source.source_slot, db=db) is not None
+            ):
+                raise ValueError("completed shared incumbent source requires repair")
+        return "pending"
 
     def _reserve_incumbent_source(self, slot, job, observed):
         # Different job locks do not serialize this shared immutable decision.
@@ -634,7 +678,7 @@ class CohortExecutionJournal:
             return None
         evidence = self._source_evidence(job, source)
         if evidence is None:
-            raise OSError("shared incumbent source remains unfinished")
+            raise IncumbentSourcePending("shared incumbent source remains unfinished")
         check_boundary(observed, evidence.steps[-1].finished)
         receipt = CohortIncumbentReuse(
             schema="umi-cohort-incumbent-reuse/1",
@@ -756,22 +800,23 @@ class CohortExecutionJournal:
 
     def checkpoint_count(self, job: RecoverableExecutionJob) -> int:
         """Metadata-only progress; execution still validates each retained step."""
-        job_sha256 = digest(job)
+        with self.journal.read_transaction() as db:
+            return self._checkpoint_count(digest(job), step_count(job), db)
+
+    @staticmethod
+    def _checkpoint_count(job_sha256, total, db):
         keys = [
             digest({"schema": "umi-cohort-execution-step/1", "job": job_sha256, "index": i})
-            for i in range(step_count(job))
+            for i in range(total)
         ]
         completed = 0
-        with self.journal.read_transaction() as db:
-            for offset in range(0, len(keys), 128):
-                batch = keys[offset : offset + 128]
-                placeholders = ",".join("?" for _ in batch)
-                completed += db.execute(
-                    "SELECT COUNT(*) FROM records WHERE kind='step' AND id IN ("
-                    + placeholders
-                    + ")",
-                    batch,
-                ).fetchone()[0]
+        for offset in range(0, len(keys), 128):
+            batch = keys[offset : offset + 128]
+            placeholders = ",".join("?" for _ in batch)
+            completed += db.execute(
+                "SELECT COUNT(*) FROM records WHERE kind='step' AND id IN (" + placeholders + ")",
+                batch,
+            ).fetchone()[0]
         return completed
 
     def recent_assignment_slots(self, *, limit=32):
