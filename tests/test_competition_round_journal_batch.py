@@ -204,6 +204,40 @@ def test_read_transaction_preserves_reservation_fence_checks(journal):
         journal.get("intent", "a")
 
 
+def test_coordinated_snapshot_waits_for_writer_and_nonblocking_probe_refuses(journal):
+    journal.put("intent", "a", {"original": True})
+    entered, release = threading.Event(), threading.Event()
+
+    def writer():
+        with journal.transaction() as db:
+            db.execute("INSERT INTO holds VALUES ('a')")
+            entered.set()
+            assert release.wait(30), "test did not release its writer"
+
+    def snapshot():
+        with journal.read_transaction(coordinated=True) as db:
+            return journal.get("intent", "a", db=db)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = pool.submit(writer)
+        try:
+            assert entered.wait(10)
+            with (
+                pytest.raises(sqlite3.OperationalError, match="locked"),
+                journal.read_transaction(coordinated=True, wait=False),
+            ):
+                pytest.fail("nonblocking snapshot acquired an occupied writer lock")
+            read = pool.submit(snapshot)
+            assert not read.done()
+            # Cheap reads still observe the independent committed snapshot.
+            assert journal.get("intent", "a") == {"original": True}
+        finally:
+            release.set()
+        pending.result(timeout=10)
+        with pytest.raises(ValueError, match="conflict held"):
+            read.result(timeout=10)
+
+
 @pytest.mark.parametrize("reserved", [False, True])
 @pytest.mark.parametrize("value", [None, {"original": True}])
 def test_exact_put_does_not_queue_for_writer_and_keeps_fresh_holds(journal, reserved, value):

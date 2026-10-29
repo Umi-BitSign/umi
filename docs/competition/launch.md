@@ -231,6 +231,16 @@ is reported as requiring repair and never treated as completion. The scoped ETA
 requires at least three new complete models over five minutes in the sampler's
 current session, assumes comparable remaining cost and steady export delivery,
 and excludes subsequent certification and rewards. Overall ETA remains separate.
+Execution evidence readers copy bounded original step, attempt and result rows
+from one committed journal snapshot, then release SQLite before decoding,
+digesting and checking outputs. Bulk snapshots coordinate with the same owner's
+writers; ordinary bounded probes remain independent. Reviewer and settlement
+consumers that share an execution directory both need the updated reader.
+Inventory collection retains its original writer reservation, but semantic review
+runs afterward against the frozen collected originals without fetching newer
+journal state. These scheduling changes preserve original signed bytes and fresh
+authority/highwater checks; they do not cache evidence or repeat native history
+verification as a condition of exporting a case.
 Authenticated reviewer-epoch probes use a separate bounded HTTP pool so long
 admission/review requests cannot consume their connections, including on older
 lifecycle entry points. Epoch, work and settlement probes apply their deadlines

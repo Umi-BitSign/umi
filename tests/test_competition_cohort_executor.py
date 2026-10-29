@@ -498,10 +498,10 @@ async def test_completed_execution_uses_bounded_snapshots_and_fresh_conflict_che
     original = journal.journal.read_transaction
 
     @contextmanager
-    def counted():
+    def counted(**kwargs):
         nonlocal transactions
         transactions += 1
-        with original() as db:
+        with original(**kwargs) as db:
             yield db
 
     monkeypatch.setattr(journal.journal, "read_transaction", counted)
@@ -525,6 +525,133 @@ async def test_unfinished_execution_still_requires_the_job_writer_lock(execution
     with e.journal().locked(e.r.slot), pytest.raises(PrivateStateBusyError):
         await e.executor().advance(e.assignment)
     assert not e.calls and e.journal().journal.get("assignment", e.r.slot) is None
+
+
+@pytest.mark.parametrize("separate_owner", [False, True])
+async def test_evidence_validation_releases_snapshot_before_highwater_commit(
+    execution, monkeypatch, separate_owner
+):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    e = execution
+    executor = e.executor()
+    e.r.h.block += 1
+    assert await executor.advance(e.assignment) is None
+    owner = executor.journal
+    observer = e.journal() if separate_owner else owner
+    original_step = canonical_json_bytes(owner.step(e.job, 0))
+    entered, release = threading.Event(), threading.Event()
+    check_result = owner.check_result
+
+    def paused(*args, **kwargs):
+        entered.set()
+        assert release.wait(30), "test did not release evidence validation"
+        return check_result(*args, **kwargs)
+
+    with monkeypatch.context() as patch, ThreadPoolExecutor(max_workers=2) as pool:
+        patch.setattr(owner, "check_result", paused)
+        read = pool.submit(owner.evidence, e.r.slot)
+        try:
+            assert entered.wait(10), "evidence did not reach output validation"
+            # The exporter owns immutable original bytes now, not a SQLite
+            # read lock. An independent owner must also be able to commit.
+            advanced = e.r.h.block + 1
+            pool.submit(observer.journal.observe, advanced).result(timeout=3)
+            with observer.journal.read_transaction() as db:
+                assert db.execute("SELECT block FROM highwater").fetchall() == [(advanced,)]
+        finally:
+            release.set()
+        assert read.result(timeout=10) is None
+    assert canonical_json_bytes(e.journal().step(e.job, 0)) == original_step
+    assert len(e.calls) == 1
+    # Restart resumes the next case, preserving the original invocation.
+    e.r.h.block = advanced + 1
+    await e.executor().advance(e.assignment)
+    assert canonical_json_bytes(e.journal().step(e.job, 0)) == original_step
+    assert len(e.calls) == 2
+
+
+@pytest.mark.parametrize("kind", ["step", "attempt", "result"])
+async def test_copied_step_records_still_reject_noncanonical_originals(execution, kind):
+    from umi.competition_cohort_execution_journal import execution_step_key
+
+    e = execution
+    executor = e.executor()
+    e.r.h.block += 1
+    await executor.advance(e.assignment)
+    owner = executor.journal
+    key = execution_step_key(e.job, 0) if kind == "step" else digest(owner.head(e.job, 0))
+    with owner.journal.transaction() as db:
+        raw = db.execute("SELECT body FROM records WHERE kind=? AND id=?", (kind, key)).fetchone()[
+            0
+        ]
+        db.execute("UPDATE records SET body=? WHERE kind=? AND id=?", (b" " + raw, kind, key))
+    with pytest.raises(ValueError, match="not canonical"):
+        owner.evidence(e.r.slot)
+
+
+async def test_copied_step_snapshot_preserves_legacy_null(execution):
+    from umi.competition_cohort_execution_journal import execution_step_key
+
+    e = execution
+    executor = e.executor()
+    e.r.h.block += 1
+    await executor.advance(e.assignment)
+    owner = executor.journal
+    owner.journal.put("step", execution_step_key(e.job, 1), None)
+    assert owner.step(e.job, 1) is None
+    assert owner.first_unfinished(e.job) == 1
+    assert owner.evidence(e.r.slot) is None
+    assert e.journal().first_unfinished(e.job) == 1
+
+
+def test_snapshot_byte_bound_covers_largest_legacy_record_shapes():
+    from umi.competition_cohort_execution_journal import (
+        _STEP_RECORD_BYTES,
+        CohortExecutionAttempt,
+    )
+    from umi.competition_execution import ExecutionBoundary, ExecutionStep, PendingExecutionStep
+
+    boundary = ExecutionBoundary(
+        source="verifier_attested_finality",
+        block=2**53 - 1,
+        block_hash="0x" + "f" * 64,
+        state_root="0x" + "f" * 64,
+        snapshot_sha256="f" * 64,
+        evidence_sha256="f" * 64,
+    )
+    attempt = CohortExecutionAttempt(
+        schema="umi-cohort-execution-attempt/1",
+        job_sha256="f" * 64,
+        step_index=4095,
+        number=2**53 - 1,
+        predecessor_sha256="f" * 64,
+        started=boundary,
+        history_sha256="f" * 64,
+    )
+    execution = OfflineCaseExecution(
+        schema="umi-offline-case-execution/1",
+        model_sha256="f" * 64,
+        runtime_sha256="f" * 64,
+        video_sha256="f" * 64,
+        output=CaseOutput(
+            case_id="f" * 64,
+            status="ok",
+            # A JSON control escape takes six bytes, more than any UTF-8
+            # scalar. This is a shape ceiling, not a valid parsed output.
+            hypothesis="\x00" * 4096,
+            elapsed_ms=86_400_000,
+        ),
+        stdout_hex="ff" * 4097,
+        reason="process_failed",
+        returncode=-65536,
+    )
+    pending = PendingExecutionStep(role="incumbent", started=boundary, execution=execution)
+    step = ExecutionStep(role="incumbent", started=boundary, finished=boundary, execution=execution)
+    assert all(
+        len(canonical_json_bytes(value)) < _STEP_RECORD_BYTES for value in (attempt, pending, step)
+    )
 
 
 async def test_retained_attempt_head_does_not_wait_for_unrelated_writer(execution):
