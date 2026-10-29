@@ -1,6 +1,8 @@
 """Concurrent resident models on real files; no native inference is claimed."""
 
 import asyncio
+import json
+import logging
 import shutil
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -184,6 +186,176 @@ async def test_oversized_model_refuses_before_source_reservation_callback(cache)
         async with s.helper.scope(Job(name="a"), before_reserve=forbidden):
             pytest.fail("oversized model cannot enter execution")
     assert not s.calls and not s.helper.pairs and s.admission.active == 0
+
+
+async def test_candidate_only_scopes_fit_two_models_without_resolving_reference(cache, monkeypatch):
+    s, job_a, job_b = cache, Job(name="a"), Job(name="b")
+    original = s.port._source_plan
+    resolved = []
+
+    async def source(job, role):
+        resolved.append(role)
+        assert role == "candidate", "reused reference must not be resolved or restored"
+        return await original(job, role)
+
+    monkeypatch.setattr(s.port, "_source_plan", source)
+    budget = s.helper.budget()
+    cap = sum(budget.model_bytes(s.bundles[name]) for name in ("a", "b")) + 8192
+    s.port.boot = s.port.boot.model_copy(update={"maximum_allocated_bytes": cap})
+    async with (
+        s.helper.scope(job_a, model_roles=("candidate",)),
+        s.helper.scope(job_b, model_roles=("candidate",)),
+    ):
+        assert len(s.helper.pairs) == 2 and not s.helper.exclusive
+        assert sorted(s.calls) == ["a", "b"]
+        assert resolved == ["candidate", "candidate"]
+        with pytest.raises(ValueError, match="omitted"):
+            s.helper.plan(job_b, "incumbent")
+        # The unchanged two-role working set cannot admit both candidates
+        # under this same cap, demonstrating actual constrained residency.
+        reference = await original(job_b, "incumbent")
+        plans = {"candidate": s.helper.plan(job_b, "candidate"), "incumbent": reference}
+        s.helper.concurrency = 3
+        sizes = {p.identity: budget.model_bytes(p.bundle) for p in plans.values()}
+        selected, reason, counts = await s.helper._selection(plans, s.helper.budget(), sizes)
+        assert selected is None and reason == "cumulative_model_bytes"
+        assert counts["working_model_bytes"] > counts["resident_capacity_bytes"]
+    assert not s.helper.pairs and not any(s.helper.pins.values())
+
+
+async def test_reservation_can_narrow_plans_before_loading_or_pinning(cache):
+    s, job = cache, Job(name="a")
+
+    async def before_reserve():
+        return ("candidate",)
+
+    async with s.helper.scope(job, before_reserve=before_reserve):
+        assert s.calls == ["a"]
+        assert s.helper.pins[digest(s.bundles["reference"])] == 0
+
+
+async def test_reused_reference_is_evictable_while_candidate_reader_stays_protected(cache):
+    s, job_a, job_b = cache, Job(name="a"), Job(name="b")
+    for name in ("a", "b", "reference"):
+        bundle = s.bundles[name]
+        s.bundles[name] = bundle.model_copy(
+            update={
+                "files": tuple(
+                    f.model_copy(update={"size_bytes": 256 * 1024}) if f.role == "weights" else f
+                    for f in bundle.files
+                )
+            }
+        )
+    async with s.helper.scope(job_a):
+        pass
+    # The shared materializer deliberately creates sparse fixtures. Allocate
+    # the two retained weights here so admitting b must reclaim actual bytes.
+    for name in ("a", "reference"):
+        bundle = s.bundles[name]
+        slot = next(path for path, ident in s.helper.assigned.items() if ident == digest(bundle))
+        for f in bundle.files:
+            if f.role == "weights":
+                path = slot / digest(bundle) / "model" / f.path
+                path.chmod(0o600)
+                path.write_bytes(b"\0" * f.size_bytes)
+                path.chmod(0o400)
+    reference_path = next(
+        path
+        for path, identity in s.helper.assigned.items()
+        if identity == digest(s.bundles["reference"])
+    )
+    budget = s.helper.budget()
+    cap = sum(budget.model_bytes(s.bundles[name]) for name in ("a", "b")) + 8192
+    s.port.boot = s.port.boot.model_copy(update={"maximum_allocated_bytes": cap})
+    async with s.helper.scope(job_a, model_roles=("candidate",)):
+        candidate = s.helper.plan(job_a, "candidate")
+        candidate_path = await s.helper.acquire(candidate, job_a.runtime)
+        try:
+            async with s.helper.scope(job_b, model_roles=("candidate",)):
+                assert reference_path in s.evicted
+                assert not (reference_path / digest(s.bundles["reference"])).exists()
+                assert (candidate_path / digest(candidate.bundle) / "model").is_dir()
+                assert s.helper.readers[candidate_path] == 1
+                assert s.calls == ["a", "reference", "b"]
+        finally:
+            await s.helper.release(candidate_path)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "cache_allocation_owner",
+        "individual_model_capacity",
+        "requested_pair_exclusive",
+        "active_pair_exclusive",
+        "pair_concurrency",
+        "model_slot_count",
+        "cumulative_model_bytes",
+    ],
+)
+async def test_capacity_refusal_reports_existing_decision_without_extra_scan(
+    cache, monkeypatch, reason
+):
+    s, calls = cache, []
+    a = await s.port._source_plan(Job(name="a"), "candidate")
+    b = await s.port._source_plan(Job(name="b"), "candidate")
+    ref = await s.port._source_plan(Job(name="a"), "incumbent")
+    s.helper.pairs["existing"] = {"candidate": a}
+    plans, sizes, capacity = {"candidate": b}, {b.identity: 6}, 10
+    if reason == "cache_allocation_owner":
+        capacity = None
+    elif reason == "individual_model_capacity":
+        capacity = 5
+    elif reason == "requested_pair_exclusive":
+        plans["incumbent"], sizes[ref.identity] = ref, 6
+    elif reason == "active_pair_exclusive":
+        s.helper.exclusive = True
+    elif reason == "pair_concurrency":
+        s.helper.concurrency = 1
+    elif reason == "model_slot_count":
+        s.helper.slots = s.helper.slots[:1]
+
+    async def resident(_):
+        calls.append(True)
+        return capacity
+
+    monkeypatch.setattr(s.helper, "_resident_capacity", resident)
+    budget = SimpleNamespace(model_bytes=lambda _: 6)
+    selected, observed, counts = await s.helper._selection(plans, budget, sizes)
+    assert selected is None and observed == reason and calls == [True]
+    assert counts["active_pair_count"] == 1 and counts["resident_capacity_bytes"] == capacity
+
+
+async def test_unchanged_capacity_decision_logs_once_while_queue_heartbeats_continue(
+    cache, monkeypatch, caplog
+):
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
+    polls = []
+
+    async def selection(*_):
+        polls.append(True)
+        return None, "pair_concurrency", {"active_pair_count": 2, "pair_limit": 2}
+
+    async def changed():
+        if len(polls) == 3:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(cache.helper, "_selection", selection)
+    monkeypatch.setattr(cache.helper, "_capacity_changed", changed)
+    with pytest.raises(asyncio.CancelledError):
+        async with cache.helper.scope(Job(name="a")):
+            pytest.fail("capacity refusal cannot enter execution")
+    events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "umi.competition.progress"
+    ]
+    decisions = [event for event in events if event.get("stage") == "model_pair_capacity"]
+    assert len(polls) == 3 and len(decisions) == 1
+    assert decisions[0]["active_pair_count"] == decisions[0]["pair_limit"] == 2
+    assert decisions[0]["reason_code"] == "pair_concurrency"
+    assert decisions[0]["eta_seconds"] is None and decisions[0]["stalled_or_retrying"]
+    assert not cache.calls and not cache.helper.pairs
 
 
 async def test_two_pairs_share_reference_and_keep_ready_reads_off_the_transfer_lane(cache):
