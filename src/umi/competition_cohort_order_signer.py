@@ -256,11 +256,14 @@ def _remember_order_history_head(journal, source):
     with journal.read_transaction() as db:
         row = db.execute("SELECT history FROM order_heads WHERE cohort=?", (cohort,)).fetchone()
         if row == (source_sha256,):
-            raw = journal.get("order_history", row[0], db=db)
-            if raw is None or canonical_json_bytes(raw) != canonical_json_bytes(source):
-                raise ValueError("retained order history changed or disappeared")
+            raw = journal._copy_raw(db, "order_history", row[0])
             retained = True
     if retained:
+        # Copy the bounded original and conflict fence together, then release
+        # SQLite before canonical validation of the potentially large history.
+        raw = journal._check_record_bytes(raw, "order_history")
+        if raw is None or raw != canonical_json_bytes(source):
+            raise ValueError("retained order history changed or disappeared")
         # Use the journal's existing exact-retry path for current reservation
         # checks, without replaying the index callback or its capacity scan.
         journal.put("order_history", source_sha256, source)

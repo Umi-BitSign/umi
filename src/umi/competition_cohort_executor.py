@@ -25,6 +25,10 @@ from .competition_cohort_execution_journal import (
     IncumbentSourcePending,
     step_count,
 )
+from .competition_cohort_execution_retry import (
+    resident_execution_retries,
+    retry_resident_operation,
+)
 from .competition_cohort_order_inbox import CohortOrderInbox
 from .competition_cohort_order_signer import (
     CohortOrderHistory,
@@ -105,7 +109,9 @@ class CohortExecutionAuthority:
         timeout = self.journal.config.read_timeout_seconds
         cohort = assignment.certificate.order.round.cohort_sha256
         source = await await_progress(
-            wait_for_owned(self.history(cohort), timeout=timeout),
+            retry_resident_operation(
+                lambda: wait_for_owned(self.history(cohort), timeout=timeout), history=True
+            ),
             stage="execution_owner_history",
             cohort=cohort,
         )
@@ -159,7 +165,9 @@ class CohortExecutionAuthority:
             cohort=cohort,
         )
         current = await await_progress(
-            wait_for_owned(self.history(cohort), timeout=timeout),
+            retry_resident_operation(
+                lambda: wait_for_owned(self.history(cohort), timeout=timeout), history=True
+            ),
             stage="execution_history_freshness",
             cohort=cohort,
         )
@@ -278,13 +286,16 @@ class CohortExecutor(CohortExecutionAuthority):
             total = step_count(job)
             restored = await self._journal_progress(job, self.journal.checkpoint_count, job)
             reused = await self._journal_progress(job, self.journal.reused_checkpoint_count, job)
-            with TransferProgress(
-                "model_pair_execution",
-                total,
-                unit="case_role_steps",
-                planning_unit_seconds=(1, job_policy_timeout(self.journal)),
-                idle_stall_seconds=job_policy_timeout(self.journal),
-            ) as progress:
+            with (
+                resident_execution_retries(slot, self.journal.config.read_timeout_seconds),
+                TransferProgress(
+                    "model_pair_execution",
+                    total,
+                    unit="case_role_steps",
+                    planning_unit_seconds=(1, job_policy_timeout(self.journal)),
+                    idle_stall_seconds=job_policy_timeout(self.journal),
+                ) as progress,
+            ):
                 progress.advance(restored, restored=True)
                 # Each ordinary advance finishes at most one step. The extra
                 # iteration covers an already-complete retained job; this is a
@@ -391,7 +402,18 @@ class CohortExecutor(CohortExecutionAuthority):
                         stage="execution_sandbox",
                         cohort=job.round.cohort_sha256,
                     )
-                    await self._journal_progress(job, self.journal.observe, job, attempt, result)
+                    # Drain the owned persistence attempt before cancellation
+                    # releases the job lock; recovery reuses the exact result,
+                    # exhaustion preserves the existing failure path.
+                    await await_owned_task(
+                        asyncio.create_task(
+                            retry_resident_operation(
+                                lambda: self._journal_progress(
+                                    job, self.journal.observe, job, attempt, result
+                                )
+                            )
+                        )
+                    )
 
                 # Restoration and shared cache queues precede inference. Give
                 # them the configured read budget without consuming the signed
