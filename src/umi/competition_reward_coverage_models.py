@@ -520,9 +520,12 @@ def _selected_participants(package, certificates):
     return participants
 
 
-def _snapshot_item(verifier, participant, certificate):
+def _snapshot_item(verifier, participant, certificate, certification_history):
     if certificate.acceptance.direct_artifact is None:
-        legacy = verifier.legacy_for(certificate.acceptance.cohort_sha256)
+        legacy = verifier.legacy_for(
+            certificate.acceptance.cohort_sha256,
+            certification_history=certification_history,
+        )
         if legacy is None:
             raise CoverageModelDependencyRepairRequired("legacy R2 storage is not selected")
         receipt = legacy.verify_candidate(participant, certificate, verifier.receipts)
@@ -602,7 +605,11 @@ async def capture_coverage_model_dependencies(
             ) as progress:
                 for participant, certificate in zip(participants, certificates, strict=True):
                     item = await run_owned_thread(
-                        _snapshot_item, verifier, participant, certificate
+                        _snapshot_item,
+                        verifier,
+                        participant,
+                        certificate,
+                        package.inputs.history if certificate.batch_proof is not None else None,
                     )
                     try:
                         await _check_item(verifier, item, repairing=repair_reason is not None)

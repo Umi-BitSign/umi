@@ -393,6 +393,12 @@ async def test_configured_owner_service_collects_model_votes(
         async def one_cycle(component=component, original=original):
             report = await original()
             if component == "models":
+                # Hotkey order can visit the second, not-yet-delivered fixture
+                # first. Let the fair scheduler reach the reserved proposal;
+                # this test concerns configured reviewers, not scan ordering.
+                if report["entries_exported"] == 0:
+                    assert report["status"] == "model_acceptance_pending"
+                    return report
                 assert report["entries_exported"] == 1
             elif component == "legacy_uploads":
                 assert report["models_pending"] == 0

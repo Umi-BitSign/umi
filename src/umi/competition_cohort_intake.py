@@ -140,6 +140,7 @@ def cohort_intake_bytes(db) -> int:
                 "cohort_model_acceptance_intents",
                 "cohort_model_acceptance_votes",
                 "cohort_model_acceptances",
+                "cohort_model_batch_records",
                 "cohort_model_transport_qualifications",
                 "cohort_model_transport_markers",
             )

@@ -2655,6 +2655,127 @@ An unfinished intent retains its documents but rechecks current authority.
 Include the model journal in the reviewer's systemd `ReadWritePaths`; approvals
 and model bytes need only read access.
 
+For prospective cohort batch certification, select
+`batch_certification_adoptions_directory` in both the service-admission host
+and every reviewer's `model_signing` configuration. Each is a separate private
+directory owned by that service account; the service requires read access, while
+the operator's actor-specific publisher requires write access. The optional
+field's absence preserves existing canonical configuration bytes and individual
+certification. `model_preparation_concurrency` on the owner and
+`preparation_concurrency` on each reviewer default to ten, with a supported
+range of one through sixteen. Size them against aggregate memory, transfer and
+provider capacity, preserving the active cohort's reserves; worker count is not
+a promise of a tenfold speedup.
+
+Run the selected runtime's isolated module command:
+`/absolute/python -I -B -m umi.competition_cohort_model_batch_adoption_cli run --config /absolute/operator-config.json`.
+A source-maintenance handoff uses its already selected interpreter and the
+qualified source wrapper for this same module. No new console launcher,
+dependency installation or write inside the signed interpreter tree is needed.
+The root-owned canonical configuration uses
+schema `umi-model-batch-adoption-operator/1` and supplies `state_directory`,
+`policy_file`, `history_file`, `expected_tip_sha256`, `effective_at_block`, an
+explicit retained `operator_request_reference`, one `owner` and the complete
+`reviewers` list. Each target specifies its `role`, actual selected
+`service_unit`, `service_account`, `config_path` and `config_sha256`. Policy and
+history files must contain the exact canonical authenticated inputs; the
+configuration and these inputs are root-owned mode 0444 or 0400. The selected
+service configurations remain root-owned mode 0444. Create each new adoption
+directory as mode 0700 under its actual service account before running the
+command; preserve existing journals and directory bindings in place.
+
+The command checks running service identities and their selected configuration,
+including the supported isolated Python source-maintenance wrapper. It derives
+destinations and review peers from those configurations, refuses omitted or
+changed reviewers and does not load signing keys. It retains an immutable plan
+before publishing each service's `<cohort>.candidate.json`. That candidate
+contains the exact unsigned adoption and operator request reference. The private
+`/internal/cohorts/model-artifacts/batch-adoption-votes` route requires the
+existing authenticated reviewer transport and independently selected candidate.
+Each reviewer checks its own current authority and retained history, reserves
+one original adoption intent per cohort, then signs. A proposal cannot approve
+itself. This prospective signature authorizes the new certificate format; it
+does not rewrite recovery history, phase clocks, rights evidence or prior votes,
+and it does not authorize challenge start.
+
+Each returned vote is persisted immediately. After validating the independent
+quorum, the command retains `signed.json`, publishes the identical signed
+`<cohort>.json` under every reviewer account and selects the owner last. Run the
+same command/configuration after interruption: retained votes and completed
+file deliveries are reused without another signing round. Conflicting
+candidates, selections or original requests are refused. Missing retained
+votes or a lost operator certificate after selection require explicit repair;
+they are not ordinary cache misses. The durable operator state is a live
+recovery dependency and must not be put in disposable task scratch. Progress
+reports count preparation, votes and selected consumers, with elapsed time,
+planning bounds based on configured peer and publication limits, and interrupted
+or stalled state. File-publication success explicitly leaves runtime activation
+unverified.
+
+For normal successor production, run
+`/absolute/python -I -B -m umi.competition_cohort_model_batch_adoption_cli run-series --config /absolute/series-config.json`
+from a persistent, bounded service/timer. The root-owned canonical
+`umi-model-batch-adoption-series/1` configuration supplies `state_directory`,
+`policy_file`, `histories_directory`, `standing_operator_request_reference`,
+the current `owner` and complete `reviewers` targets. It defaults to cohort
+sequence seven onward. The supported host-update/configuration producer must
+carry forward the same adoption directories and regenerate these target config
+hashes whenever owner or reviewer configuration changes. Its authenticated
+history snapshot producer supplies `<cohort>.json` under `histories_directory`;
+missing history remains visible as pending work. The runner derives each new
+job from the owner’s actual configured cohort bindings and authenticated intake
+history. It skips earlier cohorts and histories whose intake phase has closed.
+The earliest effective block comes from that signed history, and each reviewer
+independently checks current authority before signing.
+
+Use this series path for the initial configured C7–C10 jobs as well as later
+successors; no new manual authorization is needed for every cohort. Each job
+retains its exact original history and operator plan under
+`<state_directory>/<cohort>/`. Completed jobs reuse their votes and completion
+evidence; a missing selected service file is an explicitly counted restoration
+from the retained signed envelope. Changed bytes or lost original signing
+records require scoped repair. Incomplete jobs keep their original target
+bindings and refuse an unsupported routing change. Do not delete old referenced
+configuration controls until a supported repair/migration has removed that
+dependency. The timer must run independently of an attached agent and preserve
+the host's memory/disk reserves. Installing the runner without the selected
+timer and history/configuration-producer hookup does not establish automatic
+adoption. Retain and check the installed service, next invocation and resulting
+native selections during handoff.
+
+Install the compatible owner, reviewer, settlement, reward replay/writer and
+public projection readers through their supported update paths before selecting
+the adoption. Preserve older supported installations' original startup schemas,
+service accounts, signed state and directory bindings. Publish the corresponding
+release selection for automatic consumers and confirm their selected versions;
+a source merge or new operator executable alone does not establish delivery.
+After running the command, verify each native consumer's selected adoption and
+actual batch progress using bounded owner diagnostics. Supported miners retain
+the unchanged upload and consent protocol; their readers must accept the
+published certificate representation through their normal release path. The
+standalone model-client pointer selects an explicit runtime revision and has
+no automatic background updater: if a model-client reader needs a new release,
+publish its selected pointer and verify the supported installer rerun. Do not
+claim that a live status response can replace its pinned revision. Preserve
+unchanged upload-only clients when their wire protocol and reader scope do not
+change. Keep this compatibility procedure while any supported consumer still
+needs the individual-certificate format.
+
+The owner prepares model entries in bounded parallel work and retains each
+completed result. Independent reviewers reuse their durable per-model review
+intents, then sign one cohort artifact binding the candidate snapshot and the
+ordered acceptance root. Per-model exports carry authenticated membership
+proofs, never invented individual signatures. Previously signed individual
+certificates retain their original bytes and remain valid in certification,
+restart and reward replay. The batch is frozen only after new issuance is
+actually closed and the eligible upload and admission inventory drains; a
+growing roster cannot be silently omitted. Use the existing authenticated
+operator deadline/closure selection described in [evaluation](evaluation.md).
+An elapsed native phase target or a temporarily empty pending queue does not
+close issuance. Selecting the batch format adds no new intake cutoff or clock.
+Upload-time preparation and replacement handling remain continuous intake work,
+separate from the final cohort signing boundary.
+
 The worker checks the original proposal, quorum, submission and model bytes
 before retaining acceptance. It exports review documents under `objects/` before
 publishing the certificate under `model-reward-acceptances/`. Replication must

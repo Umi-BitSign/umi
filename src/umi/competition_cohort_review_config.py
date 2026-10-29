@@ -199,6 +199,11 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                         self.model_signing.directory,
                         self.model_signing.approvals_directory,
                         self.model_signing.archive_directory,
+                        *(
+                            (self.model_signing.batch_certification_adoptions_directory,)
+                            if self.model_signing.batch_certification_adoptions_directory
+                            else ()
+                        ),
                     )
                     if self.model_signing
                     else ()

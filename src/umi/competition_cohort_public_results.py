@@ -257,7 +257,11 @@ def project_models(
                         p.record,
                         history,
                         policy,
-                        maximum_block=cert.acceptance.accepted_at_block,
+                        maximum_block=(
+                            cert.acceptance.accepted_at_block
+                            if cert.batch_proof is None
+                            else cert.batch_proof.certificate.batch.certified_at_block
+                        ),
                     )
                 release = (
                     "terms_review_required"

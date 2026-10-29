@@ -82,10 +82,11 @@ def check_legacy_settlement_metadata(receipts, receipt):
 class LegacyModelSettlementStorage:
     """Selected authenticated storage; no implicit legacy-to-R2 fallback."""
 
-    def __init__(self, sources, cohort):
+    def __init__(self, sources, cohort, *, certification_history=None):
         if not sources.has_cohort(cohort):
             raise ValueError("legacy settlement storage has no authenticated cohort")
         self.sources, self.cohort = sources, cohort
+        self.certification_history = certification_history
 
     @property
     def authenticated(self):
@@ -123,12 +124,31 @@ class LegacyModelSettlementStorage:
             and sha256_hex(canonical_json_bytes(certificate)) != original.certificate_raw_sha256
         ):
             raise ValueError("legacy settlement changes its original certificate")
+        history = self.authenticated.original_history
+        maximum_block = acceptance.accepted_at_block
+        if certificate.batch_proof is not None:
+            if self.certification_history is None:
+                raise ValueError("legacy batch settlement requires selected certification history")
+            current = self.certification_history(self.cohort)
+            # Storage adoption freezes original intents and transport lineage.
+            # A later batch needs the consumer's selected authenticated history;
+            # never let a certificate replace that original prefix or select it.
+            if (
+                current.plan != history.plan
+                or current.authority != history.authority
+                or current.genesis != history.genesis
+                or current.genesis_signatures != history.genesis_signatures
+                or current.transitions[: len(history.transitions)] != history.transitions
+            ):
+                raise ValueError("legacy certification history changes original storage history")
+            history = current
+            maximum_block = certificate.batch_proof.certificate.batch.certified_at_block
         verify_model_acceptance(
             certificate,
             participant.record,
-            self.authenticated.original_history,
+            history,
             self.authenticated.policy,
-            maximum_block=acceptance.accepted_at_block,
+            maximum_block=maximum_block,
         )
         return resolution
 

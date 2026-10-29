@@ -120,6 +120,13 @@ therefore does not change an existing checkout's host bootstrap. Altered
 signatures or mismatched release bindings still fail before any legacy writer
 is stopped. Release publishers must update the pin and both signed manifests in
 one commit; the deployment tests verify their signatures and revision bindings.
+Qualify that exact pinned host against the selected channel profile on both
+platforms. A bootstrap-only host cannot preflight a translation-reference
+directive merely because a newer installer checkout or worker image supports it.
+Historical signed input bundles retain their original source revisions when
+the host advances. Existing native artifacts may be reused with a newly signed
+host manifest after their interface compatibility is qualified; a host source
+update does not itself require rebuilding those binaries.
 
 The installer explicitly fetches the pinned commit from the same local source
 repository into its installed clone. This also works when a fresh source clone
@@ -269,11 +276,12 @@ upload credential. The exact finalized row and `LastUpdate` are publicly visible
 the local journal also retains the submitted transaction identity and inputs.
 
 Signed, hash-pinned container updates are automatic after installation. The
-local policy permits the existing typed shadow and translation profile names,
-but the current worker implements bootstrap only. The open-competition
-successor needs new host-side input and durable-state contracts, a compatible
-worker and a consented host upgrade. An image update alone cannot perform that
-transition. See [successor upgrade requirements](validators/successor-upgrade.md#successor-supervisor-upgrade).
+translation-reference worker follows a separately approved finalized row; it
+does not independently certify model artifacts. The full open-competition
+successor needs its supported host-side input and durable-state contracts, a
+compatible worker and a consented host upgrade. An image update alone cannot
+perform that transition. See [successor upgrade requirements](validators/successor-upgrade.md#successor-supervisor-upgrade)
+and [cohort certificate reader delivery](validators/successor-upgrade.md#cohort-artifact-certificate-readers).
 Do not rerun the fresh-install script over an existing supervisor installation.
 
 ## Troubleshooting

@@ -354,6 +354,8 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     reserved_participation_batch_size: Annotated[int, Field(ge=1, le=16)] = 8
     model_review_peers: Annotated[tuple[ModelReviewPeerConfig, ...], Field(max_length=64)] = ()
+    batch_certification_adoptions_directory: Directory | None = None
+    model_preparation_concurrency: Annotated[int, Field(ge=1, le=16)] = 10
     model_uploads: ModelUploadConfig | None = None
     direct_model_uploads: DirectModelUploadHostConfig | None = None
     legacy_model_storage: LegacyModelStorageSelections = ()
@@ -373,6 +375,10 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             value.pop("admission_timeout_seconds", None)
         if "reserved_participation_batch_size" not in self.model_fields_set:
             value.pop("reserved_participation_batch_size", None)
+        if self.batch_certification_adoptions_directory is None:
+            value.pop("batch_certification_adoptions_directory", None)
+        if "model_preparation_concurrency" not in self.model_fields_set:
+            value.pop("model_preparation_concurrency", None)
         if not self.model_review_peers:
             value.pop("model_review_peers", None)
         if self.model_uploads is None:
@@ -520,6 +526,15 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             self.model_review_peers
         ):
             raise ValueError("model reviewer configuration repeats a signer")
+        if self.batch_certification_adoptions_directory is not None:
+            adoption_root = Path(self.batch_certification_adoptions_directory)
+            other_roots = self.model_copy(
+                update={"batch_certification_adoptions_directory": None}
+            ).stores()
+            if any(not disjoint(adoption_root, root) for root in other_roots):
+                raise ValueError(
+                    "model batch adoptions must be disjoint from state and credentials"
+                )
         protected = tuple(Path(source.directory) for source in self.legacy_model_storage)
         if self.legacy_model_verification_directory is not None:
             protected += (Path(self.legacy_model_verification_directory),)
@@ -558,6 +573,11 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             *(shared_byte_store_paths(self.byte_store_sources()) if include_shared else ()),
             Path(self.queue_directory),
             Path(self.inputs_directory),
+            *(
+                (Path(self.batch_certification_adoptions_directory),)
+                if self.batch_certification_adoptions_directory is not None
+                else ()
+            ),
             *(Path(source.directory) for source in self.legacy_model_storage),
             *(
                 (Path(self.legacy_model_verification_directory),)
@@ -777,6 +797,8 @@ class ServiceAdmissionHost:
                 capture,
                 Path(c.inputs_directory),
                 promotion.directory,
+                batch_certification_adoptions_directory=c.batch_certification_adoptions_directory,
+                preparation_concurrency=c.model_preparation_concurrency,
                 promote=(None if self.direct_uploads is None else self.direct_uploads.promote),
                 prepare_review=(
                     prepare_legacy_review

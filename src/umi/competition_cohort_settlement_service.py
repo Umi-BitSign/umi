@@ -550,7 +550,12 @@ class CohortSettlementService:
             maximum_promotion_bytes=self.config.maximum_promotion_bytes,
             maximum_package_bytes=self.config.maximum_package_bytes,
             verify_model_artifact=(
-                None if self.model_artifacts is None else self.model_artifacts.verify_candidate
+                None
+                if self.model_artifacts is None
+                else partial(
+                    self.model_artifacts.verify_candidate,
+                    certification_history=history,
+                )
             ),
         )
         self.votes = (
@@ -636,7 +641,9 @@ class CohortSettlementService:
             and digest(participant.record.request.signed_submission.submission) in completed
         )
         for participant, certificate in zip(participants, certificates, strict=True):
-            await self.model_artifacts.ensure(participant, certificate)
+            await self.model_artifacts.ensure(
+                participant, certificate, certification_history=review.history
+            )
 
     async def _publish_history(self, history):
         sources = tuple(

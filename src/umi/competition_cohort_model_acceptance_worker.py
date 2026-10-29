@@ -23,6 +23,7 @@ from .competition_cohort_model_acceptance_store import (
     CohortModelAcceptances,
     PendingModelArtifacts,
 )
+from .competition_cohort_model_batch_worker import ModelBatchAcceptanceWorker
 from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
 from .competition_progress import _failure_details
 from .competition_work_progress import WorkProgress, work_heartbeats
@@ -68,6 +69,8 @@ class ModelAcceptanceWorker:
         promote=None,
         prepare_review=None,
         priority_cohorts=None,
+        batch_certification_adoptions_directory=None,
+        preparation_concurrency=10,
     ):
         if type(batch_size) is not int or not 1 <= batch_size <= 256:
             raise ValueError("model acceptance batch is outside bounds")
@@ -83,6 +86,11 @@ class ModelAcceptanceWorker:
         self.promote = promote
         self.prepare_review = prepare_review
         self.priority_cohorts = tuple(priority_cohorts or ())
+        self.batch_worker = None
+        if batch_certification_adoptions_directory is not None:
+            self.batch_worker = ModelBatchAcceptanceWorker(
+                self, batch_certification_adoptions_directory, concurrency=preparation_concurrency
+            )
         known = {binding.cohort_sha256 for binding in owner.intake.config.cohorts}
         if (
             len(set(self.priority_cohorts)) != len(self.priority_cohorts)
@@ -387,6 +395,21 @@ class ModelAcceptanceWorker:
         # Discover pending successors before acceptance work. The independent
         # inventory owner refreshes public counts even during a long review.
         bindings = self.owner.intake.config.cohorts
+        batch_reports = []
+        if self.batch_worker is not None:
+            handled, batch_reports = await self.batch_worker.poll_once(bindings)
+            bindings = tuple(b for b in bindings if b.cohort_sha256 not in handled)
+            if not bindings:
+                return {
+                    "status": "model_batch_certification",
+                    "batches": batch_reports,
+                    "elapsed_seconds": time.monotonic() - started,
+                    "eta_seconds": 0
+                    if all(r["status"] == "completed" for r in batch_reports)
+                    else None,
+                    "eta_basis": "per_batch_stages",
+                    "stalled_or_retrying": any(r["status"] != "completed" for r in batch_reports),
+                }
         probe_order = sorted(
             bindings, key=lambda binding: binding.cohort_sha256 not in self.priority_cohorts
         )
@@ -576,6 +599,7 @@ class ModelAcceptanceWorker:
                 error_type = type(error).__name__
         return {
             "status": "model_acceptance_pending" if pending else "model_acceptance_current",
+            "batches": batch_reports,
             "entries_exported": ready,
             "entries_pending": pending,
             "last_error_type": error_type,

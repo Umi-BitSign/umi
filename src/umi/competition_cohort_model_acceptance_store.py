@@ -347,8 +347,18 @@ class CohortModelAcceptances:
                     or publication.inputs != intent.inputs
                 ):
                     raise ValueError("model transport repair conflicts with original publication")
-                verify_recovery_quorum(
-                    acceptance, publication.certificate.signatures, self.intake.policy
+                history = store.published_history(cohort)
+                record = self._record(db, history, submission, hotkey=acceptance.recipient_hotkey)
+                verify_model_acceptance(
+                    publication.certificate,
+                    record,
+                    history,
+                    self.intake.policy,
+                    maximum_block=(
+                        publication.certificate.batch_proof.certificate.batch.certified_at_block
+                        if publication.certificate.batch_proof is not None
+                        else acceptance.accepted_at_block
+                    ),
                 )
 
             def read(kind, key):
@@ -561,7 +571,11 @@ class CohortModelAcceptances:
                 record,
                 history,
                 self.intake.policy,
-                maximum_block=publication.certificate.acceptance.accepted_at_block,
+                maximum_block=(
+                    publication.certificate.batch_proof.certificate.batch.certified_at_block
+                    if publication.certificate.batch_proof is not None
+                    else publication.certificate.acceptance.accepted_at_block
+                ),
             )
             return publication
 
