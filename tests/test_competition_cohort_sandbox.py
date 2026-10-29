@@ -55,6 +55,7 @@ async def test_invocation_lease_covers_case_video_and_execution(
     waiting, admit = asyncio.Event(), asyncio.Event()
     events = []
     held = False
+    native_capacity = object()
 
     class Admission:
         @asynccontextmanager
@@ -67,7 +68,7 @@ async def test_invocation_lease_covers_case_video_and_execution(
             held = True
             events.append("admitted")
             try:
-                yield
+                yield native_capacity
             finally:
                 held = False
                 events.append("released")
@@ -90,6 +91,7 @@ async def test_invocation_lease_covers_case_video_and_execution(
 
     async def execute(**arguments):
         assert held and arguments["video"] == b"inert video"
+        assert arguments["native_capacity"] is native_capacity
         events.append("execute")
         await asyncio.sleep(0)
         assert held
