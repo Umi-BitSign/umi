@@ -1098,7 +1098,7 @@ class CohortExecutionJournal:
         elif shared is not None:
             reuse = CohortIncumbentReuse.model_validate_json(canonical_json_bytes(shared))
             check_boundary(started, reuse.observed_at)
-        with self.journal.transaction() as db:
+        with self.journal.read_transaction() as db:
             if (
                 db.execute("SELECT COUNT(*) FROM records WHERE kind='attempt'").fetchone()[0]
                 >= self.config.maximum_attempts

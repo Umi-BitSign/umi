@@ -1272,22 +1272,27 @@ class RoundJournal:
         # up unrelated signing and retirement. Missing or different bytes still
         # use the native writer, which retains conflicts atomically.
         with self.read_transaction() as db:
-            prior = self.get_raw(kind, key, db=db)
-            if prior is not None:
-                raw = canonical_json_bytes(value)
-                if len(raw) > self.maximum_record_bytes:
-                    raise ValueError("round journal object exceeds its byte bound")
-                if prior == raw:
-                    doc = self._obligation(db, kind, key) if self._version(db) == 2 else None
-                    if doc is not None and (
-                        len(raw) > doc["maximum_bytes"]
-                        or (
-                            doc["value_sha256"] is not None
-                            and sha256_hex(raw) != doc["value_sha256"]
-                        )
-                    ):
-                        raise ValueError("retained round record differs from reservation")
-                    return
+            prior = self._copy_raw(db, kind, key)
+            doc = (
+                self._obligation(db, kind, key)
+                if prior is not None and self._version(db) == 2
+                else None
+            )
+        # The conflict fence and bounded obligation belong to the same snapshot.
+        # Large canonical validation/hashing must not keep its read lock alive
+        # while an unrelated case commits. Different bytes still take the writer.
+        prior = self._check_record_bytes(prior, kind)
+        if prior is not None:
+            raw = canonical_json_bytes(value)
+            if len(raw) > self.maximum_record_bytes:
+                raise ValueError("round journal object exceeds its byte bound")
+            if prior == raw:
+                if doc is not None and (
+                    len(raw) > doc["maximum_bytes"]
+                    or (doc["value_sha256"] is not None and sha256_hex(raw) != doc["value_sha256"])
+                ):
+                    raise ValueError("retained round record differs from reservation")
+                return
         self.put_many(((kind, key, value),))
 
     def put_many(

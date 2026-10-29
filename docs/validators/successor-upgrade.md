@@ -3713,6 +3713,21 @@ Writers retain their exclusive transaction and generation checks. The owner
 still signs each fresh response; cached historical proofs do not grant current
 execution authority.
 
+Resident model batches retry only transient owner-history network failures and
+SQLite BUSY/LOCKED while persisting an already-produced sandbox result. Each
+failed operation uses bounded backoff for at most two minutes, capped by its
+existing read allowance; this is a scheduling allowance, not a new inference
+deadline or permission to cancel an owned operation. Healthy inference consumes
+none of the retry allowance. Logs report retry counts, elapsed time and remaining
+allowance. Fresh signed history, finality, capacity and memory limits are unchanged.
+An exhausted operation returns to the ordinary pending queue and releases model
+residency. Completed checkpoints remain reusable. If result persistence exhausts
+its recovery allowance, an unpersisted result may require another sandbox
+invocation. Cancellation drains the owned persistence attempt before releasing
+job ownership; it does not guarantee persistence when recovery fails. These
+internal evaluator changes use the existing source-maintenance update path and
+do not change miner wire formats.
+
 Independent service-request review compares exact finalized block facts, policy
 pins, schedule and attempt context. Observer transcripts can differ for the same
 verified block; their evidence digests need not be identical. The original
