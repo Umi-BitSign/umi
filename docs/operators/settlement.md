@@ -3734,6 +3734,15 @@ participation, registration and evidence-preservation path. It runs independentl
 of client polling and resumes retained work after restart. The original client's
 participation retry remains idempotent; continuation needs neither a new miner
 signature nor a second upload. Existing byte and review receipts are reused.
+When a timely direct upload predates the native admission-permit record, the
+owner resolves its original signed reservation outside the native intake lock.
+The direct owner's issuance fence remains held through that lookup and final
+retention. Final retention checks the current deadline, prior receipt, signed
+history and admission authority again; a late or mismatched reservation gains
+no admission. Requests with an existing receipt or timely permit do not need
+this lookup. The owner update preserves existing client requests, consent,
+journals and configured deadlines; select it through the supported intake-host
+source update rather than requiring miners to resubmit.
 The same lane reconciles an already signed upload-completion intent when the
 provider finished but the owner lost its object receipt. It reuses the original
 completion path and reads provider metadata, not model payloads. A provider
