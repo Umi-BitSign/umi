@@ -2672,6 +2672,9 @@ Run the selected runtime's isolated module command:
 A source-maintenance handoff uses its already selected interpreter and the
 qualified source wrapper for this same module. No new console launcher,
 dependency installation or write inside the signed interpreter tree is needed.
+Actor publication uses the same bounded canonical request in module and
+source-wrapper launches. Existing candidates and signed selections retain their
+exact bytes and require no conversion when updating this entry point.
 The root-owned canonical configuration uses
 schema `umi-model-batch-adoption-operator/1` and supplies `state_directory`,
 `policy_file`, `history_file`, `expected_tip_sha256`, `effective_at_block`, an

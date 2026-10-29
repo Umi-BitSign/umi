@@ -67,6 +67,15 @@ class ModelBatchAdoptionTarget(StrictProtocolModel):
     config_sha256: Hex32
 
 
+class ActorPublication(StrictProtocolModel):
+    """Canonical actor input with a stable module namespace for CLI wrappers."""
+
+    target: ModelBatchAdoptionTarget
+    request: ModelBatchAdoptionReviewRequest
+    signed: SignedModelBatchCertificationAdoption | None = None
+    check_only: bool = False
+
+
 class ModelBatchAdoptionOperatorConfig(StrictProtocolModel):
     schema_: Literal["umi-model-batch-adoption-operator/1"] = Field(alias="schema")
     state_directory: Directory
