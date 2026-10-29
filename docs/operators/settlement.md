@@ -135,8 +135,17 @@ successor, without restarting the coordinator, run:
 sudo umi-reward-coordinator approve-successor --config /path/to/coordinator.json --predecessor <current-decision-sha256> --cohort <successor-cohort-sha256> --package <certified-package-sha256> --reason 'Operator approved successor reward release'
 ```
 
-This signs an approval document using the configured control hotkey. It sends no
-transaction and does not bypass independent review or quorum. An exact retry
+This root command signs the exact approval in an isolated child running as the
+configured key file's existing account, then verifies and publishes the signed
+document as root. Root-owned and service-account-owned mode-0400 keys are both
+supported; do not copy the key, change its ownership, or make the approval
+directory writable by the signer. The child uses the selected operator source
+and Python interpreter. Upgrade this operator command through the supported
+source installation before using an older installation with a service-owned key;
+the running miner, reviewer and writer formats remain compatible and need no
+restart for this command-only correction.
+
+It sends no transaction and does not bypass independent review or quorum. An exact retry
 reuses the recorded approval without reopening the key or signing again. A held
 cohort refuses approval; remove a hold only through its separately authorized
 admission/settlement transition. Without approval, the producer waits for the

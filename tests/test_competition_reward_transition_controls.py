@@ -301,17 +301,14 @@ def test_operator_cli_reuses_retained_request_without_reopening_key(controls_cas
         reason=body.reason,
     )
     opened = []
-    monkeypatch.setattr(
-        cli, "load_named_hotkey", lambda *a: (opened.append(a), wallet("Ferdie").hotkey)[1]
-    )
+    monkeypatch.setattr(cli, "sign_operator_approval", lambda *a: (opened.append(a), signed(c))[1])
     first = cli.approve_successor(config, **args)
     assert first["chain_submission_authorized"] is False and len(opened) == 1
     with monkeypatch.context() as repeated:
         repeated.setattr(
-            cli, "load_named_hotkey", lambda *a: pytest.fail("reopened key on exact retry")
-        )
-        repeated.setattr(
-            cli, "sign_object", lambda *a: pytest.fail("re-signed exact retained request")
+            cli,
+            "sign_operator_approval",
+            lambda *a: pytest.fail("re-signed exact retained request"),
         )
         assert cli.approve_successor(config, **args) == first
         with pytest.raises(ValueError, match="different exact"):
