@@ -379,7 +379,10 @@ read-then-write decisions retain the writer transaction. Every snapshot checks
 current conflict holds, journal generation and reservation fences; this is not a
 cache of mutable authorization state.
 
-Inbox assignment readers release that snapshot before static proof validation.
+Inbox assignment readers copy bounded originals and release that snapshot before
+canonical validation, hashing and static proof validation. Self-owned single-record
+reads also close before canonical validation; borrowed transactions remain owned
+by their caller. Fresh conflict and authority checks still apply.
 Concurrent local readers of the same exact assignment share its first successful
 validation, then receive separate private copies. Changed retained bytes, owner
 bindings or conflict holds still require their normal checks; current finality

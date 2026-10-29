@@ -102,6 +102,90 @@ async def test_model_partial_export_skips_unchanged_evidence_and_collection_afte
     )
 
 
+@pytest.mark.parametrize("separate_owner", [False, True])
+@pytest.mark.parametrize("validation", ["canonical", "digest"])
+async def test_partial_source_validation_releases_snapshot_before_native_commit(
+    model_partial_export, monkeypatch, separate_owner, validation
+):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from umi import competition_cohort_execution_journal as module
+
+    h = model_partial_export
+    checkpoint = h.files._model_partials.load(h.owner, h.slot)
+    observer = h.e.journal() if separate_owner else h.owner
+    entered, release = threading.Event(), threading.Event()
+    target, name = (
+        (h.owner.journal, "_check_record_bytes")
+        if validation == "canonical"
+        else (module, "digest_canonical_bytes")
+    )
+    original = getattr(target, name)
+
+    def paused(*args, **kwargs):
+        entered.set()
+        assert release.wait(30), "test did not release partial source validation"
+        return original(*args, **kwargs)
+
+    with monkeypatch.context() as patch, ThreadPoolExecutor(max_workers=2) as pool:
+        patch.setattr(target, name, paused)
+        read = pool.submit(h.owner.partial_export_unchanged, checkpoint)
+        try:
+            assert entered.wait(10), "partial source did not reach validation"
+            advanced = h.block + 1
+            pool.submit(observer.journal.observe, advanced).result(timeout=3)
+            with observer.journal.read_transaction() as db:
+                assert db.execute("SELECT block FROM highwater").fetchall() == [(advanced,)]
+        finally:
+            release.set()
+        assert read.result(timeout=10) is True
+    assert h.files.current_model_partial(h.owner, h.slot, completed_by_block=advanced) is not None
+    assert len(h.e.calls) == 1
+
+
+async def test_partial_source_snapshot_checks_aggregate_budget_before_copying(
+    model_partial_export, monkeypatch
+):
+    from umi import competition_cohort_execution_journal as module
+
+    h = model_partial_export
+    checkpoint = h.files._model_partials.load(h.owner, h.slot)
+    assignment = h.owner.journal.get_raw("assignment", h.slot)
+    step = h.owner.journal.get_raw("step", checkpoint.step_keys[0])
+    budget = len(assignment) + len(step) - 1
+    copied = 0
+    original = h.owner.journal._copy_record_bytes
+
+    def counted(*args, **kwargs):
+        nonlocal copied
+        raw = original(*args, **kwargs)
+        copied += 0 if raw is None else len(raw)
+        return raw
+
+    monkeypatch.setattr(module, "stage_limit", lambda name, maximum: min(maximum, budget))
+    monkeypatch.setattr(h.owner.journal, "_copy_record_bytes", counted)
+    with pytest.raises(ValueError, match="byte bound"):
+        h.owner.partial_export_unchanged(checkpoint)
+    assert copied == len(assignment) <= budget
+
+
+@pytest.mark.parametrize("kind", ["assignment", "step"])
+async def test_copied_partial_source_still_rejects_noncanonical_originals(
+    model_partial_export, kind
+):
+    h = model_partial_export
+    checkpoint = h.files._model_partials.load(h.owner, h.slot)
+    key = h.slot if kind == "assignment" else checkpoint.step_keys[0]
+    with h.owner.journal.transaction() as db:
+        raw = db.execute("SELECT body FROM records WHERE kind=? AND id=?", (kind, key)).fetchone()[
+            0
+        ]
+        db.execute("UPDATE records SET body=? WHERE kind=? AND id=?", (b" " + raw, kind, key))
+    with pytest.raises(ValueError, match="not canonical"):
+        h.owner.partial_export_unchanged(checkpoint)
+
+
 async def test_model_partial_export_upgrades_existing_publication_without_recollecting(
     model_partial_export, monkeypatch
 ):
@@ -525,6 +609,41 @@ async def test_unfinished_execution_still_requires_the_job_writer_lock(execution
     with e.journal().locked(e.r.slot), pytest.raises(PrivateStateBusyError):
         await e.executor().advance(e.assignment)
     assert not e.calls and e.journal().journal.get("assignment", e.r.slot) is None
+
+
+@pytest.mark.parametrize("separate_owner", [False, True])
+async def test_assignment_canonical_validation_releases_snapshot_before_native_commit(
+    execution, monkeypatch, separate_owner
+):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    e = execution
+    owner = e.journal()
+    owner.retain(e.assignment, e.r.h.source, e.r.h.block)
+    observer = e.journal() if separate_owner else owner
+    entered, release = threading.Event(), threading.Event()
+    check = owner.journal._check_record_bytes
+
+    def paused(raw, kind):
+        if kind == "assignment":
+            entered.set()
+            assert release.wait(30), "test did not release assignment validation"
+        return check(raw, kind)
+
+    with monkeypatch.context() as patch, ThreadPoolExecutor(max_workers=2) as pool:
+        patch.setattr(owner.journal, "_check_record_bytes", paused)
+        read = pool.submit(owner.assignment, e.r.slot)
+        try:
+            assert entered.wait(10), "assignment did not reach canonical validation"
+            advanced = e.r.h.block + 1
+            pool.submit(observer.journal.observe, advanced).result(timeout=3)
+            with observer.journal.read_transaction() as db:
+                assert db.execute("SELECT block FROM highwater").fetchall() == [(advanced,)]
+        finally:
+            release.set()
+        assert canonical_json_bytes(read.result(timeout=10)) == canonical_json_bytes(e.assignment)
+    assert not e.calls
 
 
 @pytest.mark.parametrize("separate_owner", [False, True])

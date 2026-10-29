@@ -1462,6 +1462,16 @@ class RoundJournal:
     def _record(self, db, kind, key):
         return self._check_record_bytes(self._copy_record_bytes(db, kind, key), kind)
 
+    def _copy_raw(self, db, kind, key, *, maximum_bytes=None):
+        """Copy original bytes and their fresh conflict fence in one snapshot.
+
+        Like ``_copy_record_bytes``, the result is unvalidated. The snapshot
+        owner must check it after releasing the connection.
+        """
+        if db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone():
+            raise ValueError("round journal conflict held")
+        return self._copy_record_bytes(db, kind, key, maximum_bytes=maximum_bytes)
+
     def get(self, kind: str, key: str, *, db: sqlite3.Connection | None = None) -> JsonValue:
         """Read canonical JSON, borrowing this journal's transaction when supplied.
 
@@ -1476,11 +1486,15 @@ class RoundJournal:
     def get_raw(self, kind: str, key: str, *, db: sqlite3.Connection | None = None) -> bytes | None:
         """Read bounded canonical bytes with the same fresh conflict fence."""
         if db is None:
+            # Single-record reads keep their non-coordinated contract: they
+            # can inspect committed state while this instance has a writer.
             with self.read_transaction() as db:
-                return self.get_raw(kind, key, db=db)
-        if db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone():
-            raise ValueError("round journal conflict held")
-        return self._record(db, kind, key)
+                raw = self._copy_raw(db, kind, key)
+        else:
+            # A borrowed transaction belongs to its caller; never close or
+            # commit it just to move validation outside the snapshot.
+            raw = self._copy_raw(db, kind, key)
+        return self._check_record_bytes(raw, kind)
 
     def keys(self, kind: str) -> list[str]:
         with self.read_transaction() as db:

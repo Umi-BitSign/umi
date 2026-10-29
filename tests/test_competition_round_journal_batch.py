@@ -156,6 +156,42 @@ def test_reads_do_not_wait_for_uncommitted_writer_and_observe_committed_hold(jou
         db.close()
 
 
+@pytest.mark.parametrize("reserved", [False, True])
+@pytest.mark.parametrize("separate_owner", [False, True])
+def test_raw_validation_releases_snapshot_before_native_commit(
+    journal, monkeypatch, reserved, separate_owner
+):
+    if reserved:
+        journal.reserve_records("batch", (rounds.RecordReservation("intent", "a", 1024),))
+    value = {"original": True}
+    journal.put("intent", "a", value)
+    observer = (
+        rounds.RoundJournal(journal.root, {"policy": "batch-test"}, maximum_rounds=2)
+        if separate_owner
+        else journal
+    )
+    entered, release = threading.Event(), threading.Event()
+    check = journal._check_record_bytes
+
+    def paused(raw, kind):
+        if kind == "intent":
+            entered.set()
+            assert release.wait(30), "test did not release raw validation"
+        return check(raw, kind)
+
+    with monkeypatch.context() as patch, ThreadPoolExecutor(max_workers=2) as pool:
+        patch.setattr(journal, "_check_record_bytes", paused)
+        read = pool.submit(journal.get_raw, "intent", "a")
+        try:
+            assert entered.wait(10), "read did not reach canonical validation"
+            pool.submit(observer.observe, 23).result(timeout=3)
+            with observer.read_transaction() as db:
+                assert db.execute("SELECT block FROM highwater").fetchall() == [(23,)]
+        finally:
+            release.set()
+        assert read.result(timeout=10) == canonical_json_bytes(value)
+
+
 def test_read_transaction_cannot_write_or_ignore_generation(journal):
     with (
         journal.read_transaction() as db,
@@ -651,9 +687,16 @@ def test_get_uses_supplied_transaction_without_nested_open(journal, monkeypatch)
             journal.get("work", "a", db=db)
 
 
-def test_get_with_supplied_transaction_preserves_canonical_validation(journal):
+@pytest.mark.parametrize("borrowed", [False, True])
+def test_get_preserves_canonical_validation(journal, borrowed):
     journal.put("work", "a", {"v": 1})
     with journal.transaction() as db:
         db.execute("UPDATE records SET body=? WHERE id='a'", (b'{ "v": 1 }',))
+    if borrowed:
+        with journal.transaction() as db:
+            with pytest.raises(ValueError, match="not canonical"):
+                journal.get("work", "a", db=db)
+            assert db.in_transaction
+    else:
         with pytest.raises(ValueError, match="not canonical"):
-            journal.get("work", "a", db=db)
+            journal.get("work", "a")
