@@ -40,6 +40,8 @@ from umi.competition_cohort_model_static_review import StandingModelReviewPolicy
 from umi.competition_cohort_model_transport import prepare_model_delivery_adoption
 from umi.competition_cohort_model_transport_selection import CommittedModelDeliveryHistory
 from umi.competition_cohort_model_upload import ModelUploadConfig
+from umi.competition_cohort_order_host import OrderHostConfig
+from umi.competition_cohort_order_queue import CohortOrderQueueConfig
 from umi.competition_cohort_recovery import ModelDeliveryProfile
 from umi.competition_cohort_request_rule import prepare_request_tail_adoption
 from umi.competition_cohort_sandbox import DirectCohortCpuSandbox
@@ -58,6 +60,12 @@ from .test_competition_cohort_native_pipeline import (
     chain_config as chain_config,
 )
 from .test_competition_cohort_native_pipeline import (
+    configure_owner,
+    model_request,
+    precommit_model_inventory,
+    run_pipeline,
+)
+from .test_competition_cohort_native_pipeline import (
     host as host,
 )
 from .test_competition_cohort_native_pipeline import (
@@ -71,11 +79,6 @@ from .test_competition_cohort_native_pipeline import (
 )
 from .test_competition_cohort_native_pipeline import (
     lifecycle_before_intake as lifecycle_before_intake,
-)
-from .test_competition_cohort_native_pipeline import (
-    model_request,
-    precommit_model_inventory,
-    run_pipeline,
 )
 from .test_competition_cohort_native_pipeline import (
     policy as native_policy,  # noqa: F401
@@ -547,6 +550,37 @@ class NativeDirect:
             promotion.directory / "model-reward-artifacts",
             base / "artifact-receipts",
         )
+
+
+@pytest.mark.parametrize("batch", [None, 1, 16])
+async def test_direct_host_forwards_default_or_explicit_continuation_budget(
+    host, policy, tmp_path, monkeypatch, chain_config, batch
+):
+    direct = NativeDirect(tmp_path / "direct", policy, monkeypatch)
+    values = direct.owner_config(host)
+    if batch is not None:
+        values["reserved_participation_batch_size"] = batch
+    orders = OrderHostConfig(
+        schema="umi-cohort-order-host/1",
+        queue=CohortOrderQueueConfig(
+            schema="umi-cohort-order-queue-config/1",
+            directory=str(tmp_path / "orders"),
+            policy_sha256=digest(policy),
+            cohorts=host.h.intake.config.cohorts,
+            reviewers=tuple(
+                sorted((p.signer for p in host.config.admission_owner.reviewers), key=identity)
+            ),
+        ),
+    )
+    configure_owner(
+        host, orders, chain_config, tmp_path / "configured", monkeypatch, overrides=values
+    )
+    config, selected = host.config, host.service
+    raw = canonical_json_bytes(config)
+    assert (b"reserved_participation_batch_size" in raw) is (batch is not None)
+    assert selected.reserved_participation.batch_size == (8 if batch is None else batch)
+    assert selected.reserved_participation.poll_seconds == config.poll_seconds
+    assert canonical_json_bytes(selected.config) == raw
 
 
 async def test_native_direct_multipart_paid_work_and_certification_recover(

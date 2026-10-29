@@ -352,6 +352,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
     maximum_queue_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
     admission_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
+    reserved_participation_batch_size: Annotated[int, Field(ge=1, le=16)] = 8
     model_review_peers: Annotated[tuple[ModelReviewPeerConfig, ...], Field(max_length=64)] = ()
     model_uploads: ModelUploadConfig | None = None
     direct_model_uploads: DirectModelUploadHostConfig | None = None
@@ -370,6 +371,8 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
         # their canonical bytes stable while new deployments set it explicitly.
         if "admission_timeout_seconds" not in self.model_fields_set:
             value.pop("admission_timeout_seconds", None)
+        if "reserved_participation_batch_size" not in self.model_fields_set:
+            value.pop("reserved_participation_batch_size", None)
         if not self.model_review_peers:
             value.pop("model_review_peers", None)
         if self.model_uploads is None:
@@ -828,6 +831,8 @@ class ServiceAdmissionHost:
                     models=self.payloads,
                     capture_timeout_seconds=capture_timeout_seconds,
                 ),
+                batch_size=c.reserved_participation_batch_size,
+                poll_seconds=c.poll_seconds,
             )
             if self.direct_uploads is not None
             else None

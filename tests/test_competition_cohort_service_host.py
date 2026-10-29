@@ -53,6 +53,37 @@ def host_config(h, root):
     )
 
 
+def test_continuation_budget_preserves_legacy_canonical_bytes_and_explicit_bounds(
+    lifecycle, tmp_path
+):
+    legacy = host_config(lifecycle, tmp_path / "host")
+    raw = canonical_json_bytes(legacy)
+    assert b"reserved_participation_batch_size" not in raw
+    restored = ServiceAdmissionHostConfig.model_validate_json(raw)
+    assert canonical_json_bytes(restored) == raw
+    assert restored.reserved_participation_batch_size == 8
+    for value in (1, 8, 16):
+        explicit = ServiceAdmissionHostConfig.model_validate(
+            {
+                **legacy.model_dump(by_alias=True),
+                "reserved_participation_batch_size": value,
+            }
+        )
+        encoded = canonical_json_bytes(explicit)
+        assert b'"reserved_participation_batch_size":' in encoded
+        reopened = ServiceAdmissionHostConfig.model_validate_json(encoded)
+        assert reopened.reserved_participation_batch_size == value
+        assert canonical_json_bytes(reopened) == encoded
+    for value in (0, 17, True, 1.5, "8"):
+        with pytest.raises(ValueError):
+            ServiceAdmissionHostConfig.model_validate(
+                {
+                    **legacy.model_dump(by_alias=True),
+                    "reserved_participation_batch_size": value,
+                }
+            )
+
+
 async def prepare(h):
     service = h.reopen()
     for worker in h.admissions:

@@ -51,11 +51,16 @@ def queue_ready_participation(owner, reservation):
 
 
 class ReservedParticipationWorker:
-    def __init__(self, owners, delivery, *, batch_size=2):
+    def __init__(self, owners, delivery, *, batch_size=2, poll_seconds=5):
         if type(batch_size) is not int or not 1 <= batch_size <= 16:
             raise ValueError("reserved participation batch must be between 1 and 16")
+        if type(poll_seconds) is not int or not 1 <= poll_seconds <= 60:
+            raise ValueError("reserved participation poll must be between 1 and 60 seconds")
         self.owners, self.delivery, self.batch_size = owners, delivery, batch_size
+        self.poll_seconds = poll_seconds
         self._after, self._started, self._samples = {}, {}, {}
+        self._cadence = {}
+        self._forecast = {}
         self._completed = {}
         self._completion_after = {}
         self._completion_inventory = {}
@@ -182,17 +187,76 @@ class ReservedParticipationWorker:
             raise ValueError("retained participation request identity differs")
         return request
 
+    def _bind_cadence(self, cohort, selection, selected_ready):
+        # This identity contains only existing immutable metadata, never model
+        # bytes. Restarts and changed readiness/selection start a fresh forecast.
+        identity = None if selection is None else (selection, frozenset(selected_ready))
+        prior = self._cadence.get(cohort)
+        if identity is None:
+            self._cadence.pop(cohort, None)
+            self._forecast.pop(cohort, None)
+        elif prior is None or prior[0] != identity:
+            self._cadence[cohort] = (identity, [])
+            self._forecast.pop(cohort, None)
+            self._started[(cohort, "selected_ready_participation_checkpoints")] = time.monotonic()
+
+    def _observe_cadence(self, cohort, done):
+        value = self._cadence.get(cohort)
+        if value is not None:
+            observations = value[1]
+            observations.append((time.monotonic(), done))
+            del observations[:-32]
+
     def _progress(self, cohort, done, total, *, stage, scope, error=None):
         pending = None if total is None else total - done
         samples = self._samples.get((cohort, scope), [])
-        elapsed = time.monotonic() - self._started.setdefault((cohort, scope), time.monotonic())
+        now = time.monotonic()
+        elapsed = now - self._started.setdefault((cohort, scope), now)
+        selected = scope == "selected_ready_participation_checkpoints"
+        observations = self._cadence.get(cohort, (None, []))[1] if selected else []
+        cadence_samples = max(0, len(observations) - 1)
+        gained = done - observations[0][1] if cadence_samples else 0
+        cadence_elapsed = now - observations[0][0] if cadence_samples else 0
+        idle = selected and bool(pending) and bool(cadence_samples) and gained == 0
+        forecast = self._forecast.get(cohort) if selected else None
+        overdue = bool(
+            selected and pending and forecast and done <= forecast[0] and now >= forecast[1]
+        )
         eta = (
             0
             if pending == 0
+            else pending * cadence_elapsed / gained
+            if selected and cadence_samples and gained > 0 and error is None and not overdue
+            else None
+            if selected
             else pending * sum(samples) / len(samples)
             if samples and error is None
             else None
         )
+        if selected and pending and eta is not None:
+            if forecast is None or done > forecast[0]:
+                self._forecast[cohort] = (done, now + eta)
+            else:
+                # A repeated snapshot/no-progress visit cannot move the last
+                # issued finish time forward. Expiry stays visible until work
+                # advances; the next gain then includes the intervening stall.
+                eta = forecast[1] - now
+        planning = None
+        if pending and not cadence_samples and selected and error is None:
+            # Planning only until two visits establish the wall-clock cadence.
+            # Both bounded allowances, other cohorts and poll sleeps contribute;
+            # a successful item's short execution time is not the lane rate.
+            slots = max(1, self.batch_size // 2)
+            visits = (pending + slots - 1) // slots
+            if self.batch_size == 1:
+                visits *= 2  # A populated historical lane takes alternate visits.
+            cycle = len(self.owners.owners) * (
+                self.poll_seconds
+                + 2 * self.batch_size * (self.delivery.capture_timeout_seconds + 30)
+            )
+            planning = [1, visits * cycle]
+        elif pending and not selected and not samples and error is None:
+            planning = [1, pending * (self.delivery.capture_timeout_seconds + 30)]
         value = {
             "cohort_sha256": cohort,
             "stage": stage,
@@ -203,23 +267,35 @@ class ReservedParticipationWorker:
             "percent": None if total is None else 100 * done / total if total else 100,
             "elapsed_seconds": round(elapsed, 3),
             "eta_seconds": None if eta is None else round(eta, 3),
-            "planning_eta_seconds": (
-                [1, pending * (self.delivery.capture_timeout_seconds + 30)]
-                if pending and not samples and error is None
-                else None
-            ),
+            "planning_eta_seconds": planning,
             "eta_basis": "completed"
             if pending == 0
             else "blocked_or_retrying"
             if error
+            else "selected_checkpoint_forecast_overdue"
+            if overdue
+            else "selected_checkpoint_completion_idle"
+            if idle
+            else "selected_checkpoint_wallclock_cadence"
+            if selected and cadence_samples
+            else "planning_wallclock_poll_range"
+            if selected
             else ("completed_requests_in_this_process" if samples else "planning_range"),
             "eta_scope": scope,
             "eta_assumptions": (
+                "same selected ready requests and process; serial cohort rotation, "
+                "poll sleeps and both recovery/participation allowances included; "
+                "before measured cadence, each attempt assumes capture budget plus 30 seconds; "
+                "registration and original evidence available; "
+                "excludes payload verification and certification"
+            )
+            if selected
+            else (
                 "registration and original evidence available; "
                 "excludes payload verification and certification"
             ),
-            "eta_samples": len(samples),
-            "stalled_or_retrying": error is not None,
+            "eta_samples": cadence_samples if selected else len(samples),
+            "stalled_or_retrying": error is not None or idle or overdue,
             "error_type": None,
             "repair_required": False,
             "reason_code": None,
@@ -269,6 +345,8 @@ class ReservedParticipationWorker:
         try:
             selection, done, pending, recoveries = await run_owned_thread(self._inventory, owner)
         except (ValueError, OSError, RuntimeError, sqlite3.Error) as error:
+            self._cadence.pop(cohort, None)
+            self._forecast.pop(cohort, None)
             return self._report(
                 cohort,
                 0,
@@ -283,6 +361,7 @@ class ReservedParticipationWorker:
         selected_done = 0 if selection is None else len(done - excluded)
         historical_done = len(done) - selected_done
         selected_total = None if selection is None else selected_done + len(selected)
+        self._bind_cadence(cohort, selection, set(selected) | (done - excluded))
         historical_total = historical_done + len(historical)
         queue_total = len(done) + len(pending)
         selected_scope = "selected_ready_participation_checkpoints"
@@ -407,10 +486,10 @@ class ReservedParticipationWorker:
                     selected_done += 1
                 else:
                     historical_done += 1
-                scope = selected_scope if lane == "selected" else historical_scope
-                samples = self._samples.setdefault((cohort, scope), [])
-                samples.append(time.monotonic() - started)
-                del samples[:-32]
+                if lane == "historical":
+                    samples = self._samples.setdefault((cohort, historical_scope), [])
+                    samples.append(time.monotonic() - started)
+                    del samples[:-32]
             except _UnselectedReservation:
                 skipped += 1
             except (ValueError, OSError, RuntimeError, sqlite3.Error) as error:
@@ -420,4 +499,5 @@ class ReservedParticipationWorker:
                     error, stage="participation_continuation"
                 )
             publish()
+        self._observe_cadence(cohort, selected_done)
         return publish()
