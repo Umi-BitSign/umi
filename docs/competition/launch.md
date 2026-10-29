@@ -231,6 +231,16 @@ is reported as requiring repair and never treated as completion. The scoped ETA
 requires at least three new complete models over five minutes in the sampler's
 current session, assumes comparable remaining cost and steady export delivery,
 and excludes subsequent certification and rewards. Overall ETA remains separate.
+Execution evidence readers copy bounded original step, attempt and result rows
+from one committed journal snapshot, then release SQLite before decoding,
+digesting and checking outputs. Bulk snapshots coordinate with the same owner's
+writers; ordinary bounded probes remain independent. Reviewer and settlement
+consumers that share an execution directory both need the updated reader.
+Inventory collection retains its original writer reservation, but semantic review
+runs afterward against the frozen collected originals without fetching newer
+journal state. These scheduling changes preserve original signed bytes and fresh
+authority/highwater checks; they do not cache evidence or repeat native history
+verification as a condition of exporting a case.
 Authenticated reviewer-epoch probes use a separate bounded HTTP pool so long
 admission/review requests cannot consume their connections, including on older
 lifecycle entry points. Epoch, work and settlement probes apply their deadlines
@@ -442,15 +452,22 @@ configuration. Complete these checks in order:
    at least 4 GiB for owner services, and a separate preparation lane. Populated
    rootless container cgroups remain charged at their full ceilings even if a
    reviewer exits and releases its lease. Admission waits rather than exceeding
-   capacity; its diagnostics identify the wait without changing signed clocks.
+   capacity; its diagnostics distinguish preparation and invocation waits
+   without changing signed clocks. Resident pairs reserve disk capacity only.
+   Acquire native memory admission after preparation, before loading case video,
+   and release it only after the invocation's container cleanup completes.
+   No pair retains native memory slots while waiting to prepare a model.
    Configure only the number of model slots qualified for the host's memory.
 
    Admitted pairs share one reference materialization, pin active model bytes,
    and project the complete resident working set before transfer. Resident reads
    can continue while another pair downloads. A pair larger than the bounded
-   cache takes all model slots and uses the supported single-model path; it
-   does not raise the cache cap or evict another active consumer. Interruption
-   preserves completed challenge checkpoints and resumable transfers. Extra
+   cache exclusively owns its local cache and uses the supported single-model
+   path, releasing native admission between swaps. It does not raise the cache
+   cap or evict another active consumer. Independently configured evaluators
+   keep separate managed cache slots; shared host memory admission does not
+   replace cache-owner exclusion. Interruption preserves completed challenge
+   checkpoints and resumable transfers. Extra
    candidate slots are bounded and reclaimed after their job completes; retain
    unfinished model slots across cooperative updates so restart can reuse their
    byte receipts. Rollback selects the

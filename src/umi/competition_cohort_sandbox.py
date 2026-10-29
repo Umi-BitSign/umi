@@ -93,12 +93,12 @@ class CohortCpuSandbox:
             if runtime_authorization is None
             else {"runtime_authorization": runtime_authorization}
         )
-        video = await run_owned_thread(
-            read_case_video, self.videos, case.video_sha256, job.runtime.maximum_video_bytes
-        )
         path = self._path(attempt)
 
         async def execute():
+            video = await run_owned_thread(
+                read_case_video, self.videos, case.video_sha256, job.runtime.maximum_video_bytes
+            )
             return await execute_offline_case(
                 bundle=model,
                 archive=archive,

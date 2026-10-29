@@ -354,13 +354,11 @@ def collect_partial_request_with_inputs(owner, slot, collected, *, shared=None):
     if evidence is not None:
         steps = list(enumerate(evidence.steps))
     else:
-        with owner.journal.read_transaction() as db:
-            steps = [
-                (index, step)
-                for index in range(step_count(job))
-                if (step := owner.step(job, index, db=db, shared=shared_source or False))
-                is not None
-            ]
+        steps = [
+            (index, step)
+            for index, step in enumerate(owner.steps_snapshot(job, shared=shared_source or False))
+            if step is not None
+        ]
 
     def retained_review(selected, case_id):
         key = digest(["umi-cohort-endpoint-case-review-record/1", digest(selected), case_id])
