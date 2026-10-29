@@ -782,16 +782,14 @@ class CohortIntake:
             raise AdmissionCapacityError("admission reservation metadata capacity exhausted")
         db.execute("INSERT INTO cohort_admission_reservations VALUES (?,?,?)", (key, cohort, now))
 
-    def _require_retained_admission(
-        self, db, history, request, reservation, reservation_provider=None
-    ):
-        cohort = digest(history.plan)
+    def _admission_reservation_deadline(self, db, cohort, request):
+        """Return the current cutoff only when an original reservation is needed."""
         deadline = retained_deadline(db, cohort)
         if (
             deadline is None
             or time.time_ns() // 1_000_000 < deadline.close_new_admissions_at_unix_ms
         ):
-            return
+            return None
         prior = db.execute(
             "SELECT cohort,admitted_ms FROM cohort_admission_reservations WHERE request=?",
             (digest(request),),
@@ -801,12 +799,21 @@ class CohortIntake:
             and prior[0] == cohort
             and prior[1] < deadline.close_new_admissions_at_unix_ms
         ):
-            return
-        if reservation is None and reservation_provider is not None:
-            reservation = reservation_provider(request)
+            return None
+        return deadline
+
+    def _require_retained_admission(
+        self, db, history, request, reservation, *, defer_reservation=False
+    ):
+        deadline = self._admission_reservation_deadline(db, digest(history.plan), request)
+        if deadline is None:
+            return True
         if reservation is None:
+            if defer_reservation:
+                return False
             raise CohortAdmissionClosed("new cohort admissions are closed by the operator deadline")
         reservation_precedes_deadline(reservation, request, deadline, self.policy)
+        return True
 
     def retain(
         self,
@@ -823,6 +830,28 @@ class CohortIntake:
         sub = request.signed_submission.submission
         if sub.track not in self.tracks:
             raise ValueError("submission track is not open for recoverable intake")
+        receipt = self._retain_attempt(
+            request,
+            capture,
+            observation,
+            reservation,
+            defer_reservation=reservation_provider is not None,
+        )
+        if receipt is not None:
+            return receipt
+        # The production payload router reads and qualifies acceptance intents
+        # through this same intake owner. Resolve only the needed original
+        # reservation after releasing intake.lock; the caller's issuance fence
+        # remains held. The final attempt rechecks current native authority.
+        reservation = reservation_provider(request)
+        return self._retain_attempt(request, capture, observation, reservation)
+
+    def _retain_attempt(
+        self, request, capture, observation, reservation, *, defer_reservation=False
+    ):
+        """Return a receipt, or None solely to resolve a reservation outside the lock."""
+        cohort = request.consent.consent.cohort_sha256
+        sub = request.signed_submission.submission
         with self._connection() as (db, store):
             key = digest(request.consent.consent)
             prior = db.execute(
@@ -830,10 +859,22 @@ class CohortIntake:
             ).fetchone()
             if prior is not None:
                 return self._receipt(prior[0], store, request)
+            if (
+                defer_reservation
+                and reservation is None
+                and self._admission_reservation_deadline(db, cohort, request) is not None
+            ):
+                # This first pass is metadata-only. Do not replay signed
+                # history just to discover the original-reservation lookup.
+                return None
             history = store.published_history(cohort)
-            self._require_retained_admission(
-                db, history, request, reservation, reservation_provider
-            )
+            if not self._require_retained_admission(
+                db, history, request, reservation, defer_reservation=defer_reservation
+            ):
+                # The cutoff may have crossed during history authentication.
+                # Defer through the same unlocked path, never call the router
+                # while this transaction owns intake.lock.
+                return None
             _, pending = store.status(cohort)
             if pending is not None and pending.is_policy_adoption:
                 kind = (
