@@ -517,7 +517,7 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(
         patch.setattr(direct_review, "_filesystem_device", lambda path: path.stat().st_dev)
         patch.setattr(direct_review, "_filesystem_usage", shutil.disk_usage)
         await check_inherited_direct_reference(
-            boot_reviewer(), direct_request, result, boot_root / "inherited-reference"
+            boot_reviewer(), direct_request, result, boot_root / "inherited-reference", monkeypatch
         )
 
     changed = next(record for record in bundle.files if record.size_bytes)

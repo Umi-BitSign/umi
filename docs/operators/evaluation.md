@@ -70,6 +70,13 @@ Missing or inconsistent source metadata holds readiness; actual materialization
 and execution retain their existing byte-verification requirements and durable
 completed results.
 
+An inherited baseline does not require every evaluator to have reviewed its
+original upload. The [certified baseline source path](promotion.md) authenticates
+its original metadata and retains that result separately from local review
+votes. Deploy the compatible native evaluator reader through its supported
+source-selection path while preserving the existing execution journal. The
+upload protocol and signed baseline do not change; miners do not resubmit.
+
 <a id="open-competition-evaluator--inputs-and-identity"></a>
 
 ### Inputs and identity

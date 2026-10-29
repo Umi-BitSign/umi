@@ -468,13 +468,16 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         request = self.request(job) if role == "candidate" else None
         if inspect.isawaitable(request):
             request = await request
-        source = (
-            None
-            if self.legacy_artifacts is None
-            else await run_owned_thread(
-                self.legacy_artifacts.execution_source, job, role, bundle, request
+        source = None
+        if self.legacy_artifacts is not None:
+            resolve = getattr(self.legacy_artifacts, "resolve_execution_source", None)
+            source = (
+                await resolve(job, role, bundle, request)
+                if resolve is not None
+                else await run_owned_thread(
+                    self.legacy_artifacts.execution_source, job, role, bundle, request
+                )
             )
-        )
         if source is None and (role != "candidate" or request.direct_artifact is None):
             return None
         if bundle is None:

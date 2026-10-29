@@ -435,13 +435,27 @@ def review_operation(*, reads: int):
     return decorate
 
 
-async def await_progress(work: Awaitable[_T], *, stage: str, cohort: str | None = None) -> _T:
+async def await_progress(
+    work: Awaitable[_T],
+    *,
+    stage: str,
+    cohort: str | None = None,
+    planning_range_seconds: tuple[float, float] | None = None,
+    planning_basis: str | None = None,
+) -> _T:
     """Report an explicit wait, retaining the awaited operation's ownership.
 
     A cancellable loop timer emits diagnostics; it never owns or cancels work
     and adds no task or cleanup await that could alter native cancellation.
     """
-    meter = WorkProgress(stage, 1, unit="responses", cohort=cohort)
+    meter = WorkProgress(
+        stage,
+        1,
+        unit="responses",
+        cohort=cohort,
+        planning_range_seconds=planning_range_seconds,
+        planning_basis=planning_basis,
+    )
     public_scope = meter.cohort or _cohort(meter.context.get("cohort_sha256"))
     public_token = PUBLIC_COHORT_SCOPE.set(public_scope) if public_scope is not None else None
     loop = asyncio.get_running_loop()

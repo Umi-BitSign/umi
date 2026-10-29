@@ -218,6 +218,7 @@ class BenchmarkHost:
                         ),
                         journal=model_reviewer.journal,
                         reference=reference,
+                        metadata=lambda job, review: self.model_sources.reference(job, review),
                     )
                 ),
             )
