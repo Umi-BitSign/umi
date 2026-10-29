@@ -1,6 +1,7 @@
 """Certified public metadata survives producer restart without repeating native work."""
 
 import hashlib
+import json
 import shutil
 from pathlib import Path
 
@@ -240,6 +241,172 @@ def test_unknown_cohort_is_refused_before_publication(watched):
     changed["cohorts"] = ["e" * 64]
     with pytest.raises(ValueError, match="unknown native cohort"):
         module.NativePublicCatalogWatchConfig.model_validate_json(canonical_json_bytes(changed))
+
+
+def with_deadlines(config, *, own=None, foreign=1000):
+    value = config.model_dump(mode="json", by_alias=True)
+    selected = config.cohorts[0]
+    other = "e" * 64 if selected != "e" * 64 else "d" * 64
+    intake = value["template"]["native_intake"]["config"]
+    intake["cohorts"] = sorted(
+        [*intake["cohorts"], dict(cohort_sha256=other, authority_sha256="f" * 64)],
+        key=lambda row: row["cohort_sha256"],
+    )
+    intake["admission_deadlines"] = sorted(
+        [
+            dict(
+                schema="umi-cohort-operator-admission-deadline/1",
+                cohort_sha256=cohort,
+                authority_sha256="f" * 64,
+                authorized_history_tip_sha256="1" * 64,
+                close_new_admissions_at_unix_ms=deadline,
+                source_sha256="2" * 64,
+                operator_plan_sha256="3" * 64,
+                reason="retained operator cutoff",
+            )
+            for cohort, deadline in ((selected, own), (other, foreign))
+            if deadline is not None
+        ],
+        key=lambda row: row["cohort_sha256"],
+    )
+    return module.NativePublicCatalogWatchConfig.model_validate_json(canonical_json_bytes(value))
+
+
+def retained_legacy_completion(config):
+    owner = module.NativePublicCatalogWatcher(config)
+    assert owner.poll_once()["held"] == []
+    path = Path(config.state_directory) / (config.cohorts[0] + ".json")
+    receipt = module.CatalogCompletion.model_validate_json(path.read_bytes()).checked()
+    receipt = receipt.model_copy(
+        update={
+            "binding_sha256": owner._binding(
+                owner._selected(config.cohorts[0]), legacy_deadlines=True
+            )
+        }
+    ).sealed()
+    raw = canonical_json_bytes(receipt) + b"\n"
+    path.write_bytes(raw)
+    return path, receipt, raw
+
+
+@pytest.mark.parametrize("own", [None, 500])
+def test_other_cohort_deadline_reuses_original_completion_bytes(watched, monkeypatch, own):
+    config, _, calls, _ = watched
+    initial = config if own is None else with_deadlines(config, own=own, foreign=None)
+    assert module.NativePublicCatalogWatcher(initial).poll_once()["held"] == []
+    path = Path(config.state_directory) / (config.cohorts[0] + ".json")
+    original = path.read_bytes()
+    monkeypatch.setattr(module, "prepare_native_cohort", forbid_native)
+    for foreign in (1000, 2000, None):
+        changed = with_deadlines(config, own=own, foreign=foreign)
+        restarted = module.NativePublicCatalogWatcher(changed)
+        assert restarted.poll_once()["held"] == []
+        assert restarted.poll_once()["held"] == []
+        assert path.read_bytes() == original
+    assert len(calls) == 1
+    assert not (Path(config.state_directory) / "binding-history").exists()
+
+
+@pytest.mark.parametrize("own", [None, 500])
+def test_legacy_deadline_binding_migrates_once_preserving_exact_original(
+    watched, monkeypatch, caplog, own
+):
+    config, _, calls, _ = watched
+    changed = with_deadlines(config, own=own)
+    path, before, raw = retained_legacy_completion(changed)
+    monkeypatch.setattr(module, "prepare_native_cohort", forbid_native)
+    restarted = module.NativePublicCatalogWatcher(changed)
+    caplog.set_level("INFO", logger="umi.competition.progress")
+    assert restarted.poll_once()["held"] == []
+    progress = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "umi.competition.progress"
+        and json.loads(record.message).get("stage") == "catalog_binding_compatibility"
+    ]
+    assert progress[0]["planning_eta_seconds"] == [0, 30]
+    assert progress[0]["eta_basis"] == "bounded_local_metadata_copy_and_atomic_wrapper_replacement"
+    assert progress[-1]["completed"] == progress[-1]["total"] == 1
+    assert progress[-1]["eta_seconds"] == 0
+    after = module.CatalogCompletion.model_validate_json(path.read_bytes()).checked()
+    assert before.binding_sha256 != after.binding_sha256
+    assert before.model_dump(exclude={"binding_sha256", "checksum"}) == after.model_dump(
+        exclude={"binding_sha256", "checksum"}
+    )
+    history = path.parent / "binding-history" / config.cohorts[0] / (before.checksum + ".json")
+    assert history.read_bytes() == raw
+    migrated = path.read_bytes()
+    with monkeypatch.context() as no_reads:
+        no_reads.setattr(module, "read_owned_file", forbid_native)
+        assert restarted.poll_once()["held"] == []
+    changed = with_deadlines(config, own=own, foreign=2000)
+    assert module.NativePublicCatalogWatcher(changed).poll_once()["held"] == []
+    assert path.read_bytes() == migrated
+    assert history.read_bytes() == raw
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("own", [None, 700])
+def test_own_cohort_deadline_change_refuses_without_rebinding(watched, monkeypatch, legacy, own):
+    config, _, _, _ = watched
+    initial = with_deadlines(config, own=500)
+    if legacy:
+        path, _, raw = retained_legacy_completion(initial)
+    else:
+        assert module.NativePublicCatalogWatcher(initial).poll_once()["held"] == []
+        path = Path(config.state_directory) / (config.cohorts[0] + ".json")
+        raw = path.read_bytes()
+    monkeypatch.setattr(module, "prepare_native_cohort", forbid_native)
+    result = module.NativePublicCatalogWatcher(with_deadlines(config, own=own)).poll_once()
+    assert result["held"][0]["stage"] == "catalog_completion"
+    assert "binding changed" in result["held"][0]["reason"]
+    assert path.read_bytes() == raw
+    assert not (path.parent / "binding-history").exists()
+
+
+def test_unknown_historical_foreign_deadline_requires_retained_config_repair(watched, monkeypatch):
+    config, _, _, _ = watched
+    path, _, raw = retained_legacy_completion(with_deadlines(config))
+    monkeypatch.setattr(module, "prepare_native_cohort", forbid_native)
+    result = module.NativePublicCatalogWatcher(with_deadlines(config, foreign=2000)).poll_once()
+    assert result["held"][0]["stage"] == "catalog_completion"
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("conflicting_history", [False, True])
+def test_legacy_binding_migration_interrupt_and_conflict_preserve_evidence(
+    watched, monkeypatch, conflicting_history
+):
+    config, _, _, _ = watched
+    changed = with_deadlines(config)
+    path, before, raw = retained_legacy_completion(changed)
+    history = path.parent / "binding-history" / config.cohorts[0] / (before.checksum + ".json")
+    if conflicting_history:
+        module.owned_directory(history.parent, create=True)
+        module.atomic_write(history, b"damaged historical evidence")
+    original_write = module.atomic_write
+
+    def interrupted(destination, data, **kwargs):
+        if destination == path:
+            raise OSError("interrupted binding migration after history retention")
+        return original_write(destination, data, **kwargs)
+
+    monkeypatch.setattr(module, "prepare_native_cohort", forbid_native)
+    monkeypatch.setattr(module, "atomic_write", interrupted)
+    result = module.NativePublicCatalogWatcher(changed).poll_once()
+    assert result["held"][0]["stage"] == "catalog_binding_compatibility"
+    assert path.read_bytes() == raw
+    assert history.read_bytes() == (b"damaged historical evidence" if conflicting_history else raw)
+    monkeypatch.setattr(module, "atomic_write", original_write)
+    result = module.NativePublicCatalogWatcher(changed).poll_once()
+    if conflicting_history:
+        assert result["held"][0]["stage"] == "catalog_binding_compatibility"
+        assert path.read_bytes() == raw
+    else:
+        assert result["held"] == []
+        assert history.read_bytes() == raw
+        assert path.read_bytes() != raw
 
 
 def legacy_case(watched, tmp_path, monkeypatch):

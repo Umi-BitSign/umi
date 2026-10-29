@@ -2724,7 +2724,9 @@ hashes whenever owner or reviewer configuration changes. Its authenticated
 history snapshot producer supplies `<cohort>.json` under `histories_directory`;
 missing history remains visible as pending work. The runner derives each new
 job from the owner’s actual configured cohort bindings and authenticated intake
-history. It skips earlier cohorts and histories whose intake phase has closed.
+history. It filters earlier cohorts using the selected series plans before
+requesting history; retained inactive plans do not require exports or block
+eligible selected cohorts. It skips histories whose intake phase has closed.
 The earliest effective block comes from that signed history, and each reviewer
 independently checks current authority before signing.
 
@@ -5200,6 +5202,18 @@ bytes require explicit repair. Completion state/output can be transferred to the
 supported durable locations without changing the selected native source/history
 namespace or redoing completed certification. Preserve these records in R2 with
 their recovery controls. Publication never gates settlement or reward activation.
+
+Catalog completion identity includes only the selected cohort's admission
+deadline. Adding or changing another cohort's deadline preserves completed work.
+On upgrade, an exact match to the previous unscoped selection migrates only the
+unsigned binding/checksum wrapper and retains the original bytes under
+`<state_directory>/binding-history/<cohort>/<checksum>.json` before replacement.
+Keep that history while rollback to an older catalog watcher remains supported;
+restore its exact matching original if rolling back. The authenticated projection,
+score identity and trigger stamp remain unchanged. A changed own-cohort deadline
+or an older foreign-deadline selection that no longer matches the retained config
+requires explicit repair using that exact historical config; never discard the
+completion or repeat native projection to bypass the mismatch.
 
 Deliver only `<cohort_sha256>.json` score artifacts to the public account's
 `<results.directory>/model-results/`, through the bounded public-metadata delivery
