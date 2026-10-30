@@ -152,7 +152,11 @@ def test_exclusive_writer_is_retryable_and_not_latched_as_repair(tmp_path, monke
         try:
             with pytest.raises(sqlite3.OperationalError) as result:
                 check(journal.root)
-            assert result.value.sqlite_errorcode & 0xFF == sqlite3.SQLITE_BUSY
+            code = getattr(result.value, "sqlite_errorcode", None)
+            if code is None:  # Python 3.10 exposes SQLite errors only through their message.
+                assert str(result.value) == "database is locked"
+            else:
+                assert code & 0xFF == sqlite3.SQLITE_BUSY
         finally:
             db.rollback()
     check(journal.root)

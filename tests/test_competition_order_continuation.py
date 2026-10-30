@@ -45,12 +45,19 @@ def _reservation_bytes(journal):
 def _corrupt(path, sql, args=()):
     """Damage only a disposable fixture, restoring fences to test binding checks."""
     with sqlite3.connect(path) as db:
+        schema_epoch = db.execute("PRAGMA schema_version").fetchone()[0]
         triggers = db.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger'").fetchall()
         for name, _ in triggers:
             db.execute(f'DROP TRIGGER "{name}"')
         db.execute(sql, args)
         for _, definition in triggers:
             db.execute(definition)
+        assert dict(db.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger'")) == dict(
+            triggers
+        )
+        # The identical fences are restored. Keep this disposable fixture's
+        # original schema epoch so only the requested row damage is exercised.
+        db.execute(f"PRAGMA schema_version={schema_epoch}")
 
 
 def _head(setup, milliseconds=100_001):

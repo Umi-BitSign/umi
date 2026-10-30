@@ -24,6 +24,8 @@ def test_native_coordinator_restart_preserves_capacity_and_round_records(setup):
     receipt = old.reserve_records("transport-test", [RecordReservation("vote", "sample", 4096)])
     old.put("vote", "sample", {"signed": "retained"})
     before = state(old)
+    with sqlite3.connect(old.path) as db:
+        before_epoch = db.execute("PRAGMA schema_version").fetchone()[0]
     config = RoundCoordinatorConfig.model_validate_json(
         canonical_json_bytes(
             setup.config.model_copy(
@@ -37,7 +39,20 @@ def test_native_coordinator_restart_preserves_capacity_and_round_records(setup):
     )
     upgraded = RoundCoordinator(config, setup.policy, setup.provider).journal
     after = state(upgraded)
-    assert {k: after["tables"][k] for k in before["tables"]} == before["tables"]
+    with sqlite3.connect(upgraded.path) as db:
+        after_epoch = db.execute("PRAGMA schema_version").fetchone()[0]
+    # Native transport DDL advances the retained validation epoch, preserving
+    # every other reservation, record and successful-validation field.
+    validation = "round_reservation_validation_state"
+    old_rows = before["tables"][validation]
+    assert len(old_rows) == 1
+    assert old_rows[0][2] == before_epoch.to_bytes(8, "big", signed=True)
+    assert after_epoch > before_epoch
+    expected = copy.deepcopy(before["tables"])
+    expected[validation] = [
+        (*old_rows[0][:2], after_epoch.to_bytes(8, "big", signed=True), *old_rows[0][3:])
+    ]
+    assert {k: after["tables"][k] for k in before["tables"]} == expected
     assert after["version"] == before["version"]
     assert upgraded.reservation("transport-test") == receipt
     assert len(after["tables"]["round_rpc_transport_changes"]) == 1

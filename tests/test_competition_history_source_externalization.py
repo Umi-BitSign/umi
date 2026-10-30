@@ -648,7 +648,7 @@ async def test_full_owner_bounded_replication_reclaims_payload_before_small_fram
     assert result["released_logical_bytes"] > 0
 
 
-async def test_source_publication_overlaps_four_transfers_and_restart_reuses_each_alias(
+async def test_source_publication_overlaps_eight_transfers_and_restart_reuses_each_alias(
     history_case, tmp_path, monkeypatch
 ):
     h = history_case
@@ -663,7 +663,7 @@ async def test_source_publication_overlaps_four_transfers_and_restart_reuses_eac
     with h.reader.journal.read_transaction() as db:
         tokens = {key: h.reader.remote_sources.source_token(*key, db) for key in keys}
 
-    barrier, lock = Barrier(4, timeout=10), Lock()
+    barrier, lock = Barrier(8, timeout=10), Lock()
     active = peak = 0
     publish = remote.put_bytes
 
@@ -685,7 +685,7 @@ async def test_source_publication_overlaps_four_transfers_and_restart_reuses_eac
 
     monkeypatch.setattr(remote, "put_bytes", concurrent)
     result = h.reader.remote_sources.externalize_many(keys)
-    assert peak == 4 and active == 0
+    assert peak == 8 and active == 0
     assert result["replicated_records"] == 9 and result["released_logical_bytes"] > 0
     assert retained(h.reader.journal) == successes
     with h.reader.journal.read_transaction() as db:

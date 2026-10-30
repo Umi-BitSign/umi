@@ -16,13 +16,14 @@ def test_acceptance_stage_planning_is_live_and_uses_completed_current_process_sa
     snapshots = CohortProgressSnapshots()
     monkeypatch.setattr(acceptance_module, "PUBLIC_COHORT_PROGRESS", snapshots)
     monkeypatch.setattr(work_module, "PUBLIC_COHORT_PROGRESS", snapshots)
-    recorded = []
+    recorded, owners = [], []
     worker = object.__new__(acceptance_module.ModelAcceptanceWorker)
     worker._stage_durations = defaultdict(lambda: deque(maxlen=16))
     worker.owner = SimpleNamespace(
         intake=SimpleNamespace(
             model_certification_progress=SimpleNamespace(
-                operation=lambda *args, **kwargs: recorded.append((args, kwargs))
+                operation=lambda *args, **kwargs: recorded.append((args, kwargs)),
+                acceptance_owner=lambda cohort, stage: owners.append((cohort, stage)),
             )
         )
     )
@@ -38,3 +39,4 @@ def test_acceptance_stage_planning_is_live_and_uses_completed_current_process_sa
         assert acceptance["eta_basis"].startswith("planning_current_process_completed_stage")
         assert acceptance["planning_eta_seconds"][1] <= 600
     assert len(recorded) == 6
+    assert owners == [(cohort, "promotion")] * 6

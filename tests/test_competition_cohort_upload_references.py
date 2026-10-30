@@ -1,5 +1,6 @@
 """Exercise native legacy polling beyond the full-request memory cache."""
 
+import json
 import logging
 
 import pytest
@@ -7,7 +8,7 @@ import pytest
 from umi.competition_assignment_reuse import AssignmentVerificationReuse
 from umi.competition_cohort_model_upload import CohortModelUploads
 from umi.competition_cohort_participation import CohortParticipationRequest
-from umi.open_competition import digest, sign_object
+from umi.open_competition import digest, digest_canonical_bytes, sign_object
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_cohort_intake import capture_at
@@ -138,16 +139,16 @@ def test_reference_damage_is_explicit_and_scoped_repair(delivery, monkeypatch, c
     receipts = list(active_reuse.directory.glob("*.json"))
     assert len(receipts) == len(keys)
     target = receipts[0]
+    value = json.loads(target.read_bytes())
+    damaged_key = json.loads(value["result_json"])["upload_sha256"]
+    assert damaged_key in keys
     if damage == "missing":
         target.unlink()
     elif damage == "corrupt":
         target.write_bytes(b"{}")
     else:
-        import json
-
         from umi.competition_verification_reuse import VerificationReuse
 
-        value = json.loads(target.read_bytes())
         # Publish a correctly checksummed receipt with the wrong result binding.
         for reuse in versions._reuse.values():
             if reuse.directory == target.parent:
@@ -161,7 +162,11 @@ def test_reference_damage_is_explicit_and_scoped_repair(delivery, monkeypatch, c
     calls = decode_counter(monkeypatch)
     result = h.owner.poll_once()
     assert result["last_error_type"] == "UploadReferenceRepairRequired"
-    assert not calls
+    decoded_keys = [digest_canonical_bytes(raw) for raw in calls]
+    assert damaged_key not in decoded_keys
+    # Healthy duplicates may supply one representative after a damaged reference.
+    assert len(decoded_keys) <= 1
+    assert set(decoded_keys) <= set(keys) - {damaged_key}
     assert "repair_required" in caplog.text
     reports = []
     assert h.owner.repair_retained_references(report=reports.append) == {
