@@ -19,7 +19,11 @@ from typing import Annotated, Literal
 from pydantic import Field, model_serializer, model_validator
 
 from .competition_evidence_codec import MAX_PROOF_OBJECT_BYTES, checked_digest
-from .competition_remote_proof_generation import install_generation, validate_generation
+from .competition_remote_proof_generation import (
+    generation_identity,
+    install_generation,
+    validate_generation,
+)
 from .competition_round_journal import RoundJournal
 from .competition_transport_verification import TransferProgress
 from .open_competition import digest
@@ -53,6 +57,11 @@ class ProofArchiveR2Config(StrictProtocolModel):
     archive_backfill_batch_frames: Annotated[int, Field(ge=0, le=256)] = 0
     archive_release_batch_files: Annotated[int, Field(ge=0, le=4096)] = 0
     archive_release_consumer_abi: Literal["umi-proof-read-release-lease/1"] | None = None
+    receipt_source_directory: Directory | None = None
+    imported_object_release_batch_files: Annotated[int, Field(ge=0, le=256)] = 0
+    imported_object_release_maximum_metadata_bytes: Annotated[
+        int, Field(ge=1024**2, le=1024**3)
+    ] = 16 * 1024**2
 
     @model_validator(mode="after")
     def legacy_selection(self):
@@ -60,14 +69,24 @@ class ProofArchiveR2Config(StrictProtocolModel):
             raise ValueError("retained local proof reads require explicit archive/2 selection")
         if self.source_release_batch_records and (not self.legacy_read_through or self.read_only):
             raise ValueError("source release requires writable retained-local archive/2 selection")
-        if (self.archive_backfill_batch_frames or self.archive_release_batch_files) and (
-            not self.legacy_read_through or self.read_only
-        ):
+        if (
+            self.archive_backfill_batch_frames
+            or self.archive_release_batch_files
+            or self.imported_object_release_batch_files
+        ) and (not self.legacy_read_through or self.read_only):
             raise ValueError("online archive migration requires writable retained-local archive/2")
         if self.archive_release_batch_files and not self.archive_backfill_batch_frames:
             raise ValueError("online archive release requires its bounded backfill cursor")
-        if self.archive_release_batch_files and self.archive_release_consumer_abi is None:
+        if (
+            self.archive_release_batch_files or self.imported_object_release_batch_files
+        ) and self.archive_release_consumer_abi is None:
             raise ValueError("online release requires explicit selected-consumer lease ABI")
+        if self.receipt_source_directory is not None and (
+            not self.read_only or not self.legacy_read_through
+        ):
+            raise ValueError(
+                "original receipt selection requires read-only retained-local archive/2"
+            )
         return self
 
     @model_serializer(mode="wrap")
@@ -81,9 +100,13 @@ class ProofArchiveR2Config(StrictProtocolModel):
             "archive_backfill_batch_frames",
             "archive_release_batch_files",
             "archive_release_consumer_abi",
+            "receipt_source_directory",
+            "imported_object_release_batch_files",
         ):
             if not getattr(self, name):
                 value.pop(name, None)
+        if self.imported_object_release_maximum_metadata_bytes == 16 * 1024**2:
+            value.pop("imported_object_release_maximum_metadata_bytes", None)
         return value
 
 
@@ -100,6 +123,18 @@ class ProofArchiveStores(StrictProtocolModel):
             raise ValueError("exported proof transport must permit publication")
         if self.imported is None and self.exported is None:
             raise ValueError("proof transport selection requires at least one remote store")
+        if (
+            self.exported is not None
+            and self.exported.imported_object_release_batch_files
+            and (
+                self.imported is None
+                or not self.imported.legacy_read_through
+                or self.imported.receipt_source_directory is None
+                or (self.imported.bucket, self.imported.prefix)
+                != (self.exported.bucket, self.exported.prefix)
+            )
+        ):
+            raise ValueError("imported object release requires its selected original fallback")
         return self
 
     def credential_paths(self) -> tuple[Path, ...]:
@@ -119,6 +154,42 @@ class RemoteProofReference(StrictProtocolModel):
     content_sha256: Hex32
     size_bytes: Annotated[int, Field(ge=1, le=MAX_PROOF_OBJECT_BYTES)]
     etag: Annotated[str, Field(min_length=1, max_length=256)]
+
+
+class _CompletionOwner(StrictProtocolModel):
+    namespace_sha256: Hex32
+    receipt_source_directory: Directory
+    root_device: str
+    root_inode: str
+    journal_device: str
+    journal_inode: str
+    schema_version: Annotated[int, Field(ge=0)]
+    generation_epoch: Hex32
+
+
+class _CompletionCursor(StrictProtocolModel):
+    schema_: Literal["umi-proof-completion-cursor/1"] = Field(alias="schema")
+    owner: _CompletionOwner
+    scan_rowid: Annotated[int, Field(ge=0)]
+    last_completion_rowid: Annotated[int, Field(ge=0)]
+    last_completion_id: Hex32 | None
+    completed_seen: Annotated[int, Field(ge=0)]
+    observed_completed: Annotated[int, Field(ge=0)]
+
+    @model_validator(mode="after")
+    def counted_frontier(self):
+        if (
+            self.completed_seen > self.observed_completed
+            or self.last_completion_rowid > self.scan_rowid
+            or (self.completed_seen == 0)
+            != (self.last_completion_rowid == 0 and self.last_completion_id is None)
+            or (
+                self.completed_seen > 0
+                and (self.last_completion_rowid == 0 or self.last_completion_id is None)
+            )
+        ):
+            raise ValueError("remote proof completion cursor has an invalid counted frontier")
+        return self
 
 
 _COMPLETION_KIND = "remote_proof_completion"
@@ -280,6 +351,14 @@ class RemoteProofStore:
         client=None,
         receipt_source_directory: Path | None = None,
     ):
+        if config.receipt_source_directory is not None:
+            selected_receipts = Path(config.receipt_source_directory)
+            if (
+                receipt_source_directory is not None
+                and receipt_source_directory != selected_receipts
+            ):
+                raise ValueError("receipt source differs from selected transport configuration")
+            receipt_source_directory = selected_receipts
         if receipt_source_directory is not None and (
             not config.read_only or root.resolve() == receipt_source_directory.resolve()
         ):
@@ -442,6 +521,148 @@ class RemoteProofStore:
             and self.journal.get("remote_proof_damage", key, db=damage_db) is not None
         ):
             raise ValueError("remote proof requires explicit original-generation repair")
+
+    @staticmethod
+    def _completion_files(owner):
+        root, journal = owner.root.lstat(), owner.path.lstat()
+        return tuple(
+            str(value) for value in (root.st_dev, root.st_ino, journal.st_dev, journal.st_ino)
+        )
+
+    def completion_page(self, cursor=None, *, maximum_records=256):
+        """Read one bounded page of immutable replication metadata, never proof bytes.
+
+        The caller retains the returned cursor atomically with its per-item work.
+        Only completed receipt rowids form the immutable frontier. An unfinished
+        scan has another immutable completion above it, so appends cannot reuse
+        a lower rowid. A caught-up scan stops at its last immutable completion,
+        never at a mutable tail. SQLite schema changes, including VACUUM,
+        require explicit cursor-layout repair; unrelated runtime changes and
+        ordinary receipt appends do not.
+
+        This is enumeration of already completed replication, not fresh remote
+        availability or native evidence acceptance. Deletion still needs the
+        selected reader lease and a fresh reference snapshot at its boundary.
+        """
+        if type(maximum_records) is not int or not 1 <= maximum_records <= 256:
+            raise ValueError("remote proof completion page must contain 1..256 records")
+        prior = None if cursor is None else _CompletionCursor.model_validate(cursor)
+        owner = self.receipt_source or self.journal
+        files = self._completion_files(owner)
+        with (
+            owner.read_transaction() as db,
+            (
+                self.journal.read_transaction()
+                if self.receipt_source is not None
+                else nullcontext(db)
+            ) as damage_db,
+        ):
+            generation = generation_identity(db)
+            if generation is None:
+                raise ValueError(
+                    "remote proof completion cursor requires original owner enrollment"
+                )
+            identity = _CompletionOwner(
+                namespace_sha256=self.namespace_sha256,
+                receipt_source_directory=str(owner.root),
+                root_device=files[0],
+                root_inode=files[1],
+                journal_device=files[2],
+                journal_inode=files[3],
+                schema_version=db.execute("PRAGMA schema_version").fetchone()[0],
+                generation_epoch=generation["epoch"],
+            )
+            completed = db.execute(
+                f"SELECT completed FROM {_COMPLETION_MARKER} WHERE id=1"
+            ).fetchone()[0]
+            if prior is None:
+                prior = _CompletionCursor(
+                    schema="umi-proof-completion-cursor/1",
+                    owner=identity,
+                    scan_rowid=0,
+                    last_completion_rowid=0,
+                    last_completion_id=None,
+                    completed_seen=0,
+                    observed_completed=completed,
+                )
+            if prior.owner != identity:
+                raise ValueError(
+                    "remote proof completion cursor owner/layout changed; explicit repair required"
+                )
+            if completed < prior.observed_completed:
+                raise ValueError(
+                    "remote proof completion count regressed; restore original metadata"
+                )
+            if prior.last_completion_rowid and db.execute(
+                "SELECT id FROM records WHERE rowid=? AND kind=?",
+                (prior.last_completion_rowid, _COMPLETION_KIND),
+            ).fetchone() != (prior.last_completion_id,):
+                raise ValueError(
+                    "remote proof completion cursor anchor changed; explicit repair required"
+                )
+            scan = prior.scan_rowid
+            seen = prior.completed_seen
+            last_rowid, last_id = prior.last_completion_rowid, prior.last_completion_id
+            references = []
+            rows = []
+            if seen < completed:
+                # The rowid range and LIMIT bound scanned rows as well as returned
+                # references. Filtering by kind first could sort the entire kind
+                # index, and an ID cursor would miss later lower-hash appends.
+                rows = db.execute(
+                    "SELECT rowid,kind,id FROM records WHERE rowid>? ORDER BY rowid LIMIT ?",
+                    (scan, maximum_records),
+                ).fetchall()
+                for rowid, kind, key in rows:
+                    scan = rowid
+                    if kind != _COMPLETION_KIND:
+                        continue
+                    raw = owner.get_raw(_COMPLETION_KIND, key, db=db)
+                    try:
+                        reference = RemoteProofReference.model_validate_json(raw)
+                        if (
+                            reference.namespace_sha256 != self.namespace_sha256
+                            or not reference.key.startswith(self.config.prefix + "/")
+                            or hashlib.sha256(reference.key.encode()).hexdigest() != key
+                        ):
+                            raise ValueError("completion identity differs")
+                    except (TypeError, ValueError) as error:
+                        raise ValueError(
+                            "remote proof completion ledger damaged; restore original metadata"
+                        ) from error
+                    if owner.get_raw("remote_proof_object", key, db=db) != raw:
+                        raise ValueError("remote proof replication receipt is missing or damaged")
+                    self._require_undamaged(reference, db, damage_db)
+                    references.append(reference.model_dump(mode="json", by_alias=True))
+                    seen += 1
+                    last_rowid, last_id = rowid, key
+                if seen > completed or (len(rows) < maximum_records and seen != completed):
+                    raise ValueError(
+                        "remote proof completion cursor count has a gap; explicit repair required"
+                    )
+            caught_up = seen == completed
+            if caught_up:
+                scan = last_rowid
+            result = _CompletionCursor(
+                schema="umi-proof-completion-cursor/1",
+                owner=identity,
+                scan_rowid=scan,
+                last_completion_rowid=last_rowid,
+                last_completion_id=last_id,
+                completed_seen=seen,
+                observed_completed=completed,
+            )
+            if self._completion_files(owner) != files:
+                raise ValueError(
+                    "remote proof completion owner changed during page; explicit repair required"
+                )
+            return dict(
+                cursor=result.model_dump(mode="json", by_alias=True),
+                references=references,
+                scanned_records=len(rows),
+                completed_total=completed,
+                caught_up=caught_up,
+            )
 
     @contextmanager
     def reference_snapshot(self):

@@ -1,0 +1,73 @@
+name: Focused retirement source qualification
+
+on:
+  push:
+    branches: [qualification/c8-retirement-public-20261030-v1]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: focused-retirement-public-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12.14'
+
+      - name: Install locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin 899c7c4520981a5996fab82d74bc7db6ee45eb57
+          python -m pip install --no-cache-dir uv==0.12.9
+          uv sync --locked --extra dev --no-cache --python "$(command -v python)"
+
+      - name: Run bounded public source tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          sudo -n systemd-run --unit=umi-retirement-public-v1 --wait --pipe \
+            --property=Type=exec --property=User="$(id -un)" --property=Group="$(id -gn)" \
+            --property=MemoryMax=1G --property=MemorySwapMax=0 --property=TasksMax=96 \
+            --property=CPUQuota=200% --property=RuntimeMaxSec=35min \
+            --property=TimeoutStopSec=15s --property=KillMode=control-group \
+            --property=PrivateTmp=yes --property=RuntimeDirectory=umi-retirement-public-v1 \
+            --property=RuntimeDirectoryMode=0700 --property=RuntimeDirectoryPreserve=no \
+            --property=WorkingDirectory="$GITHUB_WORKSPACE" \
+            --setenv=PYTHONDONTWRITEBYTECODE=1 --setenv=PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+            --setenv=RAYON_NUM_THREADS=1 --setenv=LANG=C.UTF-8 \
+            "$GITHUB_WORKSPACE/.venv/bin/python" -I -B -u tools/focused_retirement.py \
+              --scratch /run/umi-retirement-public-v1 --output "$GITHUB_WORKSPACE/results"
+
+      - name: Retain service result and ensure scratch cleanup
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p results
+          sudo -n systemctl stop umi-retirement-public-v1.service || true
+          sudo -n systemctl show umi-retirement-public-v1.service \
+            -p ActiveState -p SubState -p Result -p ExecMainStatus \
+            -p MemoryPeak -p MemorySwapPeak > results/unit-result.txt || true
+          test ! -e /run/umi-retirement-public-v1
+          printf '%s\n' 'service-owned scratch absent' > results/cleanup.txt
+
+      - name: Retain source patch and test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: focused-retirement-public-${{ github.sha }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 14

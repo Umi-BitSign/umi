@@ -83,18 +83,21 @@ class RetainedMultipart(Multipart):
 
     def __init__(self):
         super().__init__()
-        self.objects, self.copied_parts = {}, {}
+        self.objects, self.copied_parts, self.object_part_sizes = {}, {}, {}
         self.reads, self.copies, self.deletes = [], [], []
 
     async def head(self, key, *, at=None):
         raw = self.objects.get(key)
-        return (
-            None
-            if raw is None
-            else R2ObjectHead(
-                size_bytes=len(raw), etag=hashlib.md5(raw, usedforsecurity=False).hexdigest()
-            )
-        )
+        if raw is None:
+            return None
+        # R2 multipart ETags bind ordered part MD5s, even for one part. Derive
+        # them from current bytes so injected generation changes remain visible.
+        offset, digests = 0, []
+        for size in self.object_part_sizes[key]:
+            digests.append(hashlib.md5(raw[offset : offset + size], usedforsecurity=False).digest())
+            offset += size
+        etag = hashlib.md5(b"".join(digests), usedforsecurity=False).hexdigest()
+        return R2ObjectHead(size_bytes=len(raw), etag=f"{etag}-{len(digests)}")
 
     async def complete(self, key, *, upload_id, parts, at=None):
         assert (key, upload_id) in self.uploads
@@ -105,6 +108,7 @@ class RetainedMultipart(Multipart):
             assert len(raw) == part.size_bytes
             assert hashlib.md5(raw, usedforsecurity=False).hexdigest() == part.etag
         self.objects[key] = b"".join(chunks[part.part_number] for part in parts)
+        self.object_part_sizes[key] = tuple(part.size_bytes for part in parts)
         return (await self.head(key)).etag
 
     async def copy_part(
@@ -134,6 +138,7 @@ class RetainedMultipart(Multipart):
     async def delete_object(self, key, *, at=None):
         self.deletes.append(key)
         self.objects.pop(key, None)
+        self.object_part_sizes.pop(key, None)
 
     async def read_range(self, key, *, offset, size_bytes, at=None):
         self.reads.append((key, offset, size_bytes))

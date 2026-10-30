@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from umi.competition_cohort_service_host import ServiceAdmissionHost
+from umi.competition_cohort_readiness_wake import CohortReadinessWakes
 from umi.competition_registration_pins import RegistrationPinProjectionPending
 from umi.private_files import PrivateStateBusyError
 
@@ -24,7 +25,9 @@ def host_for(queues):
     host._registration_pin_cursor = 0
     host.config = SimpleNamespace(poll_seconds=0.01)
     host.uploads = host.direct_uploads = host.models = None
-    host.intake = SimpleNamespace(config=SimpleNamespace(cohorts=()))
+    host.intake = SimpleNamespace(
+        config=SimpleNamespace(cohorts=()), readiness_wakes=CohortReadinessWakes()
+    )
     return host
 
 

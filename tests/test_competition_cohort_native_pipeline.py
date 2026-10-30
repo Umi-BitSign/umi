@@ -726,14 +726,15 @@ async def run_pipeline(
         else:
             direct.configure_model_reviews(o, client, signatures)
 
-        # Independent artifact acceptance is required even for a baseline copy.
+        # The priority owner attempts the latest submission before its two
+        # superseded generations. Independent acceptance is still required.
         o.outages.add("dave.example")
-        assert (await o.service.models.poll_once())["entries_pending"] == 3
+        assert (await o.service.models.poll_once())["entries_pending"] == 1
         with pytest.raises(PendingModelArtifacts):
             o.service.models.owner.retained(
                 h.cohort, digest(submitted.signed_submission.submission)
             )
-        assert len(signatures) == 3
+        assert len(signatures) == 1 and set(signatures.values()) == {1}
         o.outages.clear()
         async with o.open() as app:
             assert app.state.lifecycle.provider is o.service.finality
@@ -749,13 +750,19 @@ async def run_pipeline(
         original_votes = dict(signatures)
         o.outages.clear()
         o.outages.add("charlie.example")
-        assert (await o.service.models.poll_once())["entries_exported"] == 3 * (cohort_index + 1)
+        assert (await o.service.models.poll_once())["entries_exported"] == 1
         assert all(signatures[k] == count for k, count in original_votes.items())
         accepted_artifact = o.service.models.owner.retained(
             h.cohort, digest(submitted.signed_submission.submission)
         )
         assert len(accepted_artifact.certificate.signatures) == 2
         o.outages.clear()
+        # Once latest acceptance is complete, the ordinary bounded pass also
+        # certifies/exports the original generations. Keep the full historical
+        # coverage and exact export count without changing priority scheduling.
+        assert (await o.service.models.poll_once())["entries_exported"] == 3 * (cohort_index + 1)
+        assert all(signatures[k] == count for k, count in original_votes.items())
+        assert set(signatures.values()) == {1}
 
         def evaluator(name):
             async def sign(body):

@@ -27,6 +27,7 @@ from umi.competition_cohort_service_work import (
     SignedServiceWorkClaim,
     review_service_catalog,
 )
+from umi.competition_round_reservation_checkpoint import ReservationValidationRepairRequired
 from umi.open_competition import digest, sign_object
 from umi.protocol import canonical_json_bytes
 
@@ -738,7 +739,10 @@ def test_different_namespace_requires_native_migration_instead_of_rebinding(queu
     admit(c)
     target = c.cfg.directory + "-other-path"
     shutil.copytree(c.cfg.directory, target)
-    with pytest.raises(ValueError, match="configuration changed"):
+    with pytest.raises(
+        ReservationValidationRepairRequired,
+        match="^reservation validation repair required: checkpoint or validation dependency changed$",
+    ):
         ServiceWorkQueue(c.cfg.model_copy(update={"directory": target}), c.h.batch["policy"])
 
 
@@ -1458,10 +1462,10 @@ def test_pin_older_journal_migrates_metadata_without_reading_originals(queue_cas
         ):
             db.execute("DROP TABLE " + table)
         db.execute("DELETE FROM records WHERE kind GLOB 'registration_pin_*'")
-    original = c.queue.journal.__class__._record
+    original = c.queue.journal.__class__._copy_record_bytes
     reads = []
 
-    def observe(self, db, kind, key):
+    def observe(self, db, kind, key, *, maximum_bytes=None):
         if kind in {
             "service_catalog",
             "service_round",
@@ -1469,9 +1473,9 @@ def test_pin_older_journal_migrates_metadata_without_reading_originals(queue_cas
             "service_admission",
         }:
             reads.append(kind)
-        return original(self, db, kind, key)
+        return original(self, db, kind, key, maximum_bytes=maximum_bytes)
 
-    monkeypatch.setattr(c.queue.journal.__class__, "_record", observe)
+    monkeypatch.setattr(c.queue.journal.__class__, "_copy_record_bytes", observe)
     migrated = ServiceWorkQueue(c.cfg, c.queue.policy)
     assert not reads
     assert migrated.retained_registration_blocks() == frozenset({400})

@@ -390,7 +390,8 @@ def test_native_journal_checks_size_before_blob_or_canonical_decode(stage):
             assert sql.startswith("SELECT length(body)")
             return SimpleNamespace(fetchone=lambda: (16385,))
 
-    journal = SimpleNamespace(maximum_record_bytes=1024 * 1024)
+    journal = object.__new__(RoundJournal)
+    journal.maximum_record_bytes = 1024 * 1024
     with bind(stage), pytest.raises(ValueError, match="byte bound"):
         RoundJournal._record(journal, NativeOwnerConnection(), "endpoint_replay_object", "x")
 
@@ -523,20 +524,42 @@ async def test_no_lane_unknown_route_refuses_before_body_parse(stage):
     assert failure.value.status_code == 503 and exporter.calls == 0
 
 
-async def test_stage_holds_service_polling_until_stop_without_work(stage):
+async def test_stage_keeps_pin_owner_but_holds_intake_polling_until_stop(stage):
     import asyncio
 
+    from umi.competition_cohort_readiness_wake import CohortReadinessWakes
     from umi.competition_cohort_service_host import ServiceAdmissionHost
 
-    stop = asyncio.Event()
+    stop, entered = asyncio.Event(), asyncio.Event()
+    host = object.__new__(ServiceAdmissionHost)
+    host.config = SimpleNamespace(poll_seconds=60)
+    host.intake = SimpleNamespace(
+        config=SimpleNamespace(cohorts=()), readiness_wakes=CohortReadinessWakes()
+    )
+    host.uploads = host.direct_uploads = host.reserved_participation = host.models = object()
+    calls = []
+
+    async def pins():
+        calls.append("registration_pins")
+        entered.set()
+        return {"status": "complete"}
+
+    async def forbidden():
+        pytest.fail("requests-only stage must not run intake or catalog reconciliation")
+
+    host._poll_registration_pins = pins
+    for name in ("catalogs", "legacy_uploads", "direct_uploads", "reserved_participation", "models"):
+        setattr(host, "_poll_" + name, forbidden)
     with bind(stage):
-        task = asyncio.create_task(ServiceAdmissionHost._poll(object(), stop))
-        await asyncio.sleep(0)
-        assert not task.done()
-        stop.set()
-        await task
+        task = asyncio.create_task(host._poll(stop))
+        try:
+            await asyncio.wait_for(entered.wait(), 30)
+            assert not task.done() and calls == ["registration_pins"]
+        finally:
+            stop.set()
+            await asyncio.wait_for(task, 30)
         with pytest.raises(ValueError):
-            await ServiceAdmissionHost._poll_catalogs(object())
+            await ServiceAdmissionHost._poll_catalogs(host)
 
 
 def test_operation_shape_budget_accumulates_unique_sources_without_charging_replay(stage):

@@ -9,6 +9,7 @@ import pytest
 
 from umi import competition_runner as runner
 from umi import host_memory_admission as memory
+from umi import host_model_cache as cache
 from umi.competition_cohort_endpoint_host import EndpointHost
 from umi.competition_cohort_evaluation import RecoverableEvaluationRound
 from umi.competition_cohort_parallel_cache import ModelPlan
@@ -120,7 +121,14 @@ async def test_effective_cpu_execution_preserves_actual_limits_and_receipt(
     amended, tmp_path, monkeypatch
 ):
     monkeypatch.setattr(runner.sys, "platform", "linux")
-    monkeypatch.setattr(runner.os, "geteuid", lambda: 1000)
+    # Rootless Podman is a synthetic port here. Do not alter the shared os
+    # module: the real cache lease must check the actual archive/lock owner.
+    actual_os = runner.os
+    monkeypatch.setattr(
+        runner, "os", SimpleNamespace(**(vars(actual_os) | {"geteuid": lambda: 1000}))
+    )
+    assert cache.os is actual_os
+    assert tmp_path.stat().st_uid == actual_os.geteuid()
     calls = []
 
     async def command(arguments, **kwargs):
@@ -158,6 +166,19 @@ async def test_effective_cpu_execution_preserves_actual_limits_and_receipt(
         video_sha256=hashlib.sha256(b"video").hexdigest(),
         video=b"video",
     )
+    # Even with valid runtime authorization, an archive owned by another
+    # effective user must fail through the real shared-lease entrypoint.
+    with monkeypatch.context() as wrong_owner:
+        wrong_owner.setattr(
+            cache,
+            "os",
+            SimpleNamespace(**(vars(actual_os) | {"geteuid": lambda: actual_os.geteuid() + 1})),
+        )
+        with pytest.raises(cache.CpuTimingInfrastructureError, match="archive_owner_unqualified"):
+            await runner.execute_offline_case(
+                **arguments, runtime_authorization=amended.authorization
+            )
+    assert calls == []
     with pytest.raises(runner.EvaluationInfrastructureError, match="signed policy"):
         await runner.execute_offline_case(**arguments)
     assert calls == []

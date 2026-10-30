@@ -1361,6 +1361,60 @@ publish to R2. An existing completed remote receipt retains its normal precedenc
 and repair requirements. Historical R2 backfill and local eviction remain separate
 qualified operations.
 
+To retire completed imported object copies while preserving the originals,
+select `receipt_source_directory` on the read-only, legacy-read-through imported
+store. It names the original exported archive's `.remote-state`, not a copied
+receipt index. Its endpoint, bucket and prefix must match that writable exporter.
+The imported store keeps its own bounded cache and damage ledger; original
+receipts remain read-only. Local objects from other producer namespaces remain
+available through the existing local fallback.
+
+The writable exported store's `imported_object_release_batch_files` enables a
+bounded object-only maintenance batch, independently of frame backfill. Select
+`archive_release_consumer_abi: "umi-proof-read-release-lease/1"` only after every
+actual reader of that import directory has adopted the matching fallback and
+lease behavior. A configured ABI string alone is not deployment evidence. Keep
+the source/config selection through the ordinary authenticated service upgrade;
+older readers cannot use a configuration containing unsupported fields. The
+history frontier binds the exported receipt owner; adding only the imported
+fallback preserves that dependency. If another selected consumer's retained
+receipt dependency actually changes, use its existing counted metadata adoption
+while preserving completed native block checks.
+
+The owner walks retained completion metadata with a durable cursor, binds each
+eligible content-addressed object to its settled local identity and original
+undamaged remote completion, and retires only the imported copy. It does not
+reread proof payloads, reconstruct frame graphs or repeat completed native proof
+verification to find candidates. Frame files, exported originals, original
+`.remote-state` and unrelated namespaces remain intact. Missing or damaged
+completion evidence requires explicit repair, not a new publication attempt.
+
+Readers hold the import root's shared `.proof-read-release.lock` through complete
+resolution and decoding. Retirement takes the exclusive nonblocking lease and
+rechecks the exact file identity before unlinking; an active reader defers that
+batch. Durable intent and completion records resume interrupted release. Count
+reclaimed bytes only after unlink and directory synchronization complete. The
+owner must retain bookkeeping headroom, report progress and its ETA basis, and
+continue bounded maintenance when history advancement is waiting or retrying.
+Its separate `imported_object_release_maximum_metadata_bytes` allowance defaults
+to 16 MiB; it does not enlarge the producer's receipt index. The default local
+retirement database has an 80 MiB physical ceiling, with rollback and transaction
+headroom budgeted separately. Intent/completion slots and the final aggregate
+cursor are allocated before unlink. Once a batch is complete, one transaction
+selects that aggregate cursor and removes only its completed scratch records;
+the original proof receipts remain intact. This keeps bookkeeping bounded over
+successive batches without restarting the receipt scan.
+No whole-directory scan or proof that the entire disk deficit can be recovered
+is required before useful individually proven batches run.
+
+A legacy proof copier that can recreate these imports must remain frozen until
+its write/restart path honors the same retirement boundary. Preserve its frozen
+process and retained state; object retirement does not authorize thawing it or
+deleting its source. Recovery uses the untouched exported originals and original
+R2 receipts. Before rolling back to a reader without this fallback, restore the
+required local copies through the supported owner path. Do not permit an older
+reader to consume a partially retired import root.
+
 Synchronous proof-frame writes, encoded transfers, reads and bounded history
 source replication batches reuse one HTTP client per owned worker thread. Nested
 object publications share that operation's connection; its outer scope closes
