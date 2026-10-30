@@ -1,0 +1,1677 @@
+{
+  "schema": "umi-bounded-ci-continuation-selection/1",
+  "prepared_utc": "2026-10-30T20:17:17.448819+00:00",
+  "original_revision": "899c7c4520981a5996fab82d74bc7db6ee45eb57",
+  "target_revision": "b9ee32bed36e1f62debc04315129cced9127f742",
+  "qualified_runtime_revision": "da3a8578c8edc66ad5220b7deae04c187c2926b1",
+  "target_src_tree": "afbf6b056016387d844e8b6d9e00513c062983f1",
+  "uv_lock_sha256": "c261a7fee410be2fad32d1ab7c1071148a790f2a4afa305b4a17b79029f6a451",
+  "manifest_sha256": "892b9f4c28c4bb4c0e29101a580ed4474c709370ad75afa00b45261b6c1f0885",
+  "test_followup_files": {
+    "tests/logging_helpers.py": "50e94b2f6dfe143a34e818bae02a2a8efa34643bbc6ebaa75f0ec7179964a74a",
+    "tests/test_competition_cohort_order_delivery.py": "75b4c8188255f209339ea050cf89db2f94315e9a175ba5841fcb87ff345c0c53",
+    "tests/test_competition_cohort_participation_delivery.py": "50a43169c702d1385f51e24063ac4e038cc96f2f5ce2d10b048663b06045c66e",
+    "tests/test_competition_cohort_request_rule_api.py": "7e4be160f8e28fe217ad71b652c9aaa73ef7acbbdeabb97119d81368c77eded7",
+    "tests/test_competition_cohort_reserved_participation.py": "de0828912ef1fd369f18cccb64bac6aa8b0053c80441036a955209afe697d2c3",
+    "tests/test_competition_cohort_service_grants.py": "75212d534294ae79d272587ffe389e135d6004601a76ba3fb04977e4c5959d09",
+    "tests/test_competition_reward_delivery_lifetime.py": "ea90f773a3762736a33ad797ddfe257cc779efbe3268ac48d809447ff67b1e73"
+  },
+  "python_versions": {
+    "3.10": "3.10.22",
+    "3.12": "3.12.15",
+    "3.14": "3.14.9"
+  },
+  "modules": [
+    "tests/test_competition_cohort_intake.py",
+    "tests/test_competition_cohort_lifecycle.py",
+    "tests/test_competition_cohort_model_batch_worker.py",
+    "tests/test_competition_cohort_native_direct.py",
+    "tests/test_competition_cohort_native_nc.py",
+    "tests/test_competition_cohort_native_pipeline.py",
+    "tests/test_competition_cohort_native_series.py",
+    "tests/test_competition_cohort_order_delivery.py",
+    "tests/test_competition_cohort_participation_delivery.py",
+    "tests/test_competition_cohort_request_rule_api.py",
+    "tests/test_competition_cohort_request_rule_publication.py",
+    "tests/test_competition_cohort_reserved_participation.py",
+    "tests/test_competition_cohort_sandbox.py",
+    "tests/test_competition_cohort_service_grants.py",
+    "tests/test_competition_evaluator_budget.py",
+    "tests/test_competition_progress_capacity.py",
+    "tests/test_competition_remote_proof_store.py",
+    "tests/test_competition_reservation_validation_checkpoint.py",
+    "tests/test_competition_reward_admission_migration.py",
+    "tests/test_competition_reward_checkpoint_restore_retry.py",
+    "tests/test_competition_reward_coverage_backfill.py",
+    "tests/test_competition_reward_delivery_lifetime.py"
+  ],
+  "original_markers": [
+    {
+      "module": "tests/test_competition_cohort_lifecycle.py",
+      "python_minor": "3.14",
+      "markers": ".........F............",
+      "job": 124101922257,
+      "log_sha256": "8cc7c9c41eef23058101d5b8c4e3df19eb2ee8e7128014591a9d7d30789e05aa",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_model_batch_worker.py",
+      "python_minor": "3.14",
+      "markers": "......F.....F...............",
+      "job": 124101922257,
+      "log_sha256": "8cc7c9c41eef23058101d5b8c4e3df19eb2ee8e7128014591a9d7d30789e05aa",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_native_direct.py",
+      "python_minor": "3.14",
+      "markers": "...FFFF",
+      "job": 124101922257,
+      "log_sha256": "8cc7c9c41eef23058101d5b8c4e3df19eb2ee8e7128014591a9d7d30789e05aa",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_native_nc.py",
+      "python_minor": "3.14",
+      "markers": "F",
+      "job": 124101922257,
+      "log_sha256": "8cc7c9c41eef23058101d5b8c4e3df19eb2ee8e7128014591a9d7d30789e05aa",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_order_delivery.py",
+      "python_minor": "3.14",
+      "markers": "FFFF........................................................................................................",
+      "job": 124101922257,
+      "log_sha256": "8cc7c9c41eef23058101d5b8c4e3df19eb2ee8e7128014591a9d7d30789e05aa",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_sandbox.py",
+      "python_minor": "3.14",
+      "markers": "FF.......................................ss..ss..ss..ssssssssss..ss........ssss",
+      "job": 124101922257,
+      "log_sha256": "8cc7c9c41eef23058101d5b8c4e3df19eb2ee8e7128014591a9d7d30789e05aa",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_service_grants.py",
+      "python_minor": "3.14",
+      "markers": "..........................................................................................................................................................................................................................FFF..............................",
+      "job": 124101922257,
+      "log_sha256": "8cc7c9c41eef23058101d5b8c4e3df19eb2ee8e7128014591a9d7d30789e05aa",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_evaluator_budget.py",
+      "python_minor": "3.14",
+      "markers": ".......................................................................................................................FFFFFFFF",
+      "job": 124101922257,
+      "log_sha256": "8cc7c9c41eef23058101d5b8c4e3df19eb2ee8e7128014591a9d7d30789e05aa",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_remote_proof_store.py",
+      "python_minor": "3.14",
+      "markers": "...................F.....................",
+      "job": 124101922257,
+      "log_sha256": "8cc7c9c41eef23058101d5b8c4e3df19eb2ee8e7128014591a9d7d30789e05aa",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_reward_delivery_lifetime.py",
+      "python_minor": "3.14",
+      "markers": "FFFF",
+      "job": 124101922257,
+      "log_sha256": "8cc7c9c41eef23058101d5b8c4e3df19eb2ee8e7128014591a9d7d30789e05aa",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_lifecycle.py",
+      "python_minor": "3.10",
+      "markers": ".........F............",
+      "job": 124101922363,
+      "log_sha256": "04f0628e0906f6980ddd3f191ad48e8a516cdd69f796f75948236d3f0517d6ac",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_model_batch_worker.py",
+      "python_minor": "3.10",
+      "markers": ".....F.F.....F..............",
+      "job": 124101922363,
+      "log_sha256": "04f0628e0906f6980ddd3f191ad48e8a516cdd69f796f75948236d3f0517d6ac",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_native_direct.py",
+      "python_minor": "3.10",
+      "markers": "...FFFF",
+      "job": 124101922363,
+      "log_sha256": "04f0628e0906f6980ddd3f191ad48e8a516cdd69f796f75948236d3f0517d6ac",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_native_nc.py",
+      "python_minor": "3.10",
+      "markers": "F",
+      "job": 124101922363,
+      "log_sha256": "04f0628e0906f6980ddd3f191ad48e8a516cdd69f796f75948236d3f0517d6ac",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_order_delivery.py",
+      "python_minor": "3.10",
+      "markers": "FFFF........................................................................................................",
+      "job": 124101922363,
+      "log_sha256": "04f0628e0906f6980ddd3f191ad48e8a516cdd69f796f75948236d3f0517d6ac",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_participation_delivery.py",
+      "python_minor": "3.10",
+      "markers": "..........FFFFF..",
+      "job": 124101922363,
+      "log_sha256": "04f0628e0906f6980ddd3f191ad48e8a516cdd69f796f75948236d3f0517d6ac",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_sandbox.py",
+      "python_minor": "3.10",
+      "markers": "FF.......................................ss..ss..ss..ssssssssss..ss........ssss",
+      "job": 124101922363,
+      "log_sha256": "04f0628e0906f6980ddd3f191ad48e8a516cdd69f796f75948236d3f0517d6ac",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_service_grants.py",
+      "python_minor": "3.10",
+      "markers": "..........................................................................................................................................................................................................................FFF..............................",
+      "job": 124101922363,
+      "log_sha256": "04f0628e0906f6980ddd3f191ad48e8a516cdd69f796f75948236d3f0517d6ac",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_evaluator_budget.py",
+      "python_minor": "3.10",
+      "markers": ".......................................................................................................................FFFFFFFF",
+      "job": 124101922363,
+      "log_sha256": "04f0628e0906f6980ddd3f191ad48e8a516cdd69f796f75948236d3f0517d6ac",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_remote_proof_store.py",
+      "python_minor": "3.10",
+      "markers": "...................F.....................",
+      "job": 124101922363,
+      "log_sha256": "04f0628e0906f6980ddd3f191ad48e8a516cdd69f796f75948236d3f0517d6ac",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_reward_delivery_lifetime.py",
+      "python_minor": "3.10",
+      "markers": "FFFF",
+      "job": 124101922363,
+      "log_sha256": "04f0628e0906f6980ddd3f191ad48e8a516cdd69f796f75948236d3f0517d6ac",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_native_pipeline.py",
+      "python_minor": "3.14",
+      "markers": "FFFFFF",
+      "job": 124101922404,
+      "log_sha256": "550cf0d2d22682907335716b62421d629442b5f409aecf378a10e10c819efbd6",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_native_series.py",
+      "python_minor": "3.14",
+      "markers": "F",
+      "job": 124101922404,
+      "log_sha256": "550cf0d2d22682907335716b62421d629442b5f409aecf378a10e10c819efbd6",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_request_rule_api.py",
+      "python_minor": "3.14",
+      "markers": "..............FF....",
+      "job": 124101922404,
+      "log_sha256": "550cf0d2d22682907335716b62421d629442b5f409aecf378a10e10c819efbd6",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_request_rule_publication.py",
+      "python_minor": "3.14",
+      "markers": "F.",
+      "job": 124101922404,
+      "log_sha256": "550cf0d2d22682907335716b62421d629442b5f409aecf378a10e10c819efbd6",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_progress_capacity.py",
+      "python_minor": "3.14",
+      "markers": "F.........",
+      "job": 124101922404,
+      "log_sha256": "550cf0d2d22682907335716b62421d629442b5f409aecf378a10e10c819efbd6",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_reward_admission_migration.py",
+      "python_minor": "3.14",
+      "markers": ".............................F.....",
+      "job": 124101922404,
+      "log_sha256": "550cf0d2d22682907335716b62421d629442b5f409aecf378a10e10c819efbd6",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_reward_checkpoint_restore_retry.py",
+      "python_minor": "3.14",
+      "markers": "FFFFFFFFF",
+      "job": 124101922404,
+      "log_sha256": "550cf0d2d22682907335716b62421d629442b5f409aecf378a10e10c819efbd6",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_reward_coverage_backfill.py",
+      "python_minor": "3.14",
+      "markers": ".........F..FFFF......",
+      "job": 124101922404,
+      "log_sha256": "550cf0d2d22682907335716b62421d629442b5f409aecf378a10e10c819efbd6",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_intake.py",
+      "python_minor": "3.10",
+      "markers": "....................................................F",
+      "job": 124101922499,
+      "log_sha256": "f9de2a6f0ce57762ae916626d91a826f25dba5f36c7e4e989100c591d6b7a153",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_native_pipeline.py",
+      "python_minor": "3.10",
+      "markers": "FFFFFF",
+      "job": 124101922499,
+      "log_sha256": "f9de2a6f0ce57762ae916626d91a826f25dba5f36c7e4e989100c591d6b7a153",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_native_series.py",
+      "python_minor": "3.10",
+      "markers": "F",
+      "job": 124101922499,
+      "log_sha256": "f9de2a6f0ce57762ae916626d91a826f25dba5f36c7e4e989100c591d6b7a153",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_request_rule_api.py",
+      "python_minor": "3.10",
+      "markers": "..............FF....",
+      "job": 124101922499,
+      "log_sha256": "f9de2a6f0ce57762ae916626d91a826f25dba5f36c7e4e989100c591d6b7a153",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_request_rule_publication.py",
+      "python_minor": "3.10",
+      "markers": "F.",
+      "job": 124101922499,
+      "log_sha256": "f9de2a6f0ce57762ae916626d91a826f25dba5f36c7e4e989100c591d6b7a153",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_reserved_participation.py",
+      "python_minor": "3.10",
+      "markers": ".......................F.",
+      "job": 124101922499,
+      "log_sha256": "f9de2a6f0ce57762ae916626d91a826f25dba5f36c7e4e989100c591d6b7a153",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_progress_capacity.py",
+      "python_minor": "3.10",
+      "markers": "F.........",
+      "job": 124101922499,
+      "log_sha256": "f9de2a6f0ce57762ae916626d91a826f25dba5f36c7e4e989100c591d6b7a153",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_reservation_validation_checkpoint.py",
+      "python_minor": "3.10",
+      "markers": "..F....................",
+      "job": 124101922499,
+      "log_sha256": "f9de2a6f0ce57762ae916626d91a826f25dba5f36c7e4e989100c591d6b7a153",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_reward_admission_migration.py",
+      "python_minor": "3.10",
+      "markers": ".............................F.....",
+      "job": 124101922499,
+      "log_sha256": "f9de2a6f0ce57762ae916626d91a826f25dba5f36c7e4e989100c591d6b7a153",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_reward_checkpoint_restore_retry.py",
+      "python_minor": "3.10",
+      "markers": "FFFFFFFFF",
+      "job": 124101922499,
+      "log_sha256": "f9de2a6f0ce57762ae916626d91a826f25dba5f36c7e4e989100c591d6b7a153",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_reward_coverage_backfill.py",
+      "python_minor": "3.10",
+      "markers": ".........F..FFFF......",
+      "job": 124101922499,
+      "log_sha256": "f9de2a6f0ce57762ae916626d91a826f25dba5f36c7e4e989100c591d6b7a153",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_lifecycle.py",
+      "python_minor": "3.12",
+      "markers": ".........F............",
+      "job": 124101922573,
+      "log_sha256": "c10b4eb918ac99372d9b57bd5c73d213f3881af671960437f190293ba0e0ef7d",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_model_batch_worker.py",
+      "python_minor": "3.12",
+      "markers": "....FF.FF....F..F...........",
+      "job": 124101922573,
+      "log_sha256": "c10b4eb918ac99372d9b57bd5c73d213f3881af671960437f190293ba0e0ef7d",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_native_direct.py",
+      "python_minor": "3.12",
+      "markers": "...FFFF",
+      "job": 124101922573,
+      "log_sha256": "c10b4eb918ac99372d9b57bd5c73d213f3881af671960437f190293ba0e0ef7d",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_native_nc.py",
+      "python_minor": "3.12",
+      "markers": "F",
+      "job": 124101922573,
+      "log_sha256": "c10b4eb918ac99372d9b57bd5c73d213f3881af671960437f190293ba0e0ef7d",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_order_delivery.py",
+      "python_minor": "3.12",
+      "markers": "FFFF........................................................................................................",
+      "job": 124101922573,
+      "log_sha256": "c10b4eb918ac99372d9b57bd5c73d213f3881af671960437f190293ba0e0ef7d",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_sandbox.py",
+      "python_minor": "3.12",
+      "markers": "FF.......................................ss..ss..ss..ssssssssss..ss........ssss",
+      "job": 124101922573,
+      "log_sha256": "c10b4eb918ac99372d9b57bd5c73d213f3881af671960437f190293ba0e0ef7d",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_service_grants.py",
+      "python_minor": "3.12",
+      "markers": "..........................................................................................................................................................................................................................FFF..............................",
+      "job": 124101922573,
+      "log_sha256": "c10b4eb918ac99372d9b57bd5c73d213f3881af671960437f190293ba0e0ef7d",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_evaluator_budget.py",
+      "python_minor": "3.12",
+      "markers": ".......................................................................................................................FFFFFFFF",
+      "job": 124101922573,
+      "log_sha256": "c10b4eb918ac99372d9b57bd5c73d213f3881af671960437f190293ba0e0ef7d",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_remote_proof_store.py",
+      "python_minor": "3.12",
+      "markers": "...................F.....................",
+      "job": 124101922573,
+      "log_sha256": "c10b4eb918ac99372d9b57bd5c73d213f3881af671960437f190293ba0e0ef7d",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_reward_delivery_lifetime.py",
+      "python_minor": "3.12",
+      "markers": "FFFF",
+      "job": 124101922573,
+      "log_sha256": "c10b4eb918ac99372d9b57bd5c73d213f3881af671960437f190293ba0e0ef7d",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_native_pipeline.py",
+      "python_minor": "3.12",
+      "markers": "FFFFFF",
+      "job": 124101922724,
+      "log_sha256": "040b995c36898749a78aa9a6cb62821b30c5d67719ad282fda7abac8a7d8e3fe",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_native_series.py",
+      "python_minor": "3.12",
+      "markers": "F",
+      "job": 124101922724,
+      "log_sha256": "040b995c36898749a78aa9a6cb62821b30c5d67719ad282fda7abac8a7d8e3fe",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_request_rule_api.py",
+      "python_minor": "3.12",
+      "markers": "..............FF....",
+      "job": 124101922724,
+      "log_sha256": "040b995c36898749a78aa9a6cb62821b30c5d67719ad282fda7abac8a7d8e3fe",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_cohort_request_rule_publication.py",
+      "python_minor": "3.12",
+      "markers": "F.",
+      "job": 124101922724,
+      "log_sha256": "040b995c36898749a78aa9a6cb62821b30c5d67719ad282fda7abac8a7d8e3fe",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_progress_capacity.py",
+      "python_minor": "3.12",
+      "markers": "F.........",
+      "job": 124101922724,
+      "log_sha256": "040b995c36898749a78aa9a6cb62821b30c5d67719ad282fda7abac8a7d8e3fe",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_reward_admission_migration.py",
+      "python_minor": "3.12",
+      "markers": ".............................F.....",
+      "job": 124101922724,
+      "log_sha256": "040b995c36898749a78aa9a6cb62821b30c5d67719ad282fda7abac8a7d8e3fe",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_reward_checkpoint_restore_retry.py",
+      "python_minor": "3.12",
+      "markers": "FFFFFFFFF",
+      "job": 124101922724,
+      "log_sha256": "040b995c36898749a78aa9a6cb62821b30c5d67719ad282fda7abac8a7d8e3fe",
+      "subsequent_file_observed": true
+    },
+    {
+      "module": "tests/test_competition_reward_coverage_backfill.py",
+      "python_minor": "3.12",
+      "markers": ".........F..FFFF......",
+      "job": 124101922724,
+      "log_sha256": "040b995c36898749a78aa9a6cb62821b30c5d67719ad282fda7abac8a7d8e3fe",
+      "subsequent_file_observed": true
+    }
+  ],
+  "explicit": [
+    {
+      "selector": "tests/test_competition_cohort_participation_delivery.py::test_retry_wrappers_preserve_boundary_and_original_cause",
+      "expected_count": 5,
+      "python": "3.10.22"
+    },
+    {
+      "selector": "tests/test_competition_cohort_reserved_participation.py::test_worker_and_public_progress_preserve_typed_retry_cause_without_private_text[False]",
+      "expected_count": 1,
+      "python": "3.10.22"
+    },
+    {
+      "selector": "tests/test_competition_reward_delivery_lifetime.py::test_prefix_drops_old_graph_before_loading_next",
+      "expected_count": 4,
+      "python": "3.12.15"
+    },
+    {
+      "selector": "tests/test_competition_cohort_order_delivery.py::test_native_queue_to_each_native_inbox_and_quiet_restart",
+      "expected_count": 4,
+      "python": "3.12.15"
+    },
+    {
+      "selector": "tests/test_competition_cohort_request_rule_api.py::test_profile_covers_slow_history_finality_reservation_and_complete_vote",
+      "expected_count": 1,
+      "python": "3.12.15"
+    },
+    {
+      "selector": "tests/test_competition_cohort_service_grants.py::test_native_reward_allocation_replays_lost_commit_without_new_head",
+      "expected_count": 3,
+      "python": "3.12.15"
+    }
+  ],
+  "excluded_completed_nodes": {
+    "tests/test_competition_imported_proof_retirement.py::test_metadata_only_retirement_preserves_originals_and_restores_from_r2": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_imported_proof_retirement.py::test_active_reader_blocks_release_and_restart_drains_before_new_page": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_imported_proof_retirement.py::test_crash_after_unlink_recovers_intent_without_recounting_or_rereading": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_imported_proof_retirement.py::test_finish_capacity_is_reserved_before_any_unlink": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_imported_proof_retirement.py::test_metadata_allowance_refuses_before_unlink_and_slots_stay_preallocated": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_imported_proof_retirement.py::test_interrupted_compaction_reuses_completed_slots_without_scanning_or_unlinking": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_imported_proof_retirement.py::test_imported_root_replacement_holds_before_opening_replacement_journal": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_imported_proof_retirement.py::test_missing_enrolled_retirement_journal_is_not_recreated_or_rescanned": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_imported_proof_retirement.py::test_replaced_enrolled_database_inode_requires_explicit_repair": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_imported_proof_retirement.py::test_interrupted_pristine_enrollment_resumes_without_reclaiming_early": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_imported_proof_retirement.py::test_damage_observed_after_admission_prevents_unlink[producer]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_imported_proof_retirement.py::test_damage_observed_after_admission_prevents_unlink[consumer]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_imported_proof_retirement.py::test_changed_local_generation_and_missing_unclaimed_file_hold": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_imported_proof_retirement.py::test_wrong_selected_original_owner_refuses_before_release": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_imported_proof_retirement.py::test_maintenance_runs_even_when_history_advancement_fails": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_verification_rules.py::test_selected_dependency_manifest_is_complete_and_qualified": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_verification_rules.py::test_unrelated_change_preserves_receipts_but_verifier_change_requires_qualification": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_verification_rules.py::test_external_version_drift_requires_qualification_without_discarding_completed_abi": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_verification_rules.py::test_additive_shared_incumbent_semantics_are_guarded_without_invalidating_legacy_receipts": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_core_classes.py::test_same_model_name_cannot_hide_mixed_performance_and_efficiency_cores": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_core_classes.py::test_equivalent_disjoint_slots_match_but_different_core_types_do_not": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_core_classes.py::test_equal_core_type_does_not_hide_different_cpu_capacity": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_core_classes.py::test_partial_class_exposure_is_not_a_homogeneous_class[core_type]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_core_classes.py::test_partial_class_exposure_is_not_a_homogeneous_class[capacity]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_core_classes.py::test_intel_without_known_core_type_refuses_even_with_capacity[None-]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_core_classes.py::test_intel_without_known_core_type_refuses_even_with_capacity[0-]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_core_classes.py::test_intel_without_known_core_type_refuses_even_with_capacity[None-hybrid_cpu]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_core_classes.py::test_hybrid_flag_cannot_use_vendor_fallback": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_core_classes.py::test_virtual_amd_fallback_records_visible_identity_and_unknown_placement": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_core_classes.py::test_arm_fallback_requires_uniform_visible_implementer_and_part": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_core_classes.py::test_exposed_arm_capacity_is_bound_across_slots": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_core_classes.py::test_unknown_unexposed_vendor_is_not_silently_qualified": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_core_classes.py::test_invalid_exposed_capacity_is_not_treated_as_absent[0]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_core_classes.py::test_invalid_exposed_capacity_is_not_treated_as_absent[-1]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_core_classes.py::test_invalid_exposed_capacity_is_not_treated_as_absent[unknown]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_core_classes.py::test_invalid_exposed_capacity_is_not_treated_as_absent[2147483648]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_core_classes.py::test_stronger_topology_requires_fresh_profile_without_rewriting_old_digest": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_timing.py::test_session_uses_existing_owned_slot_without_allocating_another": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_timing.py::test_missing_or_changed_host_controls_refuse_timing[partition-exclusive_partition_not_active]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_timing.py::test_missing_or_changed_host_controls_refuse_timing[exclusive-exclusive_partition_not_active]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_timing.py::test_missing_or_changed_host_controls_refuse_timing[smt-shared_smt_core_unqualified]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_timing.py::test_missing_or_changed_host_controls_refuse_timing[governor-frequency_class_changed]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_timing.py::test_missing_or_changed_host_controls_refuse_timing[numa-numa_profile_changed]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_timing.py::test_missing_or_changed_host_controls_refuse_timing[online-online_cpu_partition_changed]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_timing.py::test_missing_or_changed_host_controls_refuse_timing[released-existing_slot_lease_released]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_timing.py::test_missing_or_changed_host_controls_refuse_timing[quota-cpu_quota_changed]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_timing.py::test_missing_or_changed_host_controls_refuse_timing[hardware-profile_hardware_changed]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_timing.py::test_actual_container_resources_are_checked_before_gate_release": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_timing.py::test_recreated_cgroup_keeps_measurement_semantics_but_not_live_identity": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_timing.py::test_measurement_profile_excludes_installation_paths_and_qualification_receipt": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_timing.py::test_profile_is_exact_protected_metadata[None-None]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_timing.py::test_profile_is_exact_protected_metadata[digest-identity_changed]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_timing.py::test_profile_is_exact_protected_metadata[writable-not_protected]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_timing.py::test_profile_is_exact_protected_metadata[locks-existing_locks_mismatch]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_host_cpu_timing.py::test_profile_is_exact_protected_metadata[roots-container_roots_mismatch]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_cpu_partition_restoration.py::test_restored_shared_slot_has_no_quota_but_owned_payloads_keep_exact_limit": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_owned_parent_preserves_accounting_after_short_container_exit": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_sampler_detects_changed_kernel_profile[cpu.max-100000 100000-cpu_quota_changed]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_sampler_detects_changed_kernel_profile[cpuset.cpus.effective-0-2-cpuset_changed]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_sampler_detects_changed_kernel_profile[memory.max-1-memory_profile_changed]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_sampler_detects_changed_kernel_profile[memory.swap.max-1-memory_profile_changed]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_sampler_detects_changed_kernel_profile[cgroup.type-threaded-cgroup_not_domain]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_sampler_rejects_missing_counters_or_changed_cpu_identity": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_sampler_refuses_symlink_cgroup_and_files": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_finite_shared_ancestor_quota_refuses_even_when_large[100000 100000-root]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_finite_shared_ancestor_quota_refuses_even_when_large[100000 100000-shared]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_finite_shared_ancestor_quota_refuses_even_when_large[100000 100000-slot]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_finite_shared_ancestor_quota_refuses_even_when_large[10000000 100000-root]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_finite_shared_ancestor_quota_refuses_even_when_large[10000000 100000-shared]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_finite_shared_ancestor_quota_refuses_even_when_large[10000000 100000-slot]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_restored_ancestor_quota_cannot_hide_throttling[nr_throttled-shared]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_restored_ancestor_quota_cannot_hide_throttling[nr_throttled-slot]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_restored_ancestor_quota_cannot_hide_throttling[throttled_usec-shared]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_restored_ancestor_quota_cannot_hide_throttling[throttled_usec-slot]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_ancestor_usage_and_old_throttling_do_not_reject_owned_model_cost": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_ancestor_controls_cannot_disappear_or_reset[reset-ancestor_counter_reset]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_ancestor_controls_cannot_disappear_or_reset[replace-ancestor_identity_changed]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_ancestor_controls_cannot_disappear_or_reset[missing_quota-kernel_context_unavailable]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_ancestor_controls_cannot_disappear_or_reset[missing_counter-kernel_context_unavailable]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_ancestry_depth_is_bounded_before_opening_kernel_directories": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cpu_timing.py::test_failed_ancestry_open_closes_all_pinned_descriptors": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v5/events.jsonl"
+    },
+    "tests/test_competition_cohort_suite_adoption_api.py::test_first_qualification_keeps_owner_locks_free_and_rechecks_only_bound_identities[none-prepare]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-adoption_py310/events.jsonl"
+    },
+    "tests/test_competition_cohort_suite_adoption_api.py::test_first_qualification_keeps_owner_locks_free_and_rechecks_only_bound_identities[none-reserve]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-adoption_py310/events.jsonl"
+    },
+    "tests/test_competition_cohort_suite_adoption_api.py::test_first_qualification_keeps_owner_locks_free_and_rechecks_only_bound_identities[tip-prepare]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-adoption_py310/events.jsonl"
+    },
+    "tests/test_competition_cohort_suite_adoption_api.py::test_first_qualification_keeps_owner_locks_free_and_rechecks_only_bound_identities[tip-reserve]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-adoption_py310/events.jsonl"
+    },
+    "tests/test_competition_cohort_suite_adoption_api.py::test_first_qualification_keeps_owner_locks_free_and_rechecks_only_bound_identities[input-prepare]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-adoption_py310/events.jsonl"
+    },
+    "tests/test_competition_cohort_suite_adoption_api.py::test_first_qualification_keeps_owner_locks_free_and_rechecks_only_bound_identities[input-reserve]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-adoption_py310/events.jsonl"
+    },
+    "tests/test_competition_cohort_native_pipeline.py::test_accepted_model_reaches_native_reward_package[normal-precommit_model_inventory]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-native_model/events.jsonl"
+    },
+    "tests/test_competition_cohort_native_pipeline.py::test_accepted_model_reaches_native_reward_package[outage-restart-precommit_model_inventory]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-native_model/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-allowance]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-assignment]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-complete]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-consumption]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-order_allowance]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-profile]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-proof]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-qualification]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-allowance]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-assignment]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-complete]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-consumption]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-order_allowance]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-profile]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-proof]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-qualification]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_missing_completed_admission_cannot_use_continuation[umi-open-competition-policy/1-complete]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_missing_completed_admission_cannot_use_continuation[umi-open-competition-policy/1-manifest]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_missing_completed_admission_cannot_use_continuation[umi-open-competition-policy/2-complete]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_missing_completed_admission_cannot_use_continuation[umi-open-competition-policy/2-manifest]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_settlement_controller_resumes_original_votes_after_peer_outage[progress-standing]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_settlement_controller_resumes_original_votes_after_peer_outage[transition-standing]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_reward_preparation.py::test_settlement_serialization_scope_preserves_native_checks_and_package_bytes[standing]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_cohort_continued_model_retry.py::test_continued_retry_refuses_missing_or_changed_owned_facts_without_payload_reads[missing_byte_result-model-awards-legacy6]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_cohort_continued_model_retry.py::test_continued_retry_refuses_missing_or_changed_owned_facts_without_payload_reads[damaged_byte_result-model-awards-legacy6]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_cohort_continued_model_retry.py::test_continued_retry_refuses_missing_or_changed_owned_facts_without_payload_reads[missing_byte_receipt-model-awards-legacy6]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-changed_assertions/events.jsonl"
+    },
+    "tests/test_competition_cohort_native_reference_compatibility.py::test_mixed_reference_encodings_survive_interrupted_native_certified_rewards[mixed-precommit_model_inventory]": {
+      "basis": "retained complete setup/call/teardown",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/artifacts-v6-native_reference/events.jsonl"
+    },
+    "tests/test_competition_order_continuation.py::test_authorization_cannot_request_order_continuation[umi-open-competition-policy/1]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_authorization_cannot_request_order_continuation[umi-open-competition-policy/2]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_changed_order_cannot_spend_an_existing_reservation[umi-open-competition-policy/1]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_changed_order_cannot_spend_an_existing_reservation[umi-open-competition-policy/2]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_completed_publication_order_continues_while_another_claim_is_unknown[umi-open-competition-policy/1-True]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_completed_publication_order_continues_while_another_claim_is_unknown[umi-open-competition-policy/2-True]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/1-evaluation_closed]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/1-issue_closed]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/1-order_changed]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/1-quorum]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/1-stale]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/2-evaluation_closed]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/2-issue_closed]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/2-order_changed]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/2-quorum]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/2-stale]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rechecks_native_receipts_and_time_immediately_before_signing[umi-open-competition-policy/1-evaluation_closed]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rechecks_native_receipts_and_time_immediately_before_signing[umi-open-competition-policy/1-final_proof]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rechecks_native_receipts_and_time_immediately_before_signing[umi-open-competition-policy/1-issue_closed]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rechecks_native_receipts_and_time_immediately_before_signing[umi-open-competition-policy/1-lost_native]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rechecks_native_receipts_and_time_immediately_before_signing[umi-open-competition-policy/2-evaluation_closed]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rechecks_native_receipts_and_time_immediately_before_signing[umi-open-competition-policy/2-final_proof]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rechecks_native_receipts_and_time_immediately_before_signing[umi-open-competition-policy/2-issue_closed]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_rechecks_native_receipts_and_time_immediately_before_signing[umi-open-competition-policy/2-lost_native]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_requires_the_retained_review_receipt[umi-open-competition-policy/1]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_requires_the_retained_review_receipt[umi-open-competition-policy/2]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_still_requires_every_native_receipt[umi-open-competition-policy/1-dispatch]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_still_requires_every_native_receipt[umi-open-competition-policy/1-evaluator]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_still_requires_every_native_receipt[umi-open-competition-policy/1-execution]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_still_requires_every_native_receipt[umi-open-competition-policy/1-signing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_still_requires_every_native_receipt[umi-open-competition-policy/2-dispatch]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_still_requires_every_native_receipt[umi-open-competition-policy/2-evaluator]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_still_requires_every_native_receipt[umi-open-competition-policy/2-execution]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_continuation_still_requires_every_native_receipt[umi-open-competition-policy/2-signing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_existing_order_does_not_recharge_a_failed_remaining_timing_envelope[umi-open-competition-policy/1]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_existing_order_does_not_recharge_a_failed_remaining_timing_envelope[umi-open-competition-policy/2]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_late_exact_order_signs_during_dispatch_without_changing_reservations[umi-open-competition-policy/1-False]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_late_exact_order_signs_during_dispatch_without_changing_reservations[umi-open-competition-policy/1-True]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_late_exact_order_signs_during_dispatch_without_changing_reservations[umi-open-competition-policy/2-False]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_late_exact_order_signs_during_dispatch_without_changing_reservations[umi-open-competition-policy/2-True]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_partial_native_admission_cannot_be_promoted_to_continuation[umi-open-competition-policy/1]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_partial_native_admission_cannot_be_promoted_to_continuation[umi-open-competition-policy/2]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_retained_receipt_still_enforces_logical_capacity[umi-open-competition-policy/1]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_retained_receipt_still_enforces_logical_capacity[umi-open-competition-policy/2]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_retained_receipt_still_rejects_stale_owned_finality[umi-open-competition-policy/1]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_order_continuation.py::test_retained_receipt_still_rejects_stale_owned_finality[umi-open-competition-policy/2]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_automatic_coverage_capture_lost_ack_and_offline_restart[opportunity-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_automatic_settlement_assembly_delivery_and_late_restart[False-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_automatic_settlement_assembly_delivery_and_late_restart[True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_automatic_settlement_fetches_missing_original_pulse_and_resumes[False-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_automatic_settlement_fetches_missing_original_pulse_and_resumes[True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_automatic_settlement_incomplete_sources_never_sign[catalog-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_automatic_settlement_incomplete_sources_never_sign[changed-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_automatic_settlement_incomplete_sources_never_sign[missing-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_automatic_settlement_incomplete_sources_never_sign[pulse-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_automatic_settlement_incomplete_sources_never_sign[revoked-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_automatic_settlement_incomplete_sources_never_sign[round-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_automatic_settlement_incomplete_sources_never_sign[superseded-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_automatic_settlement_recovers_interrupted_publication[after_input-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_automatic_settlement_recovers_interrupted_publication[before_input-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_automatic_settlement_recovers_interrupted_publication[export-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_baseline_candidate_requires_its_native_preparation_owner[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_boot_reconstructs_initial_package_from_native_retained_history[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_cancellation_retains_completed_native_replay[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_complete_native_history_package_and_projection_restart_without_coordinator[extra_recipient-False-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_complete_native_history_package_and_projection_restart_without_coordinator[matching-False-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_complete_native_history_package_and_projection_restart_without_coordinator[matching-True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_complete_native_history_package_and_projection_restart_without_coordinator[missing_recipient-False-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_complete_native_history_package_and_projection_restart_without_coordinator[permit_missing-False-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_complete_native_history_package_and_projection_restart_without_coordinator[raw_row-False-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_complete_native_history_package_and_projection_restart_without_coordinator[sparse_zeros-False-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_completed_native_interval_credit_restores_with_shared_dependency_refresh[opportunity-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_coverage_waits_for_both_validators_and_rebuilds_after_outage[complete_preparation_case0-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_durable_snapshot_preparation_reuses_native_work_across_all_consumers[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_failed_replay_retries_and_independent_bindings_are_enforced[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_historical_package_requires_an_effective_allocation[admitted-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_historical_package_requires_an_effective_allocation[draining-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_historical_package_requires_an_effective_allocation[revoked-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_historical_package_uses_effective_predecessor_during_drain[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_historical_preparation_rechecks_manifest_and_package_identity[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_initial_package_is_recoverable_after_successor_or_revocation[draining-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_initial_package_is_recoverable_after_successor_or_revocation[revoked-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_initial_package_is_recoverable_after_successor_or_revocation[selected-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_installed_coverage_discovers_completes_and_recovers_without_coordinator[completion_ack-opportunity-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_installed_coverage_discovers_completes_and_recovers_without_coordinator[export-opportunity-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_installed_coverage_discovers_completes_and_recovers_without_coordinator[none-opportunity-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_later_cached_package_cannot_backdate_certification[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_lazy_native_coverage_releases_package_and_reloads_earlier_history[opportunity-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_admission_signs_only_an_empty_reserved_control_history[signing_admission-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_allocation_export_repairs_partial_delivery_without_replay[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_control_publisher_recovers_original_proofs_and_finalized_history[control_publication-8-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_coordinator_recovers_admission_then_certifies_first_activation[coordinator-8-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_coverage_retention_retries_and_offline_restart[journal-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_coverage_retention_retries_and_offline_restart[opportunity-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_historical_coverage_capture[opportunity-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_package_projection_retains_original_signing_inputs[4-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_package_replay_is_reused_but_projection_needs_fresh_control[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_pending_activation_signs_recovers_and_delivers_after_restart[opportunity-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_quality_publication_progress_counts_durable_actions[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_request_certification_starts_recurring_settlement[files-True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_request_certification_starts_recurring_settlement[rclone-True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_reward_package_uses_dedicated_aggregate_file_and_replay_budget[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_settlement_does_not_publish_invalid_or_revoked_evidence[missing_evidence-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_settlement_does_not_publish_invalid_or_revoked_evidence[revoked-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_settlement_does_not_publish_invalid_or_revoked_evidence[terms-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_settlement_does_not_publish_invalid_or_revoked_evidence[wrong_phase_result-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_settlement_recovers_every_stage_and_keeps_one_package[closed_quality_peer-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_settlement_recovers_every_stage_and_keeps_one_package[cohort_reward_allocation-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_settlement_recovers_every_stage_and_keeps_one_package[publish-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_settlement_recovers_every_stage_and_keeps_one_package[service_allocation_peer-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_native_settlement_waits_for_service_votes_then_recovers_capacity[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity[0-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity[1-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity[2-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity[None-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_pending_activation_can_prepare_but_cannot_project[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_portable_proofs_restore_fresh_native_journals_without_history_rpc[opportunity-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_projection_requires_selected_and_effective_allocation_to_agree[different_activation-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_projection_requires_selected_and_effective_allocation_to_agree[missing-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_recurring_settlement_certifies_without_inference_or_manual_votes[True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_recurring_settlement_certifies_without_inference_or_manual_votes[precommitted-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_recurring_settlement_loops_publish_with_automatic_file_delivery[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_recurring_settlement_retries_without_signing_unverified_results[changed_vote-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_recurring_settlement_retries_without_signing_unverified_results[missing_execution-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_recurring_settlement_retries_without_signing_unverified_results[missing_proof-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_recurring_settlement_retries_without_signing_unverified_results[revoked-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reference_input_package_cannot_replace_certified_scoring_inputs[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reference_review_rejects_incomplete_or_changed_inputs[catalog-True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reference_review_rejects_incomplete_or_changed_inputs[corrupt_reference-True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reference_review_rejects_incomplete_or_changed_inputs[early-True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reference_review_rejects_incomplete_or_changed_inputs[reference-True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reference_review_rejects_incomplete_or_changed_inputs[reveal-True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reference_review_rejects_incomplete_or_changed_inputs[suite-True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reference_review_rejects_incomplete_or_changed_inputs[terminal-True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reference_service_resumes_original_intent_without_fresh_observation[True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_remote_coverage_reuses_native_facts_after_eviction_restart_and_repair[opportunity-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_retained_coverage_package_keeps_native_owner_and_historical_boundary[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_retained_coverage_package_refuses_changed_activation_or_authority[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reviewed_automatic_inputs_require_original_replica[changed-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reviewed_automatic_inputs_require_original_replica[lost-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reviewer_imports_only_verified_history_extensions[None-True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reviewer_imports_only_verified_history_extensions[decisions-True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reviewer_imports_only_verified_history_extensions[filename-True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reviewer_imports_only_verified_history_extensions[fork-True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reviewer_imports_only_verified_history_extensions[proof-True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reviewer_imports_only_verified_history_extensions[signature-True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reward_delivery_consumers_reuse_snapshots_and_require_explicit_repair[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reward_input_publication_holds_incomplete_or_conflicting_inputs[missing-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reward_input_publication_holds_incomplete_or_conflicting_inputs[unsigned-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reward_input_publication_holds_incomplete_or_conflicting_inputs[wrong_allocation-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reward_input_publication_holds_incomplete_or_conflicting_inputs[wrong_package-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reward_input_publication_recovers_original_bytes_and_offline_source[decisions-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reward_input_publication_recovers_original_bytes_and_offline_source[packages-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_reward_snapshot_detaches_nested_mutation_and_preserves_exact_budget[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_runtime_adoption_retains_old_facts_and_new_native_archive_after_restart[forward-opportunity-Yuma-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_runtime_adoption_retains_old_facts_and_new_native_archive_after_restart[historical_gap-opportunity-Yuma-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_settlement_file_delivery_recovers_phases_with_independent_state[False-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_settlement_file_delivery_recovers_phases_with_independent_state[True-standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_settlement_file_request_rejects_changes_before_history_or_proof_io[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_settlement_file_reviewer_loop_recovers_after_missing_proof[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_settlement_input_replica_recovers_before_quality_votes[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_settlement_input_replica_rejects_missing_or_changed_evidence[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_settlement_peer_replays_original_proofs_before_signing_without_blocking_loop[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_settlement_phase_signing_rejects_changed_body_and_drains_cancellation[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    },
+    "tests/test_competition_reward_preparation.py::test_settlement_releases_parsed_package_after_native_replay[standing]": {
+      "basis": "retained unaffected pass reuse decision",
+      "receipt": "operations/qualification/20261030/C8-cpu-efficiency-v1/operational-integration/hosted-retirement-public-v1/native189-reuse-decision-v1.json"
+    }
+  },
+  "executed": false,
+  "collection_scope": "Only listed modules, collect-only on original and target under same locked env and original pytest plugins. No tests execute during collection.",
+  "mapping_rule": "Require complete original module marker count equal collected node count, and exact original/target node identity and order per interpreter. Refuse mismatches; map only F positions. Union F nodes across interpreters without inferring passes from dots.",
+  "execution_rule": "Each selected node executes once, on Python 3.12 when it failed there, otherwise on a Python version that emitted its F; explicit fixed-case assignments override. No entire module execution.",
+  "target_tests_tree": "0a28dc74d183cb63f1ab4855ba1ac639aaef8b97"
+}

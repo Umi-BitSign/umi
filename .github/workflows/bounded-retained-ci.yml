@@ -1,0 +1,157 @@
+name: Bounded retained CI continuation
+
+on:
+  push:
+    branches: [qualification/c8-retained-ci-20261030-v1]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: bounded-retained-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        python: ['3.10.22', '3.12.15', '3.14.9']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install fixture tools and locked dependencies
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg rclone
+          python -m pip install --no-cache-dir uv==0.12.9
+          uv sync --locked --extra dev --no-cache --python "$(command -v python)"
+      - name: Collect original and target identities without running tests
+        run: |
+          mkdir -p results
+          sudo -n systemd-run --unit=umi-bounded-ci-v1 --wait --pipe \
+            --property=Type=exec --property=User="$(id -un)" --property=Group="$(id -gn)" \
+            --property=MemoryMax=1536M --property=MemorySwapMax=0 --property=TasksMax=96 \
+            --property=CPUQuota=200% --property=RuntimeMaxSec=900s \
+            --property=TimeoutStopSec=15s --property=KillMode=control-group \
+            --property=PrivateTmp=yes --property=RuntimeDirectory=umi-bounded-ci-v1 \
+            --property=RuntimeDirectoryMode=0700 --property=RuntimeDirectoryPreserve=no \
+            --property=WorkingDirectory="$GITHUB_WORKSPACE" \
+            --setenv=PYTHONDONTWRITEBYTECODE=1 --setenv=PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+            --setenv=RAYON_NUM_THREADS=1 --setenv=LANG=C.UTF-8 \
+            "$GITHUB_WORKSPACE/.venv/bin/python" -I -B -u tools/bounded_ci.py pair \
+              --spec "$GITHUB_WORKSPACE/tools/bounded_ci_input.json" \
+              --source "$GITHUB_WORKSPACE" --scratch /run/umi-bounded-ci-v1 \
+              --output "$GITHUB_WORKSPACE/results"
+      - name: Retain result and verify cleanup
+        if: always()
+        run: |
+          sudo -n systemctl stop umi-bounded-ci-v1.service || true
+          sudo -n systemctl show umi-bounded-ci-v1.service \
+            -p Result -p ExecMainStatus -p MemoryPeak -p MemorySwapPeak > results/unit-result.txt || true
+          test ! -e /run/umi-bounded-ci-v1
+          printf '%s\n' 'service-owned scratch absent' > results/cleanup.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: bounded-ci-collection-${{ matrix.python }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 14
+
+  select:
+    needs: collect
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.selection.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Download only this run's collection receipts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download '${{ github.run_id }}' --pattern 'bounded-ci-collection-*' --dir collections
+      - name: Refuse identity mismatches and select only affected unfinished nodes
+        id: selection
+        run: |
+          python3 -I -B tools/bounded_ci.py plan \
+            --spec tools/bounded_ci_input.json --collections collections --output selection
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: bounded-ci-selection
+          path: selection/
+          if-no-files-found: error
+          retention-days: 14
+
+  qualify:
+    needs: select
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install fixture tools and locked dependencies
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg rclone
+          python -m pip install --no-cache-dir uv==0.12.9
+          uv sync --locked --extra dev --no-cache --python "$(command -v python)"
+      - name: Download exact selected nodes from this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download '${{ github.run_id }}' --name bounded-ci-selection --dir selection
+          cp selection/selection.json tools/bounded_ci_selection.json
+      - name: Run selected nodes with durable individual phase outcomes
+        run: |
+          mkdir -p results
+          sudo -n systemd-run --unit=umi-bounded-ci-v1 --wait --pipe \
+            --property=Type=exec --property=User="$(id -un)" --property=Group="$(id -gn)" \
+            --property=MemoryMax=1536M --property=MemorySwapMax=0 --property=TasksMax=96 \
+            --property=CPUQuota=200% --property=RuntimeMaxSec=${{ matrix.seconds }}s \
+            --property=TimeoutStopSec=15s --property=KillMode=control-group \
+            --property=PrivateTmp=yes --property=RuntimeDirectory=umi-bounded-ci-v1 \
+            --property=RuntimeDirectoryMode=0700 --property=RuntimeDirectoryPreserve=no \
+            --property=WorkingDirectory="$GITHUB_WORKSPACE" \
+            --setenv=PYTHONDONTWRITEBYTECODE=1 --setenv=PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+            --setenv=RAYON_NUM_THREADS=1 --setenv=LANG=C.UTF-8 \
+            "$GITHUB_WORKSPACE/.venv/bin/python" -I -B -u tools/run_selected_ci.py \
+              --scratch /run/umi-bounded-ci-v1 --output "$GITHUB_WORKSPACE/results" \
+              --group '${{ matrix.group }}'
+      - name: Retain result and verify cleanup
+        if: always()
+        run: |
+          mkdir -p results
+          sudo -n systemctl stop umi-bounded-ci-v1.service || true
+          sudo -n systemctl show umi-bounded-ci-v1.service \
+            -p Result -p ExecMainStatus -p MemoryPeak -p MemorySwapPeak > results/unit-result.txt || true
+          test ! -e /run/umi-bounded-ci-v1
+          printf '%s\n' 'service-owned scratch absent' > results/cleanup.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: bounded-ci-result-${{ matrix.group }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 14
