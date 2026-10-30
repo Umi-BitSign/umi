@@ -15,6 +15,7 @@ from .competition_cohort_intake import history_tip
 from .competition_cohort_preparation_owner import CohortPreparation
 from .competition_cohort_preparation_publication import PreparedRoundFiles
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
+from .competition_cpu_efficiency_policy import SignedCohortCpuEfficiencyAdoption
 from .competition_evaluation_runtime import SignedCohortEvaluationRuntimeAdoption
 from .competition_execution import execution_boundary
 from .competition_historical_registration import HistoricalRegistrationProvider
@@ -33,6 +34,8 @@ class CohortPreparationPublicationConfig(StrictProtocolModel):
     output_directory: Directory
     objects_directory: Directory | None = None
     runtime_adoption: SignedCohortEvaluationRuntimeAdoption | None = None
+    cpu_efficiency_adoption: SignedCohortCpuEfficiencyAdoption | None = None
+    cpu_efficiency_adoptions_directory: Directory | None = None
     maximum_bytes: Annotated[int, Field(ge=1, le=256 * 1024**2)] = 64 * 1024**2
     maximum_promotion_bytes: Annotated[int, Field(ge=1, le=16 * 1024**2)] = 16 * 1024**2
 
@@ -43,6 +46,10 @@ class CohortPreparationPublicationConfig(StrictProtocolModel):
             value.pop("objects_directory", None)
         if self.runtime_adoption is None:
             value.pop("runtime_adoption", None)
+        if self.cpu_efficiency_adoption is None:
+            value.pop("cpu_efficiency_adoption", None)
+        if self.cpu_efficiency_adoptions_directory is None:
+            value.pop("cpu_efficiency_adoptions_directory", None)
         return value
 
 

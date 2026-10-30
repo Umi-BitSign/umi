@@ -14,11 +14,12 @@ from umi.competition_geometric_rewards import cohort_reward_parameters
 from umi.competition_public_results_directory import atomic_write, owned_directory
 from umi.protocol import canonical_json_bytes
 
+from .test_competition_cpu_efficiency_public import timed_public
 from .test_open_competition import wallet
 
 
 @pytest.fixture
-def delivery(tmp_path):
+def delivery(tmp_path, request):
     source, target, state = (tmp_path / name for name in ("source", "target", "state"))
     for path in (source, target):
         owned_directory(path, create=True)
@@ -47,6 +48,8 @@ def delivery(tmp_path):
             ),
         ),
     )
+    if getattr(request, "param", None) == "cpu":
+        score = timed_public(score)
     name = score.cohort_sha256 + ".json"
 
     def reopen():
@@ -66,15 +69,19 @@ def delivery(tmp_path):
 
 
 def adopted(original, *, adoption="99" * 32, allocation="aa" * 32):
+    timed = original.cpu_efficiency_adoption_sha256 is not None
     value = original.model_copy(
         update={
-            "schema_": "umi-public-cohort-model-results/3",
+            "schema_": "umi-public-cohort-model-results/4"
+            if timed
+            else "umi-public-cohort-model-results/3",
             "certification": "quorum_certified_reward_adoption",
             "original_allocation_sha256": original.allocation_sha256,
             "original_source_metadata_sha256": original.source_metadata_sha256,
             "allocation_sha256": allocation,
             "reward_adoption_sha256": adoption,
-            "reward_parameters": cohort_reward_parameters(7),
+            "reward_parameters": cohort_reward_parameters(8 if timed else 7),
+            "efficiency_weight_applied": True if timed else None,
             "source_metadata_sha256": "ab" * 32,
             "items": tuple(
                 r.model_copy(
@@ -91,6 +98,7 @@ def adopted(original, *, adoption="99" * 32, allocation="aa" * 32):
     return PublicModelScores.model_validate_json(canonical_json_bytes(value))
 
 
+@pytest.mark.parametrize("delivery", ["quality", "cpu"], indirect=True)
 def test_delivery_restarts_without_reading_unchanged_payloads(delivery, monkeypatch):
     d = delivery
     owner = d.reopen()
@@ -108,6 +116,7 @@ def test_delivery_restarts_without_reading_unchanged_payloads(delivery, monkeypa
         owner.close()
 
 
+@pytest.mark.parametrize("delivery", ["quality", "cpu"], indirect=True)
 def test_atomic_adoption_and_later_revision_keep_same_source(delivery):
     d = delivery
     owner = d.reopen()
@@ -121,6 +130,34 @@ def test_atomic_adoption_and_later_revision_keep_same_source(delivery):
             assert not list(owner.scratch.glob("copy-*"))
         (d.target / d.name).unlink()
         assert owner.deliver(d.name)
+    finally:
+        owner.close()
+
+
+@pytest.mark.parametrize("delivery", ["cpu"], indirect=True)
+@pytest.mark.parametrize("change", ["contract", "slowdown", "factor"])
+def test_timed_delivery_refuses_rewritten_measurements(delivery, change):
+    d = delivery
+    owner = d.reopen()
+    try:
+        owner.deliver(d.name)
+        before = (d.target / d.name).read_bytes()
+        newer = adopted(d.score)
+        if change == "contract":
+            newer = newer.model_copy(update={"cpu_efficiency_adoption_sha256": "fe" * 32})
+        else:
+            from umi.competition_cohort_model_scores import PublicCpuSlowdown
+
+            update = (
+                {"efficiency_multiplier_ppm": 1_150_000}
+                if change == "factor"
+                else {"normalized_cpu_slowdown": PublicCpuSlowdown.make(2)}
+            )
+            newer = newer.model_copy(update={"items": (newer.items[0].model_copy(update=update),)})
+        atomic_write(d.source / d.name, canonical_json_bytes(newer), immutable=False)
+        with pytest.raises(ValueError, match="replacement"):
+            owner.deliver(d.name)
+        assert (d.target / d.name).read_bytes() == before
     finally:
         owner.close()
 

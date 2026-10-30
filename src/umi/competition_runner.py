@@ -76,7 +76,9 @@ class OfflineCaseExecution(StrictProtocolModel):
     The raw prefix contains at most the output limit plus one overflow byte.
     """
 
-    schema_: Literal["umi-offline-case-execution/1"] = Field(alias="schema")
+    schema_: Literal["umi-offline-case-execution/1", "umi-offline-case-execution/2"] = Field(
+        alias="schema"
+    )
     model_sha256: Hex32
     runtime_sha256: Hex32
     video_sha256: Hex32
@@ -85,12 +87,20 @@ class OfflineCaseExecution(StrictProtocolModel):
     reason: Literal["ok", "deadline", "output_limit", "invalid_utf8", "process_failed"]
     returncode: Annotated[int, Field(ge=-65536, le=65536)] | None
 
+    @model_validator(mode="after")
+    def timing_version(self):
+        if (self.schema_ == "umi-offline-case-execution/2") != (self.output.cpu_timing is not None):
+            raise ValueError("CPU timing requires its explicit execution version")
+        return self
+
 
 def validate_case_execution(
     record: OfflineCaseExecution,
     policy: CompetitionPolicy,
     *,
     runtime_authorization: AuthorizedEvaluationRuntime | None = None,
+    cpu_efficiency_authorization=None,
+    execution_runtime=None,
 ) -> None:
     """Replay output parsing/classification without trusting a supplied hypothesis."""
     from .competition_evaluation_runtime import validate_evaluation_runtime_authorization
@@ -99,6 +109,55 @@ def validate_case_execution(
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     raw = bytes.fromhex(record.stdout_hex)
     output = record.output
+    timing = output.cpu_timing
+    if timing is not None or cpu_efficiency_authorization is not None:
+        from .competition_cpu_efficiency_policy import validate_cpu_efficiency_authorization
+        from .competition_cpu_timing import (
+            cpu_timing_limits_v1,
+            validate_cpu_timing,
+            validate_runtime_resources,
+        )
+
+        authorization = cpu_efficiency_authorization
+        if (
+            timing is None
+            or authorization is None
+            or not isinstance(execution_runtime, OfflineCpuRuntime)
+        ):
+            raise ValueError("CPU timing requires original execution and native cohort authority")
+        validate_cpu_efficiency_authorization(
+            authorization,
+            policy=policy,
+            runtime_sha256=record.runtime_sha256,
+            cohort_sha256=getattr(authorization, "cohort_sha256", None),
+            sequence=getattr(authorization, "sequence", None),
+            prepared_at_block=getattr(authorization, "prepared_at_block", None),
+            adoption_sha256=timing.contract_sha256,
+        )
+        if (
+            digest(execution_runtime) != record.runtime_sha256
+            or timing.elapsed_ms != output.elapsed_ms
+        ):
+            raise ValueError("CPU timing changed its original runtime or case deadline observation")
+        if not 0 < timing.launch_gate_elapsed_us <= 5_000_000:
+            raise ValueError("CPU timing requires the bounded trusted model launch gate")
+        validate_runtime_resources(
+            timing.context, cpus=execution_runtime.cpus, memory_bytes=execution_runtime.memory_bytes
+        )
+        from .competition_cpu_cache import validate_bundle_cache_evidence
+
+        validate_bundle_cache_evidence(
+            timing.bundle_cache,
+            model_sha256=record.model_sha256,
+            invocation_sha256=timing.conditions.invocation_sha256,
+            measured_start_us=timing.started_monotonic_us,
+        )
+        validate_cpu_timing(
+            timing,
+            contract_sha256=authorization.adoption_sha256,
+            profile_sha256=timing.context.profile_sha256,
+            limits=cpu_timing_limits_v1(),
+        )
     try:
         validate_evaluation_runtime_authorization(
             runtime_authorization, policy=policy, runtime_sha256=record.runtime_sha256
@@ -153,6 +212,7 @@ def model_command(
     entrypoint: str,
     maximum_inference_ms: int,
     cidfile: Path | None = None,
+    cpu_timing=None,
 ) -> tuple[str, ...]:
     if type(maximum_inference_ms) is not int or not 1 <= maximum_inference_ms <= 3_600_000:
         raise ValueError("invalid inference deadline")
@@ -183,12 +243,14 @@ def model_command(
             f"/dev/shm:rw,nosuid,nodev,noexec,size={shared},mode=1777",
         )
     return (
-        "/usr/bin/podman",
+        *(("/usr/bin/podman",) if cpu_timing is None else cpu_timing.podman_prefix),
         "run",
         "--name",
         name,
         "--pull=never",
-        "--rm",
+        # Timed execution samples before explicit cleanup; automatic removal
+        # would charge container teardown to the model's measured latency.
+        *(("--rm",) if cpu_timing is None else ()),
         *(("--cidfile", _mount_path(cidfile)) if cidfile is not None else ()),
         # conmon enforces this even if the Python evaluator is killed. The
         # finer-grained scoring deadline still includes container startup.
@@ -211,6 +273,18 @@ def model_command(
         str(runtime.pids_limit),
         "--cpus",
         str(runtime.cpus),
+        *(
+            (
+                "--cgroups=no-conmon",
+                "--cgroupns=private",
+                "--cgroup-parent",
+                cpu_timing.podman_parent,
+                "--cpuset-cpus",
+                cpu_timing.cpu_set_argument,
+            )
+            if cpu_timing is not None
+            else ()
+        ),
         "--memory",
         str(runtime.memory_bytes),
         "--memory-swap",
@@ -229,9 +303,20 @@ def model_command(
         "--workdir=/model",
         "--entrypoint=/usr/local/bin/python3",
         runtime.image,
+        *(("-I", "-S", "-B", "-c", _CPU_LAUNCH_GATE) if cpu_timing is not None else ()),
         f"/model/{entrypoint}",
         "/input/video.mp4",
     )
+
+
+# Isolated stdlib-only startup cannot import bundle sitecustomize/.pth code.
+# The read-only input mount permits only the host to release this gate. Fresh
+# model/Python startup happens after the release and belongs to scored latency.
+_CPU_LAUNCH_GATE = (
+    "import os,sys,time\n"
+    "while not os.path.exists('/input/.cpu-timing-ready'): time.sleep(0.001)\n"
+    "os.execv('/usr/local/bin/python3',['/usr/local/bin/python3',sys.argv[1],sys.argv[2]])\n"
+)
 
 
 async def _small_command(arguments: tuple[str, ...], *, timeout: float = 10) -> tuple[int, bytes]:
@@ -331,11 +416,12 @@ def invocation_container_name(invocation_sha256: str) -> str:
     return "umi-evaluation-" + invocation_sha256[:32]
 
 
-async def stop_retained_cpu_invocation(invocation_sha256: str) -> None:
+async def stop_retained_cpu_invocation(invocation_sha256: str, *, cgroupfs=False) -> None:
     name = invocation_container_name(invocation_sha256)
-    code, _ = await _small_command(
-        ("/usr/bin/podman", "rm", "--force", "--ignore", "--time=0", name)
-    )
+    from .host_cpu_cgroupfs import timed_podman_prefix
+
+    prefix = timed_podman_prefix() if cgroupfs else ("/usr/bin/podman",)
+    code, _ = await _small_command((*prefix, "rm", "--force", "--ignore", "--time=0", name))
     if code:
         raise EvaluationInfrastructureError("retained evaluation container cleanup failed")
 
@@ -394,7 +480,9 @@ def _capacity_container_path(raw: bytes, container_id: str, name: str) -> str | 
     return str(path / "container")
 
 
-async def _bind_invocation_capacity(process, cidfile, name, native_capacity):
+async def _bind_invocation_capacity(
+    process, cidfile, name, native_capacity, *, required=False, cpu_timing=None
+):
     """Optional accounting evidence; uncertainty retains the full container charge."""
     try:
         container_id = cgroup = None
@@ -402,20 +490,40 @@ async def _bind_invocation_capacity(process, cidfile, name, native_capacity):
             if container_id is None:
                 container_id = _read_container_id(cidfile)
             if container_id is not None and cgroup is None:
+                prefix = ("/usr/bin/podman",) if cpu_timing is None else cpu_timing.podman_prefix
                 code, raw = await _small_command(
-                    ("/usr/bin/podman", "container", "inspect", "--format=json", container_id),
+                    (*prefix, "container", "inspect", "--format=json", container_id),
                     timeout=2,
                 )
                 if code:
-                    return
-                cgroup = _capacity_container_path(raw, container_id, name)
+                    if required:
+                        raise EvaluationInfrastructureError(
+                            "CPU timing container inspection failed"
+                        )
+                    return False
+                if cpu_timing is None:
+                    cgroup = _capacity_container_path(raw, container_id, name)
+                else:
+                    from .host_cpu_cgroupfs import cgroupfs_payload_directory
+
+                    cgroup = cgroupfs_payload_directory(
+                        raw,
+                        container_id=container_id,
+                        name=name,
+                        owned_parent=cpu_timing.owned_parent,
+                    )
             if cgroup is not None and native_capacity.bind_container(container_id, cgroup):
-                return
+                return True
             await asyncio.sleep(0.1)
     except Exception as error:
+        if required:
+            raise
         # This optimization does not alter execution classification or deadlines.
         # Do not log untrusted Podman output or treat PID similarity as ownership.
         _LOG.info("model_capacity_binding conservative reason=%s", type(error).__name__)
+    if required:
+        raise EvaluationInfrastructureError("CPU timing container exited before host admission")
+    return False
 
 
 async def execute_offline_case(
@@ -431,6 +539,53 @@ async def execute_offline_case(
     workspace: Path | None = None,
     runtime_authorization: AuthorizedEvaluationRuntime | None = None,
     native_capacity=None,
+    cpu_efficiency_authorization=None,
+    model_cache_lease=None,
+) -> OfflineCaseExecution:
+    """Hold a bundle reader lease through subprocess and container cleanup."""
+    from .host_model_cache import model_cache_lease as acquire_cache_lease
+
+    arguments = dict(
+        bundle=bundle,
+        archive=archive,
+        runtime=runtime,
+        policy=policy,
+        case_id=case_id,
+        video_sha256=video_sha256,
+        video=video,
+        invocation_sha256=invocation_sha256,
+        workspace=workspace,
+        runtime_authorization=runtime_authorization,
+        native_capacity=native_capacity,
+        cpu_efficiency_authorization=cpu_efficiency_authorization,
+    )
+    if cpu_efficiency_authorization is not None and (
+        model_cache_lease is None or not model_cache_lease.exclusive
+    ):
+        raise EvaluationInfrastructureError(
+            "CPU timing requires a model cache lease before memory admission"
+        )
+    if model_cache_lease is not None or isinstance(runtime, OfflineMpsRuntime):
+        return await _execute_offline_case(**arguments, model_cache_lease=model_cache_lease)
+    async with acquire_cache_lease(archive, bundle) as lease:
+        return await _execute_offline_case(**arguments, model_cache_lease=lease)
+
+
+async def _execute_offline_case(
+    *,
+    bundle: ModelBundle,
+    archive: Path,
+    runtime: OfflineRuntime,
+    policy: CompetitionPolicy,
+    case_id: Hex32,
+    video_sha256: Hex32,
+    video: bytes,
+    invocation_sha256: Hex32 | None = None,
+    workspace: Path | None = None,
+    runtime_authorization: AuthorizedEvaluationRuntime | None = None,
+    native_capacity=None,
+    cpu_efficiency_authorization=None,
+    model_cache_lease=None,
 ) -> OfflineCaseExecution:
     """Run a verified model on one clip, with no reference text passed to it.
 
@@ -440,6 +595,26 @@ async def execute_offline_case(
     wrapper when they declare additional inference helpers.
     """
     runtime = OFFLINE_RUNTIME.validate_json(canonical_json_bytes(runtime))
+    if cpu_efficiency_authorization is not None:
+        from .competition_cpu_efficiency_policy import validate_cpu_efficiency_authorization
+
+        authorization = cpu_efficiency_authorization
+        validate_cpu_efficiency_authorization(
+            authorization,
+            policy=policy,
+            runtime_sha256=digest(runtime),
+            cohort_sha256=getattr(authorization, "cohort_sha256", None),
+            sequence=getattr(authorization, "sequence", None),
+            prepared_at_block=getattr(authorization, "prepared_at_block", None),
+        )
+        if (
+            not isinstance(runtime, OfflineCpuRuntime)
+            or native_capacity is None
+            or invocation_sha256 is None
+        ):
+            raise EvaluationInfrastructureError(
+                "CPU timing requires a retained owned CPU invocation"
+            )
     if (invocation_sha256 is None) != (workspace is None):
         raise ValueError("retained CPU invocation requires its identity and workspace")
     if invocation_sha256 is not None:
@@ -470,6 +645,10 @@ async def execute_offline_case(
         raise EvaluationInfrastructureError("video bytes do not match the assignment")
     await verify_runtime(runtime, policy, runtime_authorization=runtime_authorization)
     verify_preserved_bundle(bundle, archive, policy)
+    model_cache_lease.check(bundle)
+    bundle_cache = None
+    if cpu_efficiency_authorization is not None:
+        bundle_cache = await model_cache_lease.condition(bundle, invocation_sha256)
     try:
         entrypoint = model_python_entrypoint(bundle)
     except ValueError as error:
@@ -480,7 +659,10 @@ async def execute_offline_case(
         else invocation_container_name(invocation_sha256)
     )
     process = binding = None
-    with tempfile.TemporaryDirectory(prefix="umi-evaluation-input-", dir=workspace) as scratch:
+    with (
+        contextlib.ExitStack() as lifetime,
+        tempfile.TemporaryDirectory(prefix="umi-evaluation-input-", dir=workspace) as scratch,
+    ):
         inputs = Path(scratch)
         path = inputs / "video.mp4"
         path.write_bytes(video)
@@ -490,6 +672,12 @@ async def execute_offline_case(
             if native_capacity is not None and invocation_sha256 is not None
             else None
         )
+        timing = None
+        timing_evidence = before_timing = None
+        started_us = finished_us = model_started_us = gate_elapsed_us = None
+        if cpu_efficiency_authorization is not None:
+            timing = native_capacity.begin_cpu_timing(runtime, cpu_efficiency_authorization)
+            lifetime.callback(timing.close)
         command = model_command(
             runtime,
             name=name,
@@ -498,8 +686,19 @@ async def execute_offline_case(
             entrypoint=entrypoint,
             maximum_inference_ms=policy.maximum_inference_ms,
             **({"cidfile": cidfile} if cidfile is not None else {}),
+            **({"cpu_timing": timing} if timing is not None else {}),
         )
-        started = time.monotonic()
+        if timing is not None:
+            await timing.prepare_conditions(invocation_sha256)
+            before_timing = timing.sample()
+            if before_timing.populated:
+                raise EvaluationInfrastructureError(
+                    "CPU timing parent still contains another invocation"
+                )
+            started_us = time.monotonic_ns() // 1000
+            started = started_us / 1_000_000
+        else:
+            started = time.monotonic()
         status, hypothesis = "miner_failure", ""
         chunks = bytearray()
         reason = "process_failed"
@@ -512,9 +711,38 @@ async def execute_offline_case(
                 stderr=asyncio.subprocess.DEVNULL,
             )
             if cidfile is not None:
-                binding = asyncio.create_task(
-                    _bind_invocation_capacity(process, cidfile, name, native_capacity)
-                )
+                if timing is None:
+                    binding = asyncio.create_task(
+                        _bind_invocation_capacity(process, cidfile, name, native_capacity)
+                    )
+                else:
+                    await asyncio.wait_for(
+                        _bind_invocation_capacity(
+                            process,
+                            cidfile,
+                            name,
+                            native_capacity,
+                            required=True,
+                            cpu_timing=timing,
+                        ),
+                        timeout=5,
+                    )
+                    model_started_us = time.monotonic_ns() // 1000
+                    gate_elapsed_us = model_started_us - started_us
+                    if not 0 < gate_elapsed_us <= 5_000_000:
+                        raise EvaluationInfrastructureError(
+                            "CPU timing launch gate exceeded its host budget"
+                        )
+                    if gate_elapsed_us >= policy.maximum_inference_ms * 1000:
+                        raise EvaluationInfrastructureError(
+                            "CPU timing launch gate exhausted the execution budget"
+                        )
+                    # No model code has run yet. Host time is sampled before the
+                    # read-only gate becomes visible to the isolated launcher.
+                    descriptor = os.open(
+                        inputs / ".cpu-timing-ready", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o400
+                    )
+                    os.close(descriptor)
 
             async def collect():
                 nonlocal returncode, reason
@@ -538,7 +766,10 @@ async def execute_offline_case(
                 return bytes(chunks).decode("utf-8", errors="strict").strip()
 
             try:
-                hypothesis = await asyncio.wait_for(collect(), policy.maximum_inference_ms / 1000)
+                inference_timeout = policy.maximum_inference_ms / 1000
+                if timing is not None:
+                    inference_timeout = max(0, inference_timeout - gate_elapsed_us / 1_000_000)
+                hypothesis = await asyncio.wait_for(collect(), inference_timeout)
                 status = "ok"
                 reason = "ok"
             except asyncio.TimeoutError:
@@ -549,6 +780,19 @@ async def execute_offline_case(
             if elapsed > policy.maximum_inference_ms:
                 status, hypothesis = "miner_failure", ""
                 reason = "deadline"
+            if timing is not None and process.returncode is not None:
+                finished_us = time.monotonic_ns() // 1000
+                after_timing = timing.sample()
+                await timing.finish_conditions()
+                timing_evidence = timing.finish(
+                    before=before_timing,
+                    after=after_timing,
+                    started_monotonic_us=started_us,
+                    model_started_monotonic_us=model_started_us,
+                    finished_monotonic_us=finished_us,
+                    launch_gate_elapsed_us=gate_elapsed_us,
+                    bundle_cache=bundle_cache,
+                )
         except OSError as error:
             raise EvaluationInfrastructureError("container process could not start") from error
         finally:
@@ -561,11 +805,13 @@ async def execute_offline_case(
                     with contextlib.suppress(asyncio.CancelledError):
                         await binding
                 try:
+                    prefix = ("/usr/bin/podman",) if timing is None else timing.podman_prefix
                     code, _ = await _small_command(
-                        ("/usr/bin/podman", "rm", "--force", "--ignore", "--time=0", name),
+                        (*prefix, "rm", "--force", "--ignore", "--time=0", name),
                     )
                     if code:
                         raise EvaluationInfrastructureError("evaluation container cleanup failed")
+                    model_cache_lease.cleaned()
                 finally:
                     if native_capacity is not None:
                         # A failed rm loses the live binding, so any surviving
@@ -579,8 +825,30 @@ async def execute_offline_case(
                     with contextlib.suppress(ProcessLookupError):
                         process.kill()
                         await _drain_cleanup(process.wait())
+        if timing is not None:
+            if timing_evidence is None:
+                # A timeout/overflow can leave a process alive until cleanup.
+                # Such failures receive the declared deadline in speed scoring,
+                # never a fast-exit bonus; collect complete owned CPU accounting.
+                finished_us = time.monotonic_ns() // 1000
+                after_timing = timing.sample()
+                await timing.finish_conditions()
+                timing_evidence = timing.finish(
+                    before=before_timing,
+                    after=after_timing,
+                    started_monotonic_us=started_us,
+                    model_started_monotonic_us=model_started_us,
+                    finished_monotonic_us=finished_us,
+                    launch_gate_elapsed_us=gate_elapsed_us,
+                    bundle_cache=bundle_cache,
+                )
+            elapsed = timing_evidence.elapsed_ms
+            if elapsed > policy.maximum_inference_ms:
+                status, hypothesis, reason = "miner_failure", "", "deadline"
         record = OfflineCaseExecution(
-            schema="umi-offline-case-execution/1",
+            schema="umi-offline-case-execution/2"
+            if timing is not None
+            else "umi-offline-case-execution/1",
             model_sha256=digest(bundle),
             runtime_sha256=digest(runtime),
             video_sha256=video_sha256,
@@ -589,12 +857,19 @@ async def execute_offline_case(
                 status=status,
                 hypothesis=hypothesis,
                 elapsed_ms=min(elapsed, 86_400_000),
+                **({"cpu_timing": timing_evidence} if timing_evidence is not None else {}),
             ),
             stdout_hex=bytes(chunks).hex(),
             reason=reason,
             returncode=returncode,
         )
-        validate_case_execution(record, policy, runtime_authorization=runtime_authorization)
+        validate_case_execution(
+            record,
+            policy,
+            runtime_authorization=runtime_authorization,
+            cpu_efficiency_authorization=cpu_efficiency_authorization,
+            execution_runtime=runtime,
+        )
         return record
 
 

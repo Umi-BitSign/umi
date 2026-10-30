@@ -13,6 +13,7 @@ from umi.protocol import canonical_json_bytes
 
 from .test_competition_cohort_model_scores import sample_scores
 from .test_competition_cohort_public_results import public_case as public_case
+from .test_competition_cpu_efficiency_public import timed_public
 
 
 @pytest.fixture
@@ -111,7 +112,9 @@ def adopted_trigger(scores, revision="1"):
         canonical_json_bytes(
             scores.model_copy(
                 update={
-                    "schema_": "umi-public-cohort-model-results/3",
+                    "schema_": "umi-public-cohort-model-results/4"
+                    if scores.cpu_efficiency_adoption_sha256 is not None
+                    else "umi-public-cohort-model-results/3",
                     "certification": "quorum_certified_reward_adoption",
                     "original_allocation_sha256": scores.original_allocation_sha256
                     or scores.allocation_sha256,
@@ -127,11 +130,15 @@ def adopted_trigger(scores, revision="1"):
 
 
 @pytest.mark.parametrize("initially_adopted", [False, True])
+@pytest.mark.parametrize("timed", [False, True])
 def test_selected_adoption_rebinds_catalog_trigger_without_native_work(
-    watched, monkeypatch, initially_adopted
+    watched, monkeypatch, initially_adopted, timed
 ):
     config, projection, calls, trigger = watched
     original = module.PublicModelScores.model_validate_json(trigger.read_bytes())
+    if timed:
+        original = timed_public(original)
+        trigger.write_bytes(canonical_json_bytes(original))
     if initially_adopted:
         trigger.write_bytes(canonical_json_bytes(adopted_trigger(original)))
     owner = module.NativePublicCatalogWatcher(config)

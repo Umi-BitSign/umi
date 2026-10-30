@@ -1,0 +1,12 @@
+[Unit]
+Requires=umi-cpu-partition.service
+After=umi-cpu-partition.service
+
+[Service]
+# Apply only to the two existing reviewer units after their C7 pool drains.
+Slice=umiexecution.slice
+AllowedCPUs=@BACKGROUND_CPUS@
+AllowedMemoryNodes=@NUMA_NODES@
+SupplementaryGroups=umi-cpu-execution
+# Preserve existing User, Group, Delegate, hardening, environment, paths,
+# startup command, wallets, journals and namespace restoration units.

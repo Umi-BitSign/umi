@@ -1,0 +1,3 @@
+# Only the two reviewer units receive this supplementary group; no broad login
+# membership and no cgroup.procs grant outside the dedicated migration domain.
+g umi-cpu-execution -

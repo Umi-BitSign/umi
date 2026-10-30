@@ -9,9 +9,10 @@ from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_transport_verification import TransferProgress
+from .host_cpu_timing import CpuTimingHostSelection, CpuTimingSession, load_cpu_timing_profile
 from .host_memory_admission import (
     AdmissionBindingError,
     HostMemoryAdmission,
@@ -63,10 +64,12 @@ def _report_admission(controller, *, lane, count, started, state):
 class ModelInvocationCapacity:
     """A runner may bind a container only during this explicit invocation."""
 
-    def __init__(self, controller, lease):
+    def __init__(self, controller, lease, cpu_timing_profile=None):
         self._controller, self._lease = controller, lease
         self._generation, self._pid = lease._generation, os.getpid()
         self._active, self._binding = True, None
+        self._cpu_timing_profile = cpu_timing_profile
+        self._cpu_timing = None
 
     def bind_container(self, container_id, cgroup_path):
         if (
@@ -79,7 +82,30 @@ class ModelInvocationCapacity:
         bound = self._controller.bind_model_container(self._lease, container_id, cgroup_path)
         if bound:
             self._binding = self._lease._model_container
+            if self._cpu_timing is not None:
+                self._cpu_timing.verify_container(cgroup_path)
         return bound
+
+    def begin_cpu_timing(self, runtime, authorization):
+        if (
+            not self._active
+            or self._pid != os.getpid()
+            or self._lease.closed
+            or self._cpu_timing is not None
+        ):
+            raise AdmissionBindingError("CPU timing requires one currently owned invocation")
+        selection = self._controller.policy.cpu_timing_profile
+        if self._cpu_timing_profile is None or selection is None:
+            raise AdmissionBindingError("prospective CPU timing profile is not installed")
+        self._cpu_timing = CpuTimingSession(
+            self._cpu_timing_profile,
+            selection.profile_sha256,
+            self._controller,
+            self._lease,
+            runtime,
+            authorization,
+        )
+        return self._cpu_timing
 
     def clear_container(self):
         if self._binding is not None and self._lease._model_container is self._binding:
@@ -88,6 +114,8 @@ class ModelInvocationCapacity:
 
     def close(self):
         self.clear_container()
+        if self._cpu_timing is not None:
+            self._cpu_timing.close()
         self._active = False
 
 
@@ -107,13 +135,24 @@ class ModelExecutionMemoryPolicy(StrictProtocolModel):
     container_cgroup_roots: Annotated[tuple[str, ...], Field(min_length=1, max_length=64)]
     slots: Annotated[tuple[HostMemorySlot, ...], Field(min_length=2, max_length=33)]
     transaction_lock: HostMemoryFile
+    cpu_timing_profile: CpuTimingHostSelection | None = None
+    container_cgroupfs_roots: Annotated[tuple[str, ...], Field(max_length=64)] = ()
+
+    @model_serializer(mode="wrap")
+    def preserve_untimed_policy(self, handler):
+        value = handler(self)
+        if self.cpu_timing_profile is None:
+            value.pop("cpu_timing_profile", None)
+        if not self.container_cgroupfs_roots:
+            value.pop("container_cgroupfs_roots", None)
+        return value
 
     @model_validator(mode="after")
     def bindings(self):
         _absolute(self.directory)
-        if len(set(self.container_cgroup_roots)) != len(self.container_cgroup_roots) or any(
-            not str(_absolute(path)).startswith("/sys/fs/cgroup/")
-            for path in self.container_cgroup_roots
+        roots = (*self.container_cgroup_roots, *self.container_cgroupfs_roots)
+        if len(set(roots)) != len(roots) or any(
+            not str(_absolute(path)).startswith("/sys/fs/cgroup/") for path in roots
         ):
             raise ValueError("model execution requires its selected kernel container roots")
         if {s.lane for s in self.slots} != {"owner_export", "transient"} or sum(
@@ -153,7 +192,19 @@ class ModelExecutionAdmission:
         ):
             raise AdmissionBindingError("model execution capacity differs from signed policy")
         self.protocol_policy = policy.model_copy(deep=True)
-        self.slots = tuple(s for s in selected.slots if s.lane == "transient")
+        self.cpu_timing_profile = load_cpu_timing_profile(
+            selected.cpu_timing_profile, self.controller
+        )
+        active_names = (
+            None
+            if self.cpu_timing_profile is None
+            else {slot.lock_name for slot in self.cpu_timing_profile.slots}
+        )
+        self.slots = tuple(
+            s
+            for s in selected.slots
+            if s.lane == "transient" and (active_names is None or s.name in active_names)
+        )
 
     def check_runtime(self, runtime, *, runtime_authorization=None):
         from .competition_evaluation_runtime import validate_evaluation_runtime_authorization
@@ -182,14 +233,14 @@ class ModelExecutionAdmission:
             and active[1]._creator_pid == os.getpid()
         ):
             self.check_runtime(runtime, runtime_authorization=runtime_authorization)
-            token = ModelInvocationCapacity(active[0], active[1])
+            token = ModelInvocationCapacity(active[0], active[1], self.cpu_timing_profile)
             try:
                 yield token
             finally:
                 token.close()
         else:
             async with self.hold(runtime, runtime_authorization=runtime_authorization) as lease:
-                token = ModelInvocationCapacity(self.controller, lease)
+                token = ModelInvocationCapacity(self.controller, lease, self.cpu_timing_profile)
                 try:
                     yield token
                 finally:
@@ -206,7 +257,12 @@ class ModelExecutionAdmission:
         with TransferProgress("model_execution_capacity", count, unit="slots") as progress:
             last_wait = None
             while True:
-                lease = self.controller.try_acquire_group(lane, count)
+                options = (
+                    {}
+                    if preparation or self.cpu_timing_profile is None
+                    else {"slot_names": tuple(slot.name for slot in self.slots)}
+                )
+                lease = self.controller.try_acquire_group(lane, count, **options)
                 if lease is not None:
                     _report_admission(
                         self.controller, lane=lane, count=count, started=started, state="admitted"

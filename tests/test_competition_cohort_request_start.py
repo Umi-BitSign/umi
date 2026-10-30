@@ -276,6 +276,36 @@ def test_operator_start_optional_configuration_preserves_legacy_bytes(rest):
         rest.reopen(operator_start_overrides=(override, override), operator_selection=selection)
 
 
+async def test_operator_start_binds_exact_cpu_efficiency_contract(rest):
+    h = rest
+    h.closed()
+    key, override, selected, reader = operator_start(h)
+    selected["cpu_efficiency_adoption_sha256"] = "ec" * 32
+    # An old start decision must not silently approve a newly selected speed rule.
+    with pytest.raises(ValueError, match="selection changed"):
+        await h.reopen(operator_start_overrides=(override,), operator_selection=reader).check(key)
+    override = dict(
+        override,
+        schema="umi-cohort-operator-request-start/2",
+        cpu_efficiency_adoption_sha256=selected["cpu_efficiency_adoption_sha256"],
+    )
+    gate = h.reopen(operator_start_overrides=(override,), operator_selection=reader)
+    assert not (await gate.check(key))["ready"]
+    selected["cpu_efficiency_adoption_sha256"] = "ed" * 32
+    with pytest.raises(ValueError, match="selection changed"):
+        await gate.check(key)
+
+
+def test_operator_start_efficiency_binding_requires_explicit_version(rest):
+    _, override, _, reader = operator_start(rest)
+    for damaged in (
+        dict(override, cpu_efficiency_adoption_sha256="ec" * 32),
+        dict(override, schema="umi-cohort-operator-request-start/2"),
+    ):
+        with pytest.raises(ValueError, match="versioned binding"):
+            rest.reopen(operator_start_overrides=(damaged,), operator_selection=reader)
+
+
 async def test_target_or_partial_history_cannot_start_rest(rest):
     h = rest
     key = digest(h.series.cohorts[1])

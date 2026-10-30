@@ -16,7 +16,10 @@ from .competition_cohort_model_scores import (
     _stamp,
     project_adopted_model_scores,
 )
-from .competition_cohort_reward_allocation import CohortRewardAllocation
+from .competition_cohort_reward_allocation import (
+    MAX_REWARD_ALLOCATION_BYTES,
+    CohortRewardAllocation,
+)
 from .competition_geometric_rewards import cohort_reward_parameters
 from .competition_public_results_directory import atomic_write, owned_directory, read_owned_file
 from .competition_reward_adoption_consumer import open_reward_adoption_feed
@@ -145,7 +148,7 @@ class SelectedModelScoreAdoptions:
                 raise ValueError("selected reward allocation producer must be protected") from None
             raw = read_input(
                 source / "allocations" / (body.effective_allocation_sha256 + ".json"),
-                1024**2,
+                MAX_REWARD_ALLOCATION_BYTES,
                 producer_uid=producer.st_uid,
             )
             effective = CohortRewardAllocation.model_validate_json(raw)
@@ -201,5 +204,7 @@ class SelectedModelScoreAdoptions:
             or receipt.projection.original_source_metadata_sha256 != original.source_metadata_sha256
             or receipt.projection.allocation_sha256 != receipt.allocation_sha256
             or receipt.projection.reward_adoption_sha256 != receipt.adoption_sha256
+            or receipt.projection.cpu_efficiency_adoption_sha256
+            != original.cpu_efficiency_adoption_sha256
         ):
             raise ValueError("retained adopted score differs from its original native result")

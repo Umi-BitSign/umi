@@ -13,6 +13,7 @@ from pydantic import Field, model_serializer, model_validator
 from .protocol import StrictProtocolModel
 
 GEOMETRIC_MODEL_REWARD_RULE = "baseline_or_better_geometric_bands_first_complete/1"
+CPU_EFFICIENCY_REWARD_RULE = "cold_cpu_relative_latency/1"
 
 
 class GeometricRewardParameters(StrictProtocolModel):
@@ -20,24 +21,33 @@ class GeometricRewardParameters(StrictProtocolModel):
         "umi-geometric-reward-parameters/1",
         "umi-geometric-reward-parameters/2",
         "umi-geometric-reward-parameters/3",
+        "umi-geometric-reward-parameters/4",
     ] = Field(default="umi-geometric-reward-parameters/2", alias="schema")
     band_width_bps: Annotated[int, Field(ge=1, le=10000)] = 500
     band_decay_bps: Annotated[int, Field(ge=0, le=10000)] = 7500
     within_band_decay_bps: Annotated[int, Field(ge=0, le=10000)] = 7500
     score_duplicate_tolerance_bps: Annotated[int, Field(ge=0, le=10000)] | None = 1
     baseline_grace_bps: Annotated[int, Field(ge=0, le=10000)] | None = None
+    cpu_efficiency_rule: Literal["cold_cpu_relative_latency/1"] | None = None
 
     @model_validator(mode="before")
     @classmethod
     def retain_original_parameters(cls, value):
-        if isinstance(value, dict) and value.get("schema", value.get("schema_")) == (
-            "umi-geometric-reward-parameters/3"
-        ):
+        if isinstance(value, dict) and value.get("schema", value.get("schema_")) in {
+            "umi-geometric-reward-parameters/3",
+            "umi-geometric-reward-parameters/4",
+        }:
             return {
                 "band_width_bps": 250,
                 "band_decay_bps": 8500,
                 "within_band_decay_bps": 8500,
                 "baseline_grace_bps": 100,
+                **(
+                    {"cpu_efficiency_rule": CPU_EFFICIENCY_REWARD_RULE}
+                    if value.get("schema", value.get("schema_"))
+                    == "umi-geometric-reward-parameters/4"
+                    else {}
+                ),
                 **value,
             }
         if isinstance(value, dict) and value.get("schema", value.get("schema_")) == (
@@ -48,10 +58,15 @@ class GeometricRewardParameters(StrictProtocolModel):
 
     @model_validator(mode="after")
     def selected_score_rule(self):
-        if (self.schema_ == "umi-geometric-reward-parameters/3") != (
-            self.baseline_grace_bps is not None
+        if (
+            self.schema_
+            in {"umi-geometric-reward-parameters/3", "umi-geometric-reward-parameters/4"}
+        ) != (self.baseline_grace_bps is not None):
+            raise ValueError("baseline grace requires geometric parameter version three or four")
+        if (self.schema_ == "umi-geometric-reward-parameters/4") != (
+            self.cpu_efficiency_rule is not None
         ):
-            raise ValueError("baseline grace requires geometric parameter version three")
+            raise ValueError("CPU efficiency requires geometric parameter version four")
         if (self.schema_ == "umi-geometric-reward-parameters/1") != (
             self.score_duplicate_tolerance_bps is None
         ):
@@ -65,6 +80,8 @@ class GeometricRewardParameters(StrictProtocolModel):
             value.pop("score_duplicate_tolerance_bps", None)
         if self.baseline_grace_bps is None:
             value.pop("baseline_grace_bps", None)
+        if self.cpu_efficiency_rule is None:
+            value.pop("cpu_efficiency_rule", None)
         return value
 
 
@@ -80,6 +97,8 @@ def baseline_eligibility_threshold(
 def validate_cohort_reward_parameters(parameters: GeometricRewardParameters, sequence: int):
     if parameters.baseline_grace_bps is not None and sequence < 7:
         raise ValueError("relative baseline grace is prospective for C7 and later cohorts")
+    if parameters.cpu_efficiency_rule is not None and sequence < 8:
+        raise ValueError("CPU efficiency is prospective for C8 and later cohorts")
 
 
 def cohort_reward_parameters(sequence: int) -> GeometricRewardParameters:
@@ -87,14 +106,18 @@ def cohort_reward_parameters(sequence: int) -> GeometricRewardParameters:
 
     C6 retains its finalized 25% decay. C7 and subsequent cohorts use 15%
     decay at both levels and a one-percent relative eligibility grace. Historical
-    schema defaults above remain unchanged.
+    schema defaults above remain unchanged. C8 and later select the separately
+    authenticated CPU-efficiency protocol; absent timing cannot earn a default
+    multiplier or silently fall back to the older reward rule.
     """
     if type(sequence) is not int or sequence < 1:
         raise ValueError("reward parameters require a positive cohort sequence")
     decay = 8500 if sequence >= 7 else 7500
     return GeometricRewardParameters(
         schema=(
-            "umi-geometric-reward-parameters/3"
+            "umi-geometric-reward-parameters/4"
+            if sequence >= 8
+            else "umi-geometric-reward-parameters/3"
             if sequence >= 7
             else "umi-geometric-reward-parameters/2"
         ),
@@ -103,6 +126,7 @@ def cohort_reward_parameters(sequence: int) -> GeometricRewardParameters:
         within_band_decay_bps=decay,
         score_duplicate_tolerance_bps=1,
         baseline_grace_bps=100 if sequence >= 7 else None,
+        cpu_efficiency_rule=CPU_EFFICIENCY_REWARD_RULE if sequence >= 8 else None,
     )
 
 

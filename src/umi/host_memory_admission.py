@@ -503,9 +503,17 @@ class HostMemoryAdmission:
             or lease.slot.lane != "transient"
             or type(container_id) is not str
             or re.fullmatch(r"[0-9a-f]{64}", container_id) is None
-            or path.name != "container"
-            or path.parent.name != "libpod-" + container_id + ".scope"
-            or str(path.parent.parent) not in self.policy.container_cgroup_roots
+            or not (
+                (
+                    path.name == "container"
+                    and path.parent.name == "libpod-" + container_id + ".scope"
+                    and str(path.parent.parent) in self.policy.container_cgroup_roots
+                )
+                or (
+                    path.name == "libpod-" + container_id
+                    and str(path.parent) in self.policy.container_cgroupfs_roots
+                )
+            )
         ):
             raise AdmissionBindingError("container binding differs from its live model acquisition")
         descriptor = None
@@ -560,7 +568,9 @@ class HostMemoryAdmission:
             return 0
         total = credit_total = count = 0
         credited = set()
-        for value in self.policy.container_cgroup_roots:
+        layouts = [(path, "systemd") for path in self.policy.container_cgroup_roots]
+        layouts += [(path, "cgroupfs") for path in self.policy.container_cgroupfs_roots]
+        for value, manager in layouts:
             root = Path(value)
             try:
                 entries = tuple(root.iterdir())
@@ -569,9 +579,14 @@ class HostMemoryAdmission:
             if len(entries) > 4096:
                 raise AdmissionBindingError("native container inventory exceeds its bounded root")
             for entry in entries:
-                if re.fullmatch(r"libpod-[0-9a-f]{64}\.scope", entry.name) is None:
+                pattern = (
+                    r"libpod-[0-9a-f]{64}\.scope"
+                    if manager == "systemd"
+                    else r"libpod-[0-9a-f]{64}"
+                )
+                if re.fullmatch(pattern, entry.name) is None:
                     continue
-                target = entry / "container"
+                target = entry / "container" if manager == "systemd" else entry
                 try:
                     descriptor = _open_cgroup_directory(target)
                     try:
@@ -702,11 +717,23 @@ class HostMemoryAdmission:
                 if descriptor is not None:
                     os.close(descriptor)
 
-    def try_acquire_group(self, lane: Lane, count: int) -> HostMemoryLease | None:
+    def try_acquire_group(
+        self, lane: Lane, count: int, *, slot_names=None
+    ) -> HostMemoryLease | None:
         """Atomically reserve model slots; never retain a partial acquisition."""
         if not self.model_execution_stage or lane not in {"owner_export", "transient"}:
             raise AdmissionBindingError("group acquisition requires model execution capacity")
         slots = tuple(slot for slot in self.policy.slots if slot.lane == lane)
+        if slot_names is not None:
+            names = tuple(slot_names)
+            if (
+                lane != "transient"
+                or not names
+                or len(set(names)) != len(names)
+                or not set(names).issubset(slot.name for slot in slots)
+            ):
+                raise AdmissionBindingError("CPU selection must use existing model slot files")
+            slots = tuple(slot for slot in slots if slot.name in names)
         if type(count) is not int or not 1 <= count <= len(slots):
             raise ValueError("model execution slot count is outside its qualified capacity")
         self.last_model_admission = None

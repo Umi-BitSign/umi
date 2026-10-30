@@ -2193,7 +2193,8 @@ all original signed work and already-earned credit through closure and replay.
 The recoverable cohort implementation separates model payout from reference-model
 promotion. Native geometric rewards use `umi-cohort-recovery-authority/4` with
 `baseline_or_better_geometric_bands_first_complete/1` and signed
-`model_reward_parameters`. C7 and every subsequent cohort use these parameters:
+`model_reward_parameters`. C7 uses these quality-allocation parameters; C8 and
+later preserve them and add the version-4 CPU rule described below:
 
 ```json
 {
@@ -2236,6 +2237,244 @@ public pool over the remaining models and occupied bands. Version1 and version2
 parameters retain their original behavior and bytes. Version2 adds the score
 duplicate rule; version3 adds the signed baseline grace for C7 and later.
 
+### Prospective CPU-efficiency rewards
+
+`cohort_reward_parameters(sequence)` selects
+`umi-geometric-reward-parameters/4` with
+`cpu_efficiency_rule: cold_cpu_relative_latency/1` from C8 onward. Quality
+eligibility, first-content acceptance, one-basis-point score deduplication and
+quality ranks are calculated first. For each evaluator and case, form the
+candidate/reference cold execution-time ratio, with a one-millisecond denominator
+floor. Average within each task using its cases, then use the suite's signed task
+weights. Round each evaluator's normalized slowdown upward to the nearest
+`1e-9` under the signed `ceil_per_evaluator/1` rule, then average across every
+selected evaluator;
+never compare raw seconds across hosts or pick the fastest evaluator. For the
+result `D`, calculate `clamp(D^(-1/10), 0.85, 1.15)` using the exact integer
+tenth-root and floor to one part per million. Multiply the quality-derived
+model weights by these factors, then renormalize the model pool. A zero quality
+allocation remains zero. The bound is before normalization, so final share
+changes need not be within ±15%. Reference promotion uses quality alone.
+
+Standalone native and effective allocation files share a 64 MiB byte ceiling
+across reward-file delivery, validator discovery, public score adoption and
+reference publication. This is a maximum accepted file size, not a memory
+reservation. Its conservative schema envelope is 65,011,584 bytes: up to 512
+models, 64 bounded timing summaries per model, unchanged 4,096-digit exact quality
+components, individual or batch acceptance proofs and 65,535 recipients. Timing
+ratio components are limited to 20 digits; each original quality component stays
+exact. The old independent 1 MiB readers cannot carry supported larger C8
+allocations. Upgrade all consumers together. Portable reward packages retain their
+separately selected aggregate byte and memory budgets; this file ceiling does not
+raise those budgets or authorize a package that exceeds them.
+
+The measurement requires a prospective quorum-signed
+`umi-cohort-cpu-efficiency-adoption/1` in preparation. It binds the policy,
+recovery authority, exact cohort scope, first sequence at least 8, effective
+evaluation-runtime identity and issuance block. This contract is separate from
+the later reward adoption, which binds the completed certified package. Do not
+backfill a contract into an already prepared round or relabel historical timing.
+Prepared round `/3` carries the contract without changing `/1` or `/2` bytes.
+Operator request-start `/2` binds its digest; an older start approval cannot
+silently approve a changed timing rule. Normal holds and operator start authority
+remain effective.
+
+New C8+ model preparation refuses to create an untimed round with
+`cpu_efficiency_measurement_policy_missing`, before participant restoration or
+promotion reads. The same requirement applies to a new preparation observation
+and operator start. Retained historical rounds still decode and replay exactly;
+an untimed retained round cannot be backfilled or newly certified under the
+prospective rule. Already active request execution and historical replay remain
+on their original path. C7 and endpoint-only rounds gain no timing prerequisite.
+
+Use the existing resumable adoption operator and its standing series timer.
+Select a private `cpu_efficiency_adoptions_directory` on the admission host,
+each configured model reviewer when installing the compatible readers. A
+separate preparation publisher sharing the owner service account can consume
+the same private selection; another account must receive the exact signed
+inline `cpu_efficiency_adoption` through its supported host-config update. These directories must be disjoint from
+journals, payloads and credentials. The supported host-config updater carries
+them forward; existing configs omit the optional field without changing their
+canonical bytes.
+
+The root-owned `umi-model-batch-adoption-series/1` control selects
+`cpu_efficiency_operator_request_reference`, naming the retained standing
+operator decision for this fixed C8+ rule. The existing configuration/history
+producer carries that decision as `cpu_efficiency_standing_request` with its
+exact path and SHA256. Before the first CPU job it also supplies a bounded
+current intake snapshot as `cpu_efficiency_anchor_history_file`; an already
+closed earlier cohort does not prevent a later open cohort from anchoring the
+same authority. Retained jobs reuse their original snapshot without another
+owner request. Its normal `run-series` pass prepares one CPU contract
+per recovery authority, not one per model or cohort, and uses the owner's actual
+original or separately authorized CPU runtime. Future authority generations
+receive the same default automatically; C7 is excluded. This CPU runtime
+identity is unrelated to the chain's routinely changing runtime/spec version.
+
+Reviewers receive the bounded authenticated
+`/internal/cohorts/model-artifacts/cpu-efficiency-votes` request through their
+existing model-review peers. Each checks its independently selected candidate,
+current intake authority and signed runtime, then retains the original decision
+and vote. Completed votes do not reread history, approval files or chain state.
+The operator retains its exact plan, history, votes and envelope under
+`<state_directory>/cpu-efficiency/<authority>/`, publishes all reviewer
+selections before the owner, and checks readback. Unchanged completed authority
+jobs are reused after supported source/config upgrades. Lost original records
+require explicit repair; a missing consumer selection is a counted restoration
+of the exact signed envelope. Progress uses existing heartbeat, count and
+configured-timeout ETA reporting. A publication receipt does not claim runtime
+activation.
+
+For an explicit single-authority operation, use
+`/absolute/python -I -B -m umi.competition_cohort_model_batch_adoption_cli run-cpu --config /absolute/cpu-operator-config.json`.
+Its root-owned canonical `umi-cpu-efficiency-adoption-operator/1` config binds
+`request`, `policy_file`, `history_file`, `expected_tip_sha256`,
+`effective_at_block`, `operator_request_reference`, `state_directory`, the
+selected `owner`, and every configured `reviewers` target. Each target binds
+role, service unit/account and actual selected config path/hash. This reuses
+the normal actor publication and quorum workflow; the command opens no wallet.
+
+First new C8+ preparation and operator start read the same signed
+`<cpu_efficiency_adoptions_directory>/<authority>.json`. The contract is
+retained in the resulting round. Existing rounds never reread this selection or
+change their bytes, and installing the standing timer does not authorize intake
+closure or challenge start. Keep the signed selection and original operator
+state on durable storage, outside disposable qualification scratch.
+
+The fixed timing rule is `cold_model_exec_to_validated_result/1`, with semantics
+`umi-exclusive-cold-model-cpu-timing/1`. A trusted host gate records the boundary
+before any model code runs. The speed interval includes fresh model/Python
+startup, loading, preprocessing, inference and postprocessing through validated
+output. Payload restoration, queueing, container provisioning and host gate
+inspection are outside this interval. Original full container-start elapsed time
+and inference deadline remain separate operational limits. Candidate and reference
+must use comparable CPU/resource profiles and verified isolation. The signed
+noise limits are 100 basis points external CPU activity, 50 basis points steal,
+50 ms snapshot duration, 100 ms boundary overhead, and 100 basis points clock
+disagreement. Infrastructure/noise invalidations are held for explicit retry or
+repair; they are not scored as a model failure or silently assigned neutral speed.
+
+The contract requires an exclusive cpuset partition with
+`cpuset.cpus.partition=root`, preserving normal internal scheduler balancing.
+Do not use per-thread affinity or isolated partition mode. The existing native
+model-memory lease remains the sole CPU slot owner. A qualified profile can
+select a subset of existing transient slot names, but must preserve every
+original slot file and inode and continue accounting for all busy reservations.
+Five existing shared slots do not establish five qualified CPU lanes; reserve
+background CPU capacity in the measured plan.
+
+Timed Podman execution, inspection, cleanup and retained-invocation recovery
+explicitly use `cgroupfs`. The payload is
+`<owned-parent>/libpod-<full-CID>`; `--cgroups=no-conmon` keeps conmon outside the
+measured parent. Keep the historical systemd
+`<parent>/libpod-<CID>.scope/container` reader for untimed jobs and orphan
+accounting. Do not change global Podman defaults.
+
+Before and after each timed invocation, the signed host runs the fixed
+stdlib SHA-256 probe in that CPU slot's `probe` leaf. Its limits are 128 MiB,
+16 PIDs, a five-second parent deadline and a process CPU limit. Cancellation
+kills and reaps the owned child. Workers use normal scheduler balancing; no
+receipt claims that a worker represents a particular core. Probe results never
+correct or subtract from measured model seconds.
+
+Condition evidence retains a 50 ms observer heartbeat, visible NUMA, package,
+core and cache-sharing topology, and before/after pressure observations.
+External pressure is measured over disjoint sibling cgroup scopes along the
+model parent's ancestry; new, missing or replaced scopes invalidate that
+observation. Host and own-model PSI are diagnostic, never subtracted to infer
+external pressure. Own quota contention, faults, memory limits and OOM remain
+model costs. Additional signed tolerances are 10% probe variation, 100 ms maximum
+observer lateness, 1% external full pressure, one-second probe boundary gaps and
+50 ms pressure snapshots. These are prospective acceptance tolerances, not
+calibrated accuracy or confidence claims. Calibration differences versus the
+paired baseline require explicit repair as incomparable timing.
+
+The semantics binds the cache rule `verified_bundle_pagecache_eviction/1`.
+Before memory admission, timed readers hold an exclusive same-model lease;
+ordinary readers hold shared leases and slot eviction waits for readers. The
+owner retains the exact active container identity in an external private marker,
+reconciles it after restart and clears it only after container cleanup. Eviction
+reconciles retained markers too. After existing immutable verification, bounded
+nonfaulting mincore windows verify POSIX_FADV_DONTNEED left no declared-bundle
+page resident. This neither reads/hashes payloads again nor pins a model-sized
+RAM working set. Residual pages, changed identities, failed ownership or failed
+cleanup require explicit repair. Reuse, cancellation and slot eviction retain
+ownership until bounded work drains. Existing preparation telemetry exposes
+counted cache work and scoped ETAs without adding a release stage. Drain legacy
+C7/untracked readers before the first timed C8 invocation. Cache evidence binds
+the exact model and invocation, and journal ingestion binds that invocation to
+the retained execution attempt.
+
+A failed candidate case is charged the inference deadline, with a slowdown at
+least 1; any candidate case failure caps that model's multiplier at 1. A failed
+reference case contributes ratio 1 for the speed term only. Neither rule changes
+the original quality result. Missing, partial, wrong-contract or incomparable
+measurement evidence is refused. Complete compact timing conclusions are retained
+in the original quality/award evidence, so allocation, adoption and public
+projection use those conclusions without reopening timing/model payloads. The
+speed-enabled award uses `/5` and effective allocation `/6`; original certified
+evidence can retain timing before the reward adjustment is applied. A later
+quality-only score correction cannot reuse or discard those timings; it needs a
+supported correction format carrying fresh bound timing evidence.
+
+Install the compatible preparation, execution, quality, settlement, native replay
+and public readers before selecting the prospective contract. Follow the
+[CPU reader rollout](../validators/successor-upgrade.md#cpu-efficiency-readers).
+Qualification must cover the actual roster/evaluator count against retained
+allocation and publication byte limits as well as execution capacity. Source
+support is not proof of installed selection, accepted signing or live rewards.
+
+#### CPU partition provisioning and qualification
+
+The signed Python runtime includes `umi.host_cpu_partition` for root startup
+restoration and `umi.host_cpu_probe` for the existing reviewer to invoke with its
+installed interpreter and `-I -B`. Render the templates in `deploy/cpu-timing/`
+only after C7 releases the affected pool and a qualified plan exists. Preserve
+reviewer service accounts, startup commands, rootless namespace restoration,
+wallets, journals, storage and the original memory-admission files.
+
+The dedicated `umiexecution.slice` holds the existing reviewer services on
+qualified background CPUs and `umi-cpu-partition.service`. That service's
+bounded `setup` leaf runs restoration; its `models` subtree holds the exclusive
+root partition, existing slot names and a `uid<reviewer-uid>` parent per reviewer.
+Each reviewer parent has the signed CPU/memory ceilings, a bounded `probe` leaf
+and its `libpod-<CID>` payload. Do not set a 64 MiB service-wide MemoryMax on the
+partition service: its model descendants share that service. Limit only the
+setup leaf and restorer process.
+
+Grant the shared `umi-cpu-execution` migration group access only to the dedicated
+`umiexecution.slice/cgroup.procs`. Never widen migration permissions on the root
+or `user.slice`. Both existing reviewer units receive that supplementary group
+and move into the dedicated slice. Qualify actual rootless namespace migration;
+directory ownership alone does not establish migration permission.
+
+The root-owned `umi-cpu-partition-restoration-plan/1` binds the protected
+`existing_memory_policy_path` and its SHA256, every original slot-file identity,
+an `active_slots` map to disjoint CPU lists, `partition_mode: root`, exact kernel
+`background_cpus` and `numa_nodes`, authenticated `runtime_cpus` and
+`runtime_memory_bytes`, and `role_identities` for both existing reviewer UID/GID
+pairs. The restorer checks host and original directory/slot identities, inactive
+reviewers and an empty retained model subtree. It locks every original transient
+slot, including prospectively inactive slots, before changing the hierarchy.
+Controller ceilings remain root-owned; restoration reads back exclusive
+partition activation. Its completion explicitly records `qualified=false` and
+`contract_selected=false`.
+
+After C7 drains, qualify actual delegation, rootless migration, cgroupfs layout,
+probe overhead and cleanup, memory reserves, bundle-cache eviction and equivalent
+behavior under the intended concurrent lane/load configuration. Persist those
+results and publish selected profiles through the supported update/adoption
+path. These source changes and restoration completion do not authorize challenge
+start or establish host qualification.
+
+Visible topology, probes and contention counters constrain observable noise;
+a VM can still hide physical placement, thermal and frequency behavior. The
+cache observation covers only the declared model's Linux page cache; it does
+not establish cold SSD/controller caches, cold shared-runtime pages or absence
+of competing storage work. Qualify these residual effects under the intended
+lane/load profile. The paired baseline, shallow speed exponent and reward cap
+reduce sensitivity without eliminating those limits.
+
 Existing signed authorities and allocations retain their original bytes and
 behavior. Applying geometric rewards or revising their parameters for an
 already signed cohort requires a separately signed and explicitly selected
@@ -2249,7 +2488,7 @@ Public status must identify the selected authority, cohort and adoption.
 
 The standing offer path holds C6 and later cohorts until they select the announced
 parameters for their sequence: the finalized version2 C6 settings, or the
-version3 C7+ settings above. A matching native signed authority or
+version3 C7 settings or version4 C8+ settings above. A matching native signed authority or
 a matching separately signed reward adoption satisfies this guard. The guard
 logs `reward_offer_waiting_for_announced_economics` once per cohort per process
 while an adoption is absent or has different parameters; it never constructs

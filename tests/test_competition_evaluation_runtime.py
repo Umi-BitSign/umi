@@ -259,6 +259,9 @@ async def test_actual_sandbox_and_journal_receive_amended_runtime_authorization(
         started=boundary(1500),
         history_sha256="ac" * 32,
     )
+    # The native sandbox acquires a shared artifact-reader lease before calling
+    # the stubbed executor, just as it does for a materialized production archive.
+    (tmp_path / "archive").mkdir(mode=0o700)
     port = sandbox.CohortCpuSandbox(
         selected["policy"],
         archive=tmp_path / "archive",

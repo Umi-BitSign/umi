@@ -25,6 +25,10 @@ from .competition_cohort_participation import (
 )
 from .competition_cohort_recovery import Block
 from .competition_cohort_suite_adoption import selected_evaluation_suite
+from .competition_cpu_efficiency_policy import (
+    SignedCohortCpuEfficiencyAdoption,
+    round_cpu_efficiency_authorization,
+)
 from .competition_evaluation_runtime import (
     SignedCohortEvaluationRuntimeAdoption,
     round_runtime_authorization,
@@ -55,9 +59,11 @@ class RecoverableRoundParticipant(StrictProtocolModel):
 
 
 class RecoverableEvaluationRound(StrictProtocolModel):
-    schema_: Literal["umi-recoverable-evaluation-round/1", "umi-recoverable-evaluation-round/2"] = (
-        Field(alias="schema")
-    )
+    schema_: Literal[
+        "umi-recoverable-evaluation-round/1",
+        "umi-recoverable-evaluation-round/2",
+        "umi-recoverable-evaluation-round/3",
+    ] = Field(alias="schema")
     policy_sha256: Hex32
     cohort_sha256: Hex32
     intake_closure_sha256: Hex32
@@ -71,20 +77,28 @@ class RecoverableEvaluationRound(StrictProtocolModel):
     ]
     prepared_at_block: Block
     runtime_adoption: SignedCohortEvaluationRuntimeAdoption | None = None
+    cpu_efficiency_adoption: SignedCohortCpuEfficiencyAdoption | None = None
 
     @model_serializer(mode="wrap")
     def preserve_original_round(self, handler):
         value = handler(self)
         if self.runtime_adoption is None:
             value.pop("runtime_adoption", None)
+        if self.cpu_efficiency_adoption is None:
+            value.pop("cpu_efficiency_adoption", None)
         return value
 
     @model_validator(mode="after")
     def canonical_roster(self) -> Self:
-        if (self.schema_ == "umi-recoverable-evaluation-round/2") != (
+        efficiency = self.schema_ == "umi-recoverable-evaluation-round/3"
+        if efficiency != (self.cpu_efficiency_adoption is not None):
+            raise ValueError("CPU efficiency requires a versioned prepared round")
+        if not efficiency and (self.schema_ == "umi-recoverable-evaluation-round/2") != (
             self.runtime_adoption is not None
         ):
             raise ValueError("cohort runtime amendment requires a versioned prepared round")
+        if efficiency and self.sequence < 8:
+            raise ValueError("CPU efficiency is prospective for C8 and later cohorts")
         submissions = tuple(p.submission_sha256 for p in self.participants)
         if submissions != tuple(sorted(set(submissions))):
             raise ValueError("recoverable round roster must be sorted and unique")
@@ -121,7 +135,10 @@ def verify_recoverable_round_participant(
     view = verify_cohort_history(
         history, policy, expected_tip_sha256=expected_tip_sha256, current_block=current_block
     )
-    round_runtime_authorization(round_, policy, history)
+    if round_.cpu_efficiency_adoption is None:
+        round_runtime_authorization(round_, policy, history)
+    else:
+        round_cpu_efficiency_authorization(round_, policy, history)
     accepted = verify_participant_admission(
         admission,
         signed,

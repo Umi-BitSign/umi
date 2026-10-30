@@ -130,9 +130,12 @@ class SelectedBatchAdoptionTarget:
     signer: str | None = None
     peers: tuple = ()
     cohort_sequences: tuple[tuple[str, int], ...] = ()
+    authority: object = None
+    runtime_adoption: object = None
+    plans: tuple = ()
 
 
-def load_adoption_target(target):
+def load_adoption_target(target, *, cpu_efficiency=False):
     raw = _read_root_control_path(Path(target.config_path), 8 * 1024**2, modes={0o444})
     kind = CompetitionServiceConfig if target.role == "owner" else PhaseReviewServiceConfig
     config = kind.model_validate_json(raw)
@@ -143,7 +146,11 @@ def load_adoption_target(target):
         intake = config.recoverable_intake
         if host is None or intake is None:
             raise ModelBatchAdoptionRefused("batch adoption owner lacks supported service intake")
-        directory = host.batch_certification_adoptions_directory
+        directory = (
+            host.cpu_efficiency_adoptions_directory
+            if cpu_efficiency
+            else host.batch_certification_adoptions_directory
+        )
         result = SelectedBatchAdoptionTarget(
             target,
             Path(directory or "/"),
@@ -151,22 +158,33 @@ def load_adoption_target(target):
             intake.cohorts,
             peers=host.model_review_peers,
             cohort_sequences=tuple((digest(plan), plan.sequence) for plan in host.series.cohorts),
+            authority=host.series.recovery.authority,
+            runtime_adoption=host.runtime_adoption,
+            plans=host.series.cohorts,
         )
     else:
         model = config.model_signing
         if model is None:
             raise ModelBatchAdoptionRefused("batch adoption reviewer lacks model signing")
-        directory = model.batch_certification_adoptions_directory
+        directory = (
+            model.cpu_efficiency_adoptions_directory
+            if cpu_efficiency
+            else model.batch_certification_adoptions_directory
+        )
         result = SelectedBatchAdoptionTarget(
             target,
             Path(directory or "/"),
             digest(config.policy),
             model.cohorts,
             signer=model.signer,
+            authority=config.series.recovery.authority,
+            plans=config.series.cohorts,
         )
     if directory is None:
         raise ModelBatchAdoptionRefused(
-            "batch adoption directory is not selected in installed configuration"
+            "CPU adoption directory is not selected in installed configuration"
+            if cpu_efficiency
+            else "batch adoption directory is not selected in installed configuration"
         )
     return result
 
@@ -249,29 +267,46 @@ def check_target_process(target):
     }
 
 
-def publish_for_actor(target, request, signed=None, *, check_only=False):
+def publish_for_actor(target, request, signed=None, *, check_only=False, _cpu_efficiency=False):
     """Actor-side check/publication; never changes ownership or existing bytes."""
     if pwd.getpwuid(os.getuid()).pw_name != target.service_account:
         raise ModelBatchAdoptionRefused(
             "batch adoption publication must use the selected service account"
         )
     check_target_process(target)
-    selected = load_adoption_target(target)
+    selected = (
+        load_adoption_target(target, cpu_efficiency=True)
+        if _cpu_efficiency
+        else load_adoption_target(target)
+    )
     adoption = request.adoption
+    if _cpu_efficiency:
+        from .competition_cpu_efficiency_adoption import CpuEfficiencyReviewRequest
+        from .competition_cpu_efficiency_policy import SignedCohortCpuEfficiencyAdoption
+
+        request_type, signed_type = CpuEfficiencyReviewRequest, SignedCohortCpuEfficiencyAdoption
+        slot, cohort, maximum_bytes = (
+            adoption.authority_sha256,
+            request.anchor_cohort_sha256,
+            256 * 1024,
+        )
+    else:
+        request_type, signed_type = (
+            ModelBatchAdoptionReviewRequest,
+            SignedModelBatchCertificationAdoption,
+        )
+        slot = cohort = adoption.cohort_sha256
+        maximum_bytes = 65536
     if selected.policy_sha256 != adoption.policy_sha256 or not any(
-        c.cohort_sha256 == adoption.cohort_sha256
-        and c.authority_sha256 == adoption.authority_sha256
+        c.cohort_sha256 == cohort and c.authority_sha256 == adoption.authority_sha256
         for c in selected.cohorts
     ):
         raise ModelBatchAdoptionRefused("batch adoption publication is outside selected authority")
     ensure_private_directory(selected.directory, create=not check_only)
-    candidate = selected.directory / (adoption.cohort_sha256 + ".candidate.json")
-    final = selected.directory / (adoption.cohort_sha256 + ".json")
+    candidate = selected.directory / (slot + ".candidate.json")
+    final = selected.directory / (slot + ".json")
     if candidate.exists() or candidate.is_symlink():
-        if (
-            read_private_model(candidate, ModelBatchAdoptionReviewRequest, maximum_bytes=65536)
-            != request
-        ):
+        if read_private_model(candidate, request_type, maximum_bytes=maximum_bytes) != request:
             raise ModelBatchAdoptionRefused(
                 "batch adoption changes the retained operator candidate"
             )
@@ -281,17 +316,15 @@ def publish_for_actor(target, request, signed=None, *, check_only=False):
         )
     existing = None
     if final.exists() or final.is_symlink():
-        existing = read_private_model(
-            final, SignedModelBatchCertificationAdoption, maximum_bytes=65536
-        )
+        existing = read_private_model(final, signed_type, maximum_bytes=maximum_bytes)
         if existing.adoption != adoption or (signed is not None and existing != signed):
             raise ModelBatchAdoptionRefused("batch adoption changes an existing signed selection")
     if signed is not None and signed.adoption != adoption:
         raise ModelBatchAdoptionRefused("batch adoption publication changes its reserved body")
     if not check_only:
-        publish_private_model(candidate, request, maximum_bytes=65536)
+        publish_private_model(candidate, request, maximum_bytes=maximum_bytes)
         if signed is not None:
-            publish_private_model(final, signed, maximum_bytes=65536)
+            publish_private_model(final, signed, maximum_bytes=maximum_bytes)
     actual = existing if check_only else (signed or existing)
     return {
         "role": target.role,
@@ -301,7 +334,9 @@ def publish_for_actor(target, request, signed=None, *, check_only=False):
     }
 
 
-def actor_publication(target, request, signed=None, *, check_only=False):
+def actor_publication(target, request, signed=None, *, check_only=False, _action="publish"):
+    if _action not in {"publish", "publish-cpu"}:
+        raise ValueError("unsupported typed actor publication")
     # Source-maintenance deployments use the already selected qualified source
     # with an installed isolated interpreter. Keep that exact module source in
     # the child; do not import from its cwd or mutate the interpreter's tree.
@@ -311,7 +346,9 @@ def actor_publication(target, request, signed=None, *, check_only=False):
         "import runpy,sys;sys.path.insert(0," + repr(source) + ");"
         "sys.argv=["
         + repr(module)
-        + ",'publish'];runpy.run_module("
+        + ","
+        + repr(_action)
+        + "];runpy.run_module("
         + repr(module)
         + ",run_name='__main__')"
     )
@@ -341,8 +378,7 @@ def actor_publication(target, request, signed=None, *, check_only=False):
     return response
 
 
-def _selected_targets(config, policy, request):
-    targets = tuple(load_adoption_target(t) for t in (config.owner, *config.reviewers))
+def _checked_target_routes(config, policy, targets):
     owner, *reviewers = targets
     peers = {identity(peer.signer): peer for peer in owner.peers}
     if len(peers) != len(owner.peers) or set(peers) != {identity(t.signer) for t in reviewers}:
@@ -369,16 +405,22 @@ def _selected_targets(config, policy, request):
             "batch adoption operator and service selection directories must be disjoint"
         )
     for target in targets:
-        if target.policy_sha256 != digest(policy) or not any(
+        if target.policy_sha256 != digest(policy):
+            raise ModelBatchAdoptionRefused("adoption targets differ on selected policy")
+        check_target_process(target.target)
+    return targets, peers
+
+
+def _selected_targets(config, policy, request):
+    targets = tuple(load_adoption_target(t) for t in (config.owner, *config.reviewers))
+    for target in targets:
+        if not any(
             c.cohort_sha256 == request.adoption.cohort_sha256
             and c.authority_sha256 == request.adoption.authority_sha256
             for c in target.cohorts
         ):
-            raise ModelBatchAdoptionRefused(
-                "batch adoption targets differ on policy or cohort authority"
-            )
-        check_target_process(target.target)
-    return targets, peers
+            raise ModelBatchAdoptionRefused("batch adoption targets differ on cohort authority")
+    return _checked_target_routes(config, policy, targets)
 
 
 async def run_model_batch_adoption(
@@ -401,8 +443,76 @@ async def run_model_batch_adoption(
         ),
         operator_request_reference=config.operator_request_reference,
     )
+    return await _run_retained_adoption(
+        config,
+        policy,
+        history,
+        request,
+        client=client,
+        publish=publish,
+        select=select,
+        peer_factory=peer_factory,
+        cpu_efficiency=False,
+    )
+
+
+async def _run_retained_adoption(
+    config,
+    policy,
+    history,
+    request,
+    *,
+    client,
+    publish,
+    select,
+    peer_factory,
+    cpu_efficiency,
+):
+    """The two supported typed contracts share exact retry and actor delivery."""
+    if cpu_efficiency:
+        from .competition_cpu_efficiency_adoption import (
+            CpuEfficiencyVote,
+            check_cpu_efficiency_vote,
+        )
+        from .competition_cpu_efficiency_operator import (
+            CpuEfficiencyOperatorCompletion,
+            CpuEfficiencyOperatorPlan,
+        )
+        from .competition_cpu_efficiency_policy import (
+            SignedCohortCpuEfficiencyAdoption,
+            verify_cpu_efficiency_adoption_selection,
+        )
+
+        plan_type, completion_type = CpuEfficiencyOperatorPlan, CpuEfficiencyOperatorCompletion
+        signed_type, vote_type = SignedCohortCpuEfficiencyAdoption, CpuEfficiencyVote
+        check_vote = check_cpu_efficiency_vote
+        cohort, slot = request.anchor_cohort_sha256, request.adoption.authority_sha256
+        stage = "cpu_efficiency_adoption"
+
+        def verify_signed(signed):
+            verify_cpu_efficiency_adoption_selection(
+                signed,
+                policy=policy,
+                authority=history.authority.authority,
+                runtime_sha256=request.adoption.runtime_sha256,
+            )
+    else:
+        plan_type, completion_type = (
+            ModelBatchAdoptionOperatorPlan,
+            ModelBatchAdoptionOperatorCompletion,
+        )
+        signed_type, vote_type = SignedModelBatchCertificationAdoption, ModelBatchAdoptionVote
+        check_vote = check_model_batch_adoption_vote
+        cohort = slot = request.adoption.cohort_sha256
+        stage = "model_batch_adoption"
+
+        def verify_signed(signed):
+            verify_model_batch_certification_adoption(
+                signed, history, policy, maximum_block=config.effective_at_block
+            )
+
     targets, peers = await run_owned_thread(select, config, policy, request)
-    state, cohort = Path(config.state_directory), request.adoption.cohort_sha256
+    state = Path(config.state_directory)
     await run_owned_thread(ensure_private_directory, state)
     # Nonblocking flock and bounded local metadata only: acquire synchronously
     # so cancellation cannot discard a returned, still-locked descriptor.
@@ -411,7 +521,7 @@ async def run_model_batch_adoption(
         with (
             work_heartbeats(),
             WorkProgress(
-                "model_batch_adoption",
+                stage,
                 1 + len(targets) * 2 + len(peers),
                 unit="steps",
                 cohort=cohort,
@@ -423,7 +533,7 @@ async def run_model_batch_adoption(
                 planning_basis="planning_configured_peer_timeouts_and_two_30_second_publications_per_target",
             ) as progress,
         ):
-            plan = ModelBatchAdoptionOperatorPlan(
+            plan = plan_type(
                 config=config,
                 policy_sha256=digest(policy),
                 history_sha256=digest(history),
@@ -444,16 +554,12 @@ async def run_model_batch_adoption(
             signed_path = state / "signed.json"
             signed = None
             if signed_path.exists() or signed_path.is_symlink():
-                signed = await run_owned_thread(
-                    read_private_model, signed_path, SignedModelBatchCertificationAdoption
-                )
+                signed = await run_owned_thread(read_private_model, signed_path, signed_type)
                 if signed.adoption != request.adoption:
                     raise ModelBatchAdoptionRefused(
                         "batch adoption retained certificate changed its original request"
                     )
-                verify_model_batch_certification_adoption(
-                    signed, history, policy, maximum_block=config.effective_at_block
-                )
+                verify_signed(signed)
             for target in targets:
                 receipt = await run_owned_thread(
                     lambda t=target: publish(t.target, request, signed, check_only=True)
@@ -469,7 +575,7 @@ async def run_model_batch_adoption(
             for account, peer in sorted(peers.items()):
                 path = state / ("vote-" + account + ".json")
                 if path.exists() or path.is_symlink():
-                    vote = await run_owned_thread(read_private_model, path, ModelBatchAdoptionVote)
+                    vote = await run_owned_thread(read_private_model, path, vote_type)
                 elif signed is not None:
                     raise ModelBatchAdoptionRefused(
                         "signed batch adoption lost a configured vote; repair required"
@@ -491,10 +597,14 @@ async def run_model_batch_adoption(
                         token=token,
                         timeout_seconds=peer.timeout_seconds,
                     )
-                    vote = await remote.attest_batch_adoption(request)
-                    check_model_batch_adoption_vote(vote, request, policy, signer=peer.signer)
+                    vote = (
+                        await remote.attest_cpu_efficiency(request)
+                        if cpu_efficiency
+                        else await remote.attest_batch_adoption(request)
+                    )
+                    check_vote(vote, request, policy, signer=peer.signer)
                     await run_owned_thread(publish_private_model, path, vote)
-                check_model_batch_adoption_vote(vote, request, policy, signer=peer.signer)
+                check_vote(vote, request, policy, signer=peer.signer)
                 votes.append(vote)
                 progress.advance()
             groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}
@@ -504,12 +614,8 @@ async def run_model_batch_adoption(
                 if group not in seen:
                     chosen.append(vote.signature)
                     seen.add(group)
-            expected = SignedModelBatchCertificationAdoption(
-                adoption=request.adoption, signatures=tuple(chosen)
-            )
-            verify_model_batch_certification_adoption(
-                expected, history, policy, maximum_block=config.effective_at_block
-            )
+            expected = signed_type(adoption=request.adoption, signatures=tuple(chosen))
+            verify_signed(expected)
             if signed is not None and signed != expected:
                 raise ModelBatchAdoptionRefused(
                     "batch adoption certificate differs from retained configured votes"
@@ -525,8 +631,8 @@ async def run_model_batch_adoption(
                         "batch adoption publication failed its exact readback"
                     )
                 progress.advance()
-            completion = ModelBatchAdoptionOperatorCompletion(
-                cohort_sha256=cohort,
+            completion = completion_type(
+                **({"authority_sha256": slot} if cpu_efficiency else {"cohort_sha256": cohort}),
                 adoption_sha256=digest(request.adoption),
                 signed_sha256=digest(signed),
                 reviewer_votes=len(votes),

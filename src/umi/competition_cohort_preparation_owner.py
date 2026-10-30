@@ -15,6 +15,12 @@ from .competition_cohort_preparation import PreparedCohortRound, prepare_cohort_
 from .competition_cohort_preparation_publication import PreparedRoundPublication
 from .competition_cohort_recovery import cohort_tracks
 from .competition_cohort_roster import RecoverableRosterParticipant
+from .competition_cpu_efficiency_policy import (
+    SignedCohortCpuEfficiencyAdoption,
+    require_cpu_efficiency_for_new_round,
+    verify_cpu_efficiency_adoption_selection,
+)
+from .competition_cpu_efficiency_selection import selected_cpu_efficiency_adoption
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_store import AdmissionCapacityError, CompetitionStore
 from .host_memory_request_bounds import check_stage_json
@@ -41,6 +47,8 @@ class CohortPreparation:
         maximum_bytes: int = 64 * 1024**2,
         maximum_promotion_bytes: int = 16 * 1024**2,
         runtime_adoption=None,
+        cpu_efficiency_adoption=None,
+        cpu_efficiency_adoptions_directory=None,
     ):
         if digest(queue.policy) != digest(promotion_store.policy):
             raise ValueError("round preparation promotion store uses another policy")
@@ -54,6 +62,9 @@ class CohortPreparation:
         self.queue, self.promotion = queue, promotion_store
         self.maximum_bytes, self.maximum_promotion_bytes = maximum_bytes, maximum_promotion_bytes
         self.runtime_adoption = runtime_adoption
+        self.cpu_efficiency_adoption = cpu_efficiency_adoption
+        self.cpu_efficiency_adoptions_directory = cpu_efficiency_adoptions_directory
+        selected_history = None
         if runtime_adoption is not None:
             from .competition_cohort_recovery import verify_recovery_authority
             from .competition_evaluation_runtime import (
@@ -73,8 +84,45 @@ class CohortPreparation:
                 raise ValueError("runtime amendment selects no configured intake authority")
             history = queue.intake.history(cohort)
             verify_recovery_authority(history.authority, queue.policy)
+            selected_history = history
             verify_runtime_adoption_selection(
                 self.runtime_adoption, policy=queue.policy, authority=history.authority.authority
+            )
+        if cpu_efficiency_adoption is not None:
+            from .competition_cohort_recovery import verify_recovery_authority
+
+            self.cpu_efficiency_adoption = SignedCohortCpuEfficiencyAdoption.model_validate_json(
+                canonical_json_bytes(cpu_efficiency_adoption)
+            )
+            body = self.cpu_efficiency_adoption.adoption
+            if selected_history is None:
+                cohort = next(
+                    (
+                        key
+                        for key, value in queue.intake.bindings.items()
+                        if value == body.authority_sha256
+                    ),
+                    None,
+                )
+                if cohort is None:
+                    raise ValueError("CPU efficiency selects no configured intake authority")
+                selected_history = queue.intake.history(cohort)
+                verify_recovery_authority(selected_history.authority, queue.policy)
+            effective_runtime = self.runtime_adoption
+            if (
+                effective_runtime is not None
+                and effective_runtime.adoption.first_cohort_sequence > body.first_cohort_sequence
+            ):
+                effective_runtime = None
+            verify_cpu_efficiency_adoption_selection(
+                self.cpu_efficiency_adoption,
+                policy=queue.policy,
+                authority=selected_history.authority.authority,
+                runtime_sha256=(
+                    queue.policy.evaluation_runtime_sha256
+                    if effective_runtime is None
+                    else digest(effective_runtime.adoption.runtime)
+                ),
             )
         # A retained round is immutable after the certified intake selection.
         # Its full replay verifies every submission and can be deliberately
@@ -84,6 +132,16 @@ class CohortPreparation:
         self._retained_lock = threading.Lock()
         self._retained_cache: OrderedDict[str, _VerifiedRound] = OrderedDict()
         self._retained_bytes = 0
+
+    def selected_cpu_efficiency(self, plan, authority):
+        return selected_cpu_efficiency_adoption(
+            directory=self.cpu_efficiency_adoptions_directory,
+            inline=self.cpu_efficiency_adoption,
+            policy=self.queue.policy,
+            authority=authority,
+            plan=plan,
+            runtime_adoption=self.runtime_adoption,
+        )
 
     def prepare(
         self, cohort: str, capture: RegistrationCapture, *, expected_tip_sha256: str
@@ -295,6 +353,22 @@ class CohortPreparation:
                 raise FileNotFoundError("original preparation must be restored after certification")
             elif observation is None:
                 raise FileNotFoundError("original prepared round is not retained yet")
+            tracks = cohort_tracks(
+                history.plan,
+                tuple(sorted(set(intake.tracks))),
+                adoption=view.state.model_delivery_adoption,
+            )
+            efficiency = (
+                previous.roster.round.cpu_efficiency_adoption
+                if previous is not None
+                else self.selected_cpu_efficiency(history.plan, history.authority.authority)
+            )
+            if previous is None:
+                require_cpu_efficiency_for_new_round(
+                    sequence=history.plan.sequence,
+                    eligible_tracks=tracks,
+                    adoption=efficiency,
+                )
             members = []
             for selected in sorted(seal.selected, key=lambda s: s.submission_sha256):
                 _, record = queue._record(db, store, cohort, selected.consent_sha256)
@@ -320,11 +394,7 @@ class CohortPreparation:
                 tuple(members),
                 promotion,
                 observation if previous is None else previous.observation,
-                eligible_tracks=cohort_tracks(
-                    history.plan,
-                    tuple(sorted(set(intake.tracks))),
-                    adoption=view.state.model_delivery_adoption,
-                ),
+                eligible_tracks=tracks,
                 decision_source=lambda key: store.source(cohort, key, CohortDecisionInput),
                 intake_records=intake._records(db, history),
                 expected_tip_sha256=expected_tip_sha256,
@@ -340,6 +410,7 @@ class CohortPreparation:
                         else None
                     )
                 ),
+                cpu_efficiency_adoption=efficiency,
             )
             raw = canonical_json_bytes(result)
             if previous is not None:

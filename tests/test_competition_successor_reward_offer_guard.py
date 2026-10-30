@@ -57,6 +57,18 @@ def test_c7_announcement_requires_relative_grace_as_well_as_decay():
     assert successor_reward_rule_ready(plan, object(), _signed(expected))
 
 
+@pytest.mark.parametrize("sequence", [8, 9, 10, 100])
+def test_c8_successors_require_speed_terms_and_c7_keeps_its_original_terms(sequence):
+    old = cohort_reward_parameters(7)
+    new = cohort_reward_parameters(sequence)
+    assert not successor_reward_rule_ready(
+        SimpleNamespace(sequence=sequence), object(), _signed(old)
+    )
+    assert successor_reward_rule_ready(SimpleNamespace(sequence=sequence), object(), _signed(new))
+    assert successor_reward_rule_ready(SimpleNamespace(sequence=7), object(), _signed(old))
+    assert not successor_reward_rule_ready(SimpleNamespace(sequence=7), object(), _signed(new))
+
+
 @pytest.mark.parametrize("sequence", [6, 7, 8, 100])
 def test_missing_adoption_stops_offer_before_package_io(sequence, monkeypatch, caplog):
     cohort = "ab" * 32

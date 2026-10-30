@@ -20,6 +20,8 @@ from umi.competition_reward_coordinator_boot import RewardCoordinatorConfig
 from umi.open_competition import digest, identity, sign_object
 from umi.protocol import canonical_json_bytes
 
+from .test_competition_cpu_efficiency_capacity import large_cpu_package
+from .test_competition_cpu_efficiency_rewards import with_timings
 from .test_competition_geometric_rewards import package_boundary
 from .test_competition_reward_boot import inputs as inputs
 from .test_competition_reward_coordinator_boot import config_case as config_case
@@ -33,16 +35,36 @@ from .test_open_competition import wallet
 
 
 @pytest.fixture
-def selection(config_case, tmp_path):
+def selection(config_case, tmp_path, request):
     """Synthetic compact award, real signed selection and root-control reader.
 
     Native source certification is covered by the existing score publisher tests;
     this fixture does not claim model/proof replay or live chain activation.
     """
     boot = config_case.config
-    cohort = next(p for p in boot.series.cohorts if p.sequence == 7)
-    package = package_boundary(["0.595", "0.594"], baseline="0.6")
-    effective = derive_effective_reward_allocation(package, cohort_reward_parameters(7))
+    large = getattr(request, "param", None) == "cpu_large"
+    timed = large or getattr(request, "param", None) == "cpu"
+    cohort = next(p for p in boot.series.cohorts if p.sequence == (8 if timed else 7))
+    package = large_cpu_package() if large else package_boundary(["0.595", "0.594"], baseline="0.6")
+    if timed and not large:
+        contract = {"measurement_contract": "synthetic-publication-boundary"}
+        original_award = package.allocation.model_award
+        compact = with_timings(original_award, contract=digest(contract))
+        package.allocation = package.allocation.model_copy(
+            update={
+                "model_award": original_award.model_copy(
+                    update={
+                        "candidates": compact.candidates,
+                        "cpu_efficiency_adoption_sha256": compact.cpu_efficiency_adoption_sha256,
+                    }
+                )
+            }
+        )
+        package.inputs.roster = SimpleNamespace(
+            round=SimpleNamespace(cpu_efficiency_adoption=SimpleNamespace(adoption=contract))
+        )
+    parameters = cohort_reward_parameters(cohort.sequence)
+    effective = derive_effective_reward_allocation(package, parameters)
     originals = []
     for allocation in (package.allocation, effective):
         award = allocation.model_award
@@ -90,7 +112,9 @@ def selection(config_case, tmp_path):
         key=lambda c: -float(c.aggregate.numerator) / int(c.aggregate.denominator),
     )
     original = scores.PublicModelScores(
-        schema="umi-public-cohort-model-results/1",
+        schema="umi-public-cohort-model-results/4"
+        if timed
+        else "umi-public-cohort-model-results/1",
         cohort_sha256=digest(cohort),
         round_sha256=original_allocation.round_sha256,
         policy_sha256=digest(boot.policy),
@@ -98,6 +122,8 @@ def selection(config_case, tmp_path):
         certified_history_tip_sha256="ab" * 32,
         source_metadata_sha256="cd" * 32,
         certification="quorum_certified_native_allocation",
+        cpu_efficiency_adoption_sha256=original_allocation.model_award.cpu_efficiency_adoption_sha256,
+        efficiency_weight_applied=False if timed else None,
         items=tuple(
             scores.PublicModelScore(
                 submission_sha256=c.submission_sha256,
@@ -111,6 +137,7 @@ def selection(config_case, tmp_path):
                 baseline_eligible=False,
                 model_reward_status="below_baseline",
                 certified_raw_weight_for_hotkey=weight.get(identity(c.recipient_hotkey), 0),
+                **scores._public_cpu_efficiency(c),
             )
             for i, c in enumerate(candidates)
         ),
@@ -126,7 +153,7 @@ def selection(config_case, tmp_path):
         service_certificate_sha256=effective.service_certificate_sha256,
         quality_manifest_sha256=effective.quality_manifest_sha256,
         effective_allocation_sha256=digest(effective),
-        parameters=cohort_reward_parameters(7),
+        parameters=parameters,
         revision=1,
         predecessor_adoption_sha256=None,
         issued_at_block=boot.series.recovery.authority.issued_at_block,
@@ -158,15 +185,25 @@ def selection(config_case, tmp_path):
     )
 
 
+@pytest.mark.parametrize("selection", ["quality", "cpu", "cpu_large"], indirect=True)
 def test_selected_signed_adoption_reuses_completed_projection_after_restart_and_eviction(
     selection, monkeypatch
 ):
     s = selection
+    if len(s.original.items) > 2:
+        assert s.allocation_path.stat().st_size > 1024**2
     owner = module.SelectedModelScoreAdoptions(s.case.path, policy=s.boot.policy, state=s.state)
     result = owner.project(s.original)
     assert result.reward_adoption_sha256 == digest(s.signed.adoption)
     assert all(r.baseline_eligible for r in result.items)
     assert sum(r.certified_raw_weight_for_hotkey for r in result.items) > 0
+    if s.original.cpu_efficiency_adoption_sha256 is not None:
+        assert result.schema_ == "umi-public-cohort-model-results/4"
+        assert result.efficiency_weight_applied is True
+        assert result.cpu_efficiency_adoption_sha256 == s.original.cpu_efficiency_adoption_sha256
+        assert [row.normalized_cpu_slowdown for row in result.items] == [
+            row.normalized_cpu_slowdown for row in s.original.items
+        ]
     s.allocation_path.unlink()
 
     def forbidden(*args, **kwargs):
@@ -273,6 +310,7 @@ def test_score_publisher_handoff_updates_only_boot_pointer_and_rejects_split_lin
 
 
 @pytest.mark.parametrize("live_feed", [False, True])
+@pytest.mark.parametrize("selection", ["quality", "cpu"], indirect=True)
 def test_native_publisher_automatically_replaces_public_projection_and_preserves_native_receipt(
     selection, tmp_path, monkeypatch, live_feed
 ):
@@ -296,7 +334,7 @@ def test_native_publisher_automatically_replaces_public_projection_and_preserves
     receipt = scores.ScoreCompletion(
         schema="umi-native-public-model-score-completion/1",
         binding_sha256=original_owner.binding,
-        semantics_sha256=scores.SEMANTICS,
+        semantics_sha256=scores._projection_semantics(s.original),
         source_stamp=(),
         projection=s.original,
     ).sealed()

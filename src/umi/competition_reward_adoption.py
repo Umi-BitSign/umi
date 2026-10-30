@@ -132,6 +132,13 @@ class RewardModelAdoption(StrictProtocolModel):
             raise ValueError("score correction requires complete versioned evidence")
         if correction and self.score_correction_evidence is None:
             raise ValueError("score correction requires complete versioned evidence")
+        if self.score_correction_evidence is not None and (
+            self.parameters.cpu_efficiency_rule is not None
+        ):
+            raise ValueError(
+                "quality-only score correction cannot replace CPU-scored evidence; "
+                "fresh versioned timing evidence is required"
+            )
         if early != (self.early_release is not None):
             raise ValueError("early release requires an explicit versioned adoption")
         if automatic != isinstance(self.early_release, RewardAutomaticRelease):
@@ -553,6 +560,17 @@ def derive_adopted_reward_allocation(package, adoption, policy):
     """One allocation derivation for reviewer, coordinator and publisher."""
     if adoption.signed_score_correction is None:
         return derive_effective_reward_allocation(package, adoption.parameters)
+    original_award = package.allocation.model_award
+    if adoption.parameters.cpu_efficiency_rule is not None or (
+        original_award is not None and original_award.cpu_efficiency_adoption_sha256 is not None
+    ):
+        # Version-one correction rows carry quality only. Never reuse timing
+        # from another execution or silently discard a prepared speed contract.
+        # Reject before correction review/publication can reserve new state.
+        raise ValueError(
+            "quality-only score correction cannot replace CPU-scored evidence; "
+            "fresh versioned timing evidence is required"
+        )
     evidence = adoption.score_correction_evidence
     return verify_signed_score_correction(
         adoption.signed_score_correction,

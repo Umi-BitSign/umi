@@ -74,6 +74,10 @@ from .competition_cohort_reserved_participation import (
 from .competition_cohort_service_api import ServiceWorkAdmissionAPI, prepared_service_roster
 from .competition_cohort_service_queue import ServiceWorkQueue, ServiceWorkQueueConfig
 from .competition_cohort_service_work import MAX_CATALOG_BYTES, SignedServiceWorkCatalog
+from .competition_cpu_efficiency_policy import (
+    SignedCohortCpuEfficiencyAdoption,
+    verify_cpu_efficiency_adoption_selection,
+)
 from .competition_evaluation_runtime import (
     SignedCohortEvaluationRuntimeAdoption,
     verify_runtime_adoption_selection,
@@ -365,6 +369,8 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
     dispatch: ServiceDispatchConfig | None = None
     orders: OrderHostConfig | None = None
     runtime_adoption: SignedCohortEvaluationRuntimeAdoption | None = None
+    cpu_efficiency_adoption: SignedCohortCpuEfficiencyAdoption | None = None
+    cpu_efficiency_adoptions_directory: Directory | None = None
 
     @model_serializer(mode="wrap")
     def serialize(self, handler):
@@ -399,6 +405,10 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             value.pop("orders", None)
         if self.runtime_adoption is None:
             value.pop("runtime_adoption", None)
+        if self.cpu_efficiency_adoption is None:
+            value.pop("cpu_efficiency_adoption", None)
+        if self.cpu_efficiency_adoptions_directory is None:
+            value.pop("cpu_efficiency_adoptions_directory", None)
         return value
 
     @model_validator(mode="after")
@@ -535,6 +545,13 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
                 raise ValueError(
                     "model batch adoptions must be disjoint from state and credentials"
                 )
+        if self.cpu_efficiency_adoptions_directory is not None:
+            adoption_root = Path(self.cpu_efficiency_adoptions_directory)
+            other_roots = self.model_copy(
+                update={"cpu_efficiency_adoptions_directory": None}
+            ).stores()
+            if any(not disjoint(adoption_root, root) for root in other_roots):
+                raise ValueError("CPU adoptions must be disjoint from state and credentials")
         protected = tuple(Path(source.directory) for source in self.legacy_model_storage)
         if self.legacy_model_verification_directory is not None:
             protected += (Path(self.legacy_model_verification_directory),)
@@ -576,6 +593,11 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             *(
                 (Path(self.batch_certification_adoptions_directory),)
                 if self.batch_certification_adoptions_directory is not None
+                else ()
+            ),
+            *(
+                (Path(self.cpu_efficiency_adoptions_directory),)
+                if self.cpu_efficiency_adoptions_directory is not None
                 else ()
             ),
             *(Path(source.directory) for source in self.legacy_model_storage),
@@ -634,6 +656,24 @@ class ServiceAdmissionHost:
         verify_runtime_adoption_selection(
             c.runtime_adoption, policy=policy, authority=c.series.recovery.authority
         )
+        if c.cpu_efficiency_adoption is not None:
+            profile = c.runtime_adoption
+            if (
+                profile is not None
+                and profile.adoption.first_cohort_sequence
+                > c.cpu_efficiency_adoption.adoption.first_cohort_sequence
+            ):
+                profile = None
+            verify_cpu_efficiency_adoption_selection(
+                c.cpu_efficiency_adoption,
+                policy=policy,
+                authority=c.series.recovery.authority,
+                runtime_sha256=(
+                    policy.evaluation_runtime_sha256
+                    if profile is None
+                    else digest(profile.adoption.runtime)
+                ),
+            )
         expected = {digest(p): digest(c.series.recovery.authority) for p in c.series.cohorts}
         if intake.bindings != expected:
             raise ValueError("service admission series differs from owned intake")
@@ -775,7 +815,11 @@ class ServiceAdmissionHost:
             )
             intake.pending_admission_uploads = DirectAdmissionDrain(self.direct_uploads)
         self.preparation = CohortPreparation(
-            CohortAdmissionQueue(intake), promotion, runtime_adoption=c.runtime_adoption
+            CohortAdmissionQueue(intake),
+            promotion,
+            runtime_adoption=c.runtime_adoption,
+            cpu_efficiency_adoption=c.cpu_efficiency_adoption,
+            cpu_efficiency_adoptions_directory=c.cpu_efficiency_adoptions_directory,
         )
 
         async def prepare_legacy_review(cohort, sub):

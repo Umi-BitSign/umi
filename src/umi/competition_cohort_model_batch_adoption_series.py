@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
 from .competition_cohort_intake import history_tip
@@ -45,8 +45,21 @@ class ModelBatchAdoptionSeriesConfig(StrictProtocolModel):
     histories_directory: Directory
     standing_operator_request_reference: Annotated[str, Field(min_length=1, max_length=2048)]
     minimum_cohort_sequence: Annotated[int, Field(ge=7)] = 7
+    cpu_efficiency_operator_request_reference: (
+        Annotated[str, Field(min_length=1, max_length=2048)] | None
+    ) = None
+    cpu_efficiency_anchor_history_file: Directory | None = None
     owner: ModelBatchAdoptionTarget
     reviewers: Annotated[tuple[ModelBatchAdoptionTarget, ...], Field(min_length=1, max_length=64)]
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.cpu_efficiency_operator_request_reference is None:
+            value.pop("cpu_efficiency_operator_request_reference", None)
+        if self.cpu_efficiency_anchor_history_file is None:
+            value.pop("cpu_efficiency_anchor_history_file", None)
+        return value
 
     @model_validator(mode="after")
     def scope(self):
@@ -312,15 +325,30 @@ async def run_model_batch_adoption_series(
                         "reason_code": getattr(error, "reason_code", None),
                     }
                 )
+        cpu_result = None
+        if config.cpu_efficiency_operator_request_reference is not None:
+            from .competition_cpu_efficiency_operator import run_cpu_efficiency_series
+
+            cpu_result = await run_cpu_efficiency_series(
+                config, policy, client=client, load_history=load_history
+            )
         pending = sum(o["status"] == "pending" for o in outcomes)
-        if pending:
+        pending_authorities = int(cpu_result is not None and cpu_result["status"] == "pending")
+        if pending or pending_authorities:
             progress.interrupt()
         return {
-            "status": "pending" if pending else "complete",
+            "status": "pending"
+            if pending or (cpu_result is not None and cpu_result["status"] == "pending")
+            else "complete",
             "completed": len(cohorts) - pending,
             "total": len(cohorts),
             "pending": pending,
             "cohorts": outcomes,
+            **(
+                {"cpu_efficiency": cpu_result, "pending_authority_contracts": pending_authorities}
+                if cpu_result is not None
+                else {}
+            ),
             "intake_closure_authorized": False,
             "runtime_activation_verified": False,
         }

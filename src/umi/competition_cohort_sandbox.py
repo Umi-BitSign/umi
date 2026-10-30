@@ -28,6 +28,7 @@ from .competition_runner import (
 )
 from .competition_transport_verification import TransferProgress
 from .concurrency import await_owned_task, run_owned_thread
+from .host_model_cache import model_cache_lease, model_cache_retirement
 from .open_competition import CompetitionPolicy, digest
 from .private_files import ensure_private_directory, private_path
 
@@ -62,7 +63,11 @@ class CohortCpuSandbox:
     ) -> None:
         if attempt.job_sha256 != digest(job) or not isinstance(job.runtime, OfflineCpuRuntime):
             raise ValueError("sandbox recovery differs from its retained CPU job")
-        await stop_retained_cpu_invocation(digest(attempt))
+        from .competition_cpu_efficiency_policy import prepared_cpu_efficiency_authorization
+
+        authority = prepared_cpu_efficiency_authorization(job.round, self.policy)
+        options = {} if authority is None else {"cgroupfs": True}
+        await stop_retained_cpu_invocation(digest(attempt), **options)
         # Exact owner-private invocation input copies only, after container exit.
         # No model, video archive, journal or another invocation is removed.
         path = self._path(attempt)
@@ -88,6 +93,9 @@ class CohortCpuSandbox:
             )
         case, _, model = case_role_model(job, attempt.step_index)
         runtime_authorization = prepared_runtime_authorization(job.round, self.policy)
+        from .competition_cpu_efficiency_policy import prepared_cpu_efficiency_authorization
+
+        cpu_authorization = prepared_cpu_efficiency_authorization(job.round, self.policy)
         runtime_options = (
             {}
             if runtime_authorization is None
@@ -95,7 +103,7 @@ class CohortCpuSandbox:
         )
         path = self._path(attempt)
 
-        async def execute(native_capacity=None):
+        async def execute(cache_lease, native_capacity=None):
             video = await run_owned_thread(
                 read_case_video, self.videos, case.video_sha256, job.runtime.maximum_video_bytes
             )
@@ -109,16 +117,35 @@ class CohortCpuSandbox:
                 video=video,
                 invocation_sha256=digest(attempt),
                 workspace=path,
+                model_cache_lease=cache_lease,
                 **({} if native_capacity is None else {"native_capacity": native_capacity}),
                 **runtime_options,
+                **(
+                    {"cpu_efficiency_authorization": cpu_authorization}
+                    if cpu_authorization is not None
+                    else {}
+                ),
             )
 
-        if self.execution_admission is None:
-            return await execute()
-        async with self.execution_admission.invocation(
-            job.runtime, **runtime_options
-        ) as native_capacity:
-            return await execute(native_capacity)
+        # Same-model exclusion is acquired before scarce lane memory/CPU capacity.
+        # Every reader participates; timed readers also reconcile a retained
+        # container left by a previous owner before conditioning model pages.
+        async def reconcile_cache(invocation):
+            await stop_retained_cpu_invocation(invocation, cgroupfs=True)
+
+        async with model_cache_lease(
+            archive,
+            model,
+            exclusive=cpu_authorization is not None,
+            invocation_sha256=digest(attempt) if cpu_authorization is not None else None,
+            reconcile=reconcile_cache if cpu_authorization is not None else None,
+        ) as cache_lease:
+            if self.execution_admission is None:
+                return await execute(cache_lease)
+            async with self.execution_admission.invocation(
+                job.runtime, **runtime_options
+            ) as native_capacity:
+                return await execute(cache_lease, native_capacity)
 
 
 def _direct_model_cache_path(workspace: Path, boot) -> Path:
@@ -327,7 +354,12 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
             TransferProgress("model_cache_eviction", 1, unit="objects") as progress,
         ):
             ensure_private_directory(archive)
-            await run_owned_thread(shutil.rmtree, archive)
+
+            async def reconcile_cache(invocation):
+                await stop_retained_cpu_invocation(invocation, cgroupfs=True)
+
+            async with model_cache_retirement(archive, reconcile=reconcile_cache):
+                await run_owned_thread(shutil.rmtree, archive)
             self.slot_identities.pop(archive, None)
             self.slot_recency.pop(archive, None)
             progress.advance(1)

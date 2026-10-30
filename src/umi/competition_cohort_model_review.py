@@ -34,6 +34,7 @@ from .competition_cohort_model_static_review import (
     verify_standing_review_policy,
 )
 from .competition_cohort_recovery import verify_recovery_quorum
+from .competition_cpu_efficiency_adoption import attest_cpu_efficiency
 from .competition_execution import execution_boundary
 from .competition_model_transport_qualification import (
     qualify_model_transport,
@@ -59,6 +60,7 @@ class ModelReviewConfig(StrictProtocolModel):
     signing_timeout_seconds: Annotated[int, Field(ge=1, le=1200)] = 300
     preparation_concurrency: Annotated[int, Field(ge=1, le=16)] = 10
     batch_certification_adoptions_directory: Directory | None = None
+    cpu_efficiency_adoptions_directory: Directory | None = None
 
     @model_serializer(mode="wrap")
     def preserve_legacy_bytes(self, handler):
@@ -67,6 +69,8 @@ class ModelReviewConfig(StrictProtocolModel):
             value.pop("preparation_concurrency", None)
         if self.batch_certification_adoptions_directory is None:
             value.pop("batch_certification_adoptions_directory", None)
+        if self.cpu_efficiency_adoptions_directory is None:
+            value.pop("cpu_efficiency_adoptions_directory", None)
         return value
 
     @model_validator(mode="after")
@@ -79,6 +83,8 @@ class ModelReviewConfig(StrictProtocolModel):
         ]
         if self.batch_certification_adoptions_directory is not None:
             roots.append(Path(self.batch_certification_adoptions_directory))
+        if self.cpu_efficiency_adoptions_directory is not None:
+            roots.append(Path(self.cpu_efficiency_adoptions_directory))
         if any(
             a == b or a in b.parents or b in a.parents
             for i, a in enumerate(roots)
@@ -403,6 +409,9 @@ class ModelArtifactReviewer:
 
     async def attest_batch(self, request):
         return await attest_model_batch(self, request)
+
+    async def attest_cpu_efficiency(self, request):
+        return await attest_cpu_efficiency(self, request)
 
     async def attest_batch_adoption(self, request):
         return await attest_model_batch_adoption(self, request)

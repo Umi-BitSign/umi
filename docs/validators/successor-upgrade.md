@@ -125,6 +125,57 @@ endpoint-profile bindings, then use the supported installer rerun. Batch
 certification by itself requires no upload-only client release. Preserve source
 selection and restoration dependencies until every reader using them has moved.
 
+### CPU-efficiency readers
+
+C8+ CPU-efficiency adoption is a prospective reader-first transition. Preserve
+existing C6/C7 signed inputs, timing evidence and reward behavior. Do not attach
+the contract to an already prepared round or infer timing from historical
+`elapsed_ms`. The [settlement specification](../operators/settlement.md#prospective-cpu-efficiency-rewards)
+defines the signed contract, model-execution boundary and bounded adjustment.
+
+| Consumer | Required compatible formats and update path |
+| --- | --- |
+| Preparation owner, exporter, independent preparation reviewers and request-start owner | Prepared round `/3`, signed CPU-efficiency adoption `/1` and operator request-start `/2`. Select the qualified immutable source through existing host/source maintenance before selecting a contract. |
+| Evaluator and any native execution worker overlays | Trusted cold-model timing gate, exclusive cpuset partition with scheduler balancing, comparable CPU/resource profile and versioned timing/cache evidence. Publish compatible host and overlay selections together; no model runs before the measured gate. |
+| Quality reviewers, settlement preparation, coordinator, writer and full native replay | Retained compact timing summaries, model award `/5` and allocation `/6`. Use the actual selected source for each reader and preserve completed original proof/quality evidence. |
+| Public score producer, adoption reader, delivery, API and catalog watcher | Public model results `/4`, explicit measurement-contract digest and `efficiency_weight_applied`. The delivery service must permit an adopted result while retaining exact original timing and roster. Catalog updates reuse completed release checks. |
+| Upload-only model client and model inference entrypoint | No upload, consent or model-call protocol change. Existing model-bound licensing remains intact. Full offline evidence readers need the compatible source. |
+| Reference-following validator | Existing approved signed row/policy path remains sufficient; it does not parse raw timing. Publish and verify adoption of the eventual approved row through the usual channel. |
+
+Install the exclusive bundle-cache reader and retirement hooks with every
+selected evaluator/overlay. Drain legacy untracked readers before C8 timing;
+a newly created Python process alone does not establish cache comparability.
+Retain external invocation markers across restart so cleanup can reconcile
+exact orphan containers. Timed receipts require model/invocation-bound empty
+bundle-page-cache evidence; missing observations stop timing qualification.
+
+Ship the native `umi.host_cpu_partition` restorer and `umi.host_cpu_probe` helper
+with the selected signed host. Follow the
+[partition provisioning and qualification instructions](../operators/settlement.md#cpu-partition-provisioning-and-qualification)
+after C7 drains, preserving the existing reviewers and memory-slot identities.
+The plan selects an exclusive `root` partition, normal scheduler balancing and
+explicit cgroupfs Podman execution; it does not change global Podman defaults.
+Retain the historical systemd reader for untimed execution and orphan recovery.
+Qualify actual rootless migration, bounded probe cancellation, cache ownership,
+restart cleanup and the intended concurrent lane/load profile before selection.
+Restoration completion alone records neither qualification nor contract selection.
+
+The common supervisor channel does not replace installed Python hosts. Use each
+host's supported signed maintenance/source selection and any explicit overlay
+authority. That same selected-config update must carry the private
+`cpu_efficiency_adoptions_directory` for owner/preparation and model reviewers.
+The existing adoption series timer then signs and delivers one retained CPU
+contract per authority through the authenticated model-review peers. Verify the
+exact reviewer selections before the owner selection; dynamic delivery changes
+only first new C8+ preparation, never a retained C7 round. The standalone model client has no background source updater; when a
+full-reader update is needed, publish the qualified `runtime.revision` through
+`deploy/miner-upgrade/current.json` and use its supported installer rerun. An
+upload-only miner needs no resubmission for this timing policy. Verify the actual
+selected host/overlay, published release selection and retained restart behavior
+before claiming rollout. Keep challenge start held until its operator approval
+names the exact prepared contract. No source merge or automatic image poll by
+itself grants that approval.
+
 ### Automatic translation reference releases
 
 The fixed `umi-translation-validator/1` worker uses the supervisor's existing

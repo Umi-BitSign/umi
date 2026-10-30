@@ -2,7 +2,8 @@
 
 Version 1 uses promotion attribution, version 2 a single model award, version 3
 content-proportional model awards, version 4 fixed quality-bucket awards, and
-version 5 independently normalized geometric occupied bands and model ranks.
+version 5 independently normalized geometric occupied bands and model ranks,
+and version 6 a bounded CPU efficiency adjustment after quality qualification.
 All require certification before submission.
 """
 
@@ -58,6 +59,19 @@ if TYPE_CHECKING:
     from .competition_cohort_reward_package import CohortRewardPackage
 
 
+# One bound for native/effective allocation export, validator discovery, public
+# projection and reference publication. This changes local transport capacity,
+# never signed bytes or reward authority. The schema's conservative envelope is:
+#   512 models * (64 timing runs * 512 B + 17 KiB candidate + 17 KiB
+#                 credit + 40 KiB acceptance) + 65535 recipients * 128 B
+#                 + 1 MiB envelope = 65,011,584 B < 64 MiB.
+# Timing ratios have at most 20 digits/component. The other allowances retain
+# 4096-digit exact quality components, two 64-signature batch proof quorums,
+# direct-artifact bindings and nine Merkle siblings. These are byte ceilings,
+# not allocations or reservations; actual file size is checked before parsing.
+MAX_REWARD_ALLOCATION_BYTES = 64 * 1024**2
+
+
 class CohortRewardAllocation(StrictProtocolModel):
     schema_: Literal[
         "umi-cohort-reward-allocation/1",
@@ -65,6 +79,7 @@ class CohortRewardAllocation(StrictProtocolModel):
         "umi-cohort-reward-allocation/3",
         "umi-cohort-reward-allocation/4",
         "umi-cohort-reward-allocation/5",
+        "umi-cohort-reward-allocation/6",
     ] = Field(alias="schema")
     policy_sha256: Hex32
     round_sha256: Hex32
@@ -93,8 +108,13 @@ class CohortRewardAllocation(StrictProtocolModel):
         elif self.model_award is None or self.promotion_head is not None:
             raise ValueError("model award allocation requires only the cohort model decision")
         elif (
-            (self.schema_ == "umi-cohort-reward-allocation/5")
+            (self.schema_ in {"umi-cohort-reward-allocation/5", "umi-cohort-reward-allocation/6"})
             != isinstance(self.model_award, GeometricModelAward)
+            or (self.schema_ == "umi-cohort-reward-allocation/6")
+            != (
+                isinstance(self.model_award, GeometricModelAward)
+                and self.model_award.parameters.cpu_efficiency_rule is not None
+            )
             or (self.schema_ == "umi-cohort-reward-allocation/4")
             != isinstance(self.model_award, QualityBucketModelAward)
             or (self.schema_ == "umi-cohort-reward-allocation/3")
@@ -150,6 +170,7 @@ def build_reward_allocation(
             or model_award.rule != benchmark_review.history.authority.authority.model_reward_rule
         ):
             raise ValueError("model award belongs to different quality or authority")
+        _validate_cpu_efficiency_round(model_award, benchmark_review.roster.round)
         if isinstance(model_award, GeometricModelAward):
             authority = benchmark_review.history.authority.authority
             if (
@@ -192,7 +213,10 @@ def build_reward_allocation(
         raise ValueError("service and benchmark evidence must belong to the same closed round")
     recipients, burn = _combine_model_credits(service_amounts, model_recipients, model_credits)
     return CohortRewardAllocation(
-        schema="umi-cohort-reward-allocation/5"
+        schema="umi-cohort-reward-allocation/6"
+        if isinstance(model_award, GeometricModelAward)
+        and model_award.parameters.cpu_efficiency_rule is not None
+        else "umi-cohort-reward-allocation/5"
         if isinstance(model_award, GeometricModelAward)
         else "umi-cohort-reward-allocation/4"
         if isinstance(model_award, QualityBucketModelAward)
@@ -221,6 +245,14 @@ def _geometric_credit_maps(award: GeometricModelAward):
         recipients[key] = credit.recipient_hotkey
         weights[key] = Fraction(int(credit.weight.numerator), int(credit.weight.denominator))
     return recipients, weights
+
+
+def _validate_cpu_efficiency_round(award: ModelAward, round_) -> None:
+    """Bind compact retained measurements to the original signed round contract."""
+    signed = round_.cpu_efficiency_adoption
+    expected = None if signed is None else digest(signed.adoption)
+    if award.cpu_efficiency_adoption_sha256 != expected:
+        raise ValueError("model award CPU efficiency differs from its original round contract")
 
 
 def _combine_model_credits(
@@ -288,6 +320,11 @@ def derive_effective_reward_allocation(
         or award.parameters != authority.model_reward_parameters
     ):
         raise ValueError("original geometric parameters differ from signed authority")
+    if (
+        parameters.cpu_efficiency_rule is not None
+        or award.cpu_efficiency_adoption_sha256 is not None
+    ):
+        _validate_cpu_efficiency_round(award, package.inputs.roster.round)
     amounts = service.statement.allocation
     if (
         amounts.service_budget + amounts.model_budget != 65535
@@ -298,7 +335,9 @@ def derive_effective_reward_allocation(
     effective = derive_geometric_model_award(award, parameters)
     recipients, burn = _combine_model_credits(amounts, *_geometric_credit_maps(effective))
     return CohortRewardAllocation(
-        schema="umi-cohort-reward-allocation/5",
+        schema="umi-cohort-reward-allocation/6"
+        if parameters.cpu_efficiency_rule is not None
+        else "umi-cohort-reward-allocation/5",
         policy_sha256=original.policy_sha256,
         round_sha256=original.round_sha256,
         service_certificate_sha256=original.service_certificate_sha256,

@@ -52,6 +52,7 @@ from .competition_cohort_request_terminal import (
     read_shared_incumbent_source,
     retained_shared_incumbent_source,
 )
+from .competition_cpu_efficiency_policy import prepared_cpu_efficiency_authorization
 from .competition_evaluation_runtime import prepared_runtime_authorization
 from .competition_execution import ExecutionStep
 from .competition_runner import validate_case_execution
@@ -194,7 +195,8 @@ def review_partial_request(
     width = 2 if job.mode == "paired_model" else 1
     previous = None
     source = None
-    authorization = None
+    authorization = prepared_runtime_authorization(job.round, policy)
+    efficiency_authorization = prepared_cpu_efficiency_authorization(job.round, policy)
     if isinstance(manifest, SharedPartialRequestManifest):
         if job.incumbent_observation_mode is None:
             raise ValueError("partial shared incumbent lacks a prospective signed order capability")
@@ -229,7 +231,6 @@ def review_partial_request(
             finished_by=completed_by_block,
         )
         previous = binding.reuse_observed_at
-        authorization = prepared_runtime_authorization(job.round, policy)
     for ref in manifest.steps:
         if ref.index >= step_count(job):
             raise ValueError("partial execution step is outside its original assignment")
@@ -253,10 +254,13 @@ def review_partial_request(
             if step != source.steps[ref.index]:
                 raise ValueError("partial shared incumbent changed its original observation")
             continue
-        if source is None:
-            validate_case_execution(step.execution, policy)
-        else:
-            validate_case_execution(step.execution, policy, runtime_authorization=authorization)
+        validate_case_execution(
+            step.execution,
+            policy,
+            runtime_authorization=authorization,
+            cpu_efficiency_authorization=efficiency_authorization,
+            execution_runtime=job.runtime,
+        )
         for boundary in (step.started, step.finished):
             _ordered(
                 boundary, previous, started_after=opened_at_block, finished_by=completed_by_block

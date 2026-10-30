@@ -30,6 +30,13 @@ from .competition_cohort_recovery import (
     ModelRewardCohortAuthority,
 )
 from .competition_cohort_roster import RecoverableRosterParticipant
+from .competition_cpu_efficiency_evidence import CpuEfficiencySummary
+from .competition_cpu_efficiency_math import (
+    MAX_EFFICIENCY_PPM,
+    MIN_EFFICIENCY_PPM,
+    PPM,
+    apply_efficiency_weights,
+)
 from .competition_geometric_rewards import (
     GEOMETRIC_MODEL_REWARD_RULE,
     GeometricRewardParameters,
@@ -53,6 +60,14 @@ class ModelAwardCandidate(StrictProtocolModel):
     aggregate: ExactQuality
     baseline_aggregate: ExactQuality
     eligible: bool
+    cpu_efficiency: CpuEfficiencySummary | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_candidate(self, handler):
+        value = handler(self)
+        if self.cpu_efficiency is None:
+            value.pop("cpu_efficiency", None)
+        return value
 
 
 class ModelAwardEvidence(StrictProtocolModel):
@@ -67,6 +82,7 @@ class ModelAwardEvidence(StrictProtocolModel):
     acceptances: Annotated[tuple[CertifiedModelArtifactAcceptance, ...], Field(max_length=512)]
     candidates: Annotated[tuple[ModelAwardCandidate, ...], Field(max_length=512)]
     skipped_participants: Annotated[tuple[Hex32, ...], Field(max_length=512)] | None = None
+    cpu_efficiency_adoption_sha256: Hex32 | None = None
     reference_promotion_authorized: Literal[False] = False
     chain_submission_authorized: Literal[False] = False
 
@@ -75,7 +91,19 @@ class ModelAwardEvidence(StrictProtocolModel):
         value = handler(self)
         if self.skipped_participants is None:
             value.pop("skipped_participants", None)
+        if self.cpu_efficiency_adoption_sha256 is None:
+            value.pop("cpu_efficiency_adoption_sha256", None)
         return value
+
+    @model_validator(mode="after")
+    def bound_cpu_efficiency(self):
+        for candidate in self.candidates:
+            timing = candidate.cpu_efficiency
+            if (timing is None) != (self.cpu_efficiency_adoption_sha256 is None) or (
+                timing is not None and timing.contract_sha256 != self.cpu_efficiency_adoption_sha256
+            ):
+                raise ValueError("model award CPU timing differs from its selected contract")
+        return self
 
 
 class CohortModelAward(ModelAwardEvidence):
@@ -248,16 +276,30 @@ class GeometricModelCredit(ModelScoreCredit):
     band_rank: Annotated[int, Field(ge=0)]
     within_band_rank: Annotated[int, Field(ge=0)]
     weight: ExactQuality
+    efficiency_multiplier_ppm: (
+        Annotated[int, Field(ge=MIN_EFFICIENCY_PPM, le=MAX_EFFICIENCY_PPM)] | None
+    ) = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_credit(self, handler):
+        value = handler(self)
+        if self.efficiency_multiplier_ppm is None:
+            value.pop("efficiency_multiplier_ppm", None)
+        return value
 
 
 class GeometricModelAward(ModelAwardEvidence):
-    schema_: Literal["umi-cohort-model-award/4"] = Field(alias="schema")
+    schema_: Literal["umi-cohort-model-award/4", "umi-cohort-model-award/5"] = Field(alias="schema")
     rule: Literal["baseline_or_better_geometric_bands_first_complete/1"]
     parameters: GeometricRewardParameters
     credits: Annotated[tuple[GeometricModelCredit, ...], Field(max_length=512)]
 
     @model_validator(mode="after")
     def canonical_credits(self):
+        if (self.schema_ == "umi-cohort-model-award/5") != (
+            self.parameters.cpu_efficiency_rule is not None
+        ):
+            raise ValueError("CPU efficiency award requires its selected versioned parameters")
         if self.credits != geometric_model_credits(self, self.parameters):
             raise ValueError("geometric model credits differ from canonical evidence")
         return self
@@ -272,6 +314,16 @@ def geometric_model_credits(
     original certificates and quality through native reward package replay.
     """
     candidates = {c.submission_sha256: c for c in evidence.candidates}
+    efficiency_enabled = parameters.cpu_efficiency_rule is not None
+    if efficiency_enabled and (
+        evidence.cpu_efficiency_adoption_sha256 is None
+        or any(
+            candidate.cpu_efficiency is None
+            or candidate.cpu_efficiency.contract_sha256 != evidence.cpu_efficiency_adoption_sha256
+            for candidate in evidence.candidates
+        )
+    ):
+        raise ValueError("CPU efficiency awards require complete matching timing evidence")
     certificates = {c.acceptance.submission_sha256: c for c in evidence.acceptances}
     ordinals = {key: c.acceptance.accepted_ordinal for key, c in certificates.items()}
     if (
@@ -349,6 +401,7 @@ def geometric_model_credits(
         bands.setdefault(index, []).append(candidate)
     band_weights = normalized_geometric_weights(len(bands), parameters.band_decay_bps)
     credits = []
+    factors = []
     for band_rank, index in enumerate(sorted(bands, reverse=True)):
         members = sorted(
             bands[index],
@@ -363,6 +416,13 @@ def geometric_model_credits(
         )
         for rank, candidate in enumerate(members):
             weight = band_weights[band_rank] * member_weights[rank]
+            factor = candidate.cpu_efficiency.multiplier_ppm if efficiency_enabled else None
+            if factor is not None:
+                # Preserve historical zero-baseline eligibility without paying
+                # an efficiency bonus for a measured quality of exactly zero.
+                if _fraction(candidate.aggregate) == 0:
+                    factor = min(PPM, factor)
+                factors.append(factor)
             credits.append(
                 GeometricModelCredit(
                     content_sha256=candidate.content_sha256,
@@ -375,8 +435,24 @@ def geometric_model_credits(
                     weight=ExactQuality(
                         numerator=str(weight.numerator), denominator=str(weight.denominator)
                     ),
+                    efficiency_multiplier_ppm=factor,
                 )
             )
+    if efficiency_enabled:
+        # Quality eligibility, content and score deduplication, and occupied
+        # ranks above are final before speed has any effect. Normalize once
+        # across all retained credits; never move a model into another band.
+        adjusted = apply_efficiency_weights(tuple(_fraction(c.weight) for c in credits), factors)
+        credits = [
+            credit.model_copy(
+                update={
+                    "weight": ExactQuality(
+                        numerator=str(weight.numerator), denominator=str(weight.denominator)
+                    )
+                }
+            )
+            for credit, weight in zip(credits, adjusted, strict=True)
+        ]
     return tuple(credits)
 
 
@@ -393,7 +469,9 @@ def derive_geometric_model_award(
     )
     parameters = GeometricRewardParameters.model_validate_json(canonical_json_bytes(parameters))
     return GeometricModelAward(
-        schema="umi-cohort-model-award/4",
+        schema="umi-cohort-model-award/5"
+        if parameters.cpu_efficiency_rule is not None
+        else "umi-cohort-model-award/4",
         **evidence.model_dump(by_alias=True),
         rule=GEOMETRIC_MODEL_REWARD_RULE,
         parameters=parameters,
@@ -551,6 +629,7 @@ def build_model_award(
                     aggregate=result.candidate.aggregate,
                     baseline_aggregate=result.incumbent.aggregate,
                     eligible=score >= reference,
+                    cpu_efficiency=result.cpu_efficiency,
                 )
             )
             if score >= reference:
@@ -565,6 +644,11 @@ def build_model_award(
         baseline_model_sha256=review.roster.round.incumbent_model_sha256,
         runtime_sha256=review.roster.round.runtime_sha256,
         suite_sha256=digest(review.suite),
+        cpu_efficiency_adoption_sha256=(
+            None
+            if review.roster.round.cpu_efficiency_adoption is None
+            else digest(review.roster.round.cpu_efficiency_adoption.adoption)
+        ),
         rule=authority.model_reward_rule,
         acceptances=accepted,
         candidates=tuple(candidates),

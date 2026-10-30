@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import mmap
 import os
 import re
@@ -51,6 +52,9 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 _ID = re.compile(r"[0-9a-f]{64}")
 MAX_PUBLIC_BYTES = 2 * 1024**2
 SEMANTICS = hashlib.sha256(b"umi-native-certified-model-score-projection/1").hexdigest()
+CPU_EFFICIENCY_SEMANTICS = hashlib.sha256(
+    b"umi-native-certified-model-score-projection/cpu-efficiency/1"
+).hexdigest()
 logger = logging.getLogger(__name__)
 
 
@@ -59,6 +63,33 @@ class ModelScore(PublicQuality):
     def make(cls, value):
         f = Fraction(int(value.numerator), int(value.denominator))
         return cls(numerator=str(f.numerator), denominator=str(f.denominator), decimal=float(f))
+
+
+class PublicCpuSlowdown(StrictProtocolModel):
+    """Exact relative CPU cost; values above one are valid and mean slower."""
+
+    numerator: Annotated[str, Field(pattern=r"^[1-9][0-9]*$", max_length=4096)]
+    denominator: Annotated[str, Field(pattern=r"^[1-9][0-9]*$", max_length=4096)]
+    decimal: Annotated[float, Field(gt=0, le=86_400_000)]
+
+    @classmethod
+    def make(cls, value):
+        value = Fraction(value)
+        return cls(
+            numerator=str(value.numerator), denominator=str(value.denominator), decimal=float(value)
+        )
+
+    @model_validator(mode="after")
+    def canonical_ratio(self):
+        value = Fraction(int(self.numerator), int(self.denominator))
+        if (
+            not 0 < value <= 86_400_000
+            or str(value.numerator) != self.numerator
+            or str(value.denominator) != self.denominator
+            or not math.isclose(self.decimal, float(value), rel_tol=0, abs_tol=1e-12)
+        ):
+            raise ValueError("public CPU slowdown differs from its exact normalized ratio")
+        return self
 
 
 class PublicModelScore(StrictProtocolModel):
@@ -79,12 +110,17 @@ class PublicModelScore(StrictProtocolModel):
         "not_scored",
     ]
     certified_raw_weight_for_hotkey: int = Field(ge=0, le=65535)
+    efficiency_multiplier_ppm: int | None = Field(default=None, ge=850000, le=1150000)
+    normalized_cpu_slowdown: PublicCpuSlowdown | None = None
 
     @model_serializer(mode="wrap")
     def preserve_original_score(self, handler):
         value = handler(self)
         if self.baseline_threshold is None:
             value.pop("baseline_threshold", None)
+        for key in ("efficiency_multiplier_ppm", "normalized_cpu_slowdown"):
+            if getattr(self, key) is None:
+                value.pop(key, None)
         return value
 
 
@@ -93,6 +129,7 @@ class PublicModelScores(StrictProtocolModel):
         "umi-public-cohort-model-results/1",
         "umi-public-cohort-model-results/2",
         "umi-public-cohort-model-results/3",
+        "umi-public-cohort-model-results/4",
     ] = Field(alias="schema")
     cohort_sha256: Hex32
     round_sha256: Hex32
@@ -110,6 +147,8 @@ class PublicModelScores(StrictProtocolModel):
     score_correction_statement_sha256: Hex32 | None = None
     reward_adoption_sha256: Hex32 | None = None
     reward_parameters: GeometricRewardParameters | None = None
+    cpu_efficiency_adoption_sha256: Hex32 | None = None
+    efficiency_weight_applied: bool | None = None
     reward_activation: Literal["not_assessed_by_this_endpoint"] = "not_assessed_by_this_endpoint"
     raw_weight_scope: Literal["certified_cohort_all_tracks_per_hotkey"] = (
         "certified_cohort_all_tracks_per_hotkey"
@@ -129,6 +168,8 @@ class PublicModelScores(StrictProtocolModel):
             "score_correction_statement_sha256",
             "reward_adoption_sha256",
             "reward_parameters",
+            "cpu_efficiency_adoption_sha256",
+            "efficiency_weight_applied",
         ):
             if getattr(self, key) is None:
                 value.pop(key, None)
@@ -138,7 +179,20 @@ class PublicModelScores(StrictProtocolModel):
     def ranks(self):
         if self.reward_parameters is not None and self.reward_parameters.baseline_grace_bps is None:
             raise ValueError("explicit public reward parameters require a selected baseline grace")
-        adopted = self.schema_ == "umi-public-cohort-model-results/3"
+        timed = self.schema_ == "umi-public-cohort-model-results/4"
+        if timed != (self.cpu_efficiency_adoption_sha256 is not None) or timed != (
+            self.efficiency_weight_applied is not None
+        ):
+            raise ValueError("public CPU efficiency needs its explicit versioned contract")
+        applied = (
+            self.reward_parameters is not None
+            and self.reward_parameters.cpu_efficiency_rule is not None
+        )
+        if (applied and not timed) or (timed and self.efficiency_weight_applied != applied):
+            raise ValueError("public CPU reward adjustment differs from selected parameters")
+        adopted = self.schema_ == "umi-public-cohort-model-results/3" or (
+            timed and self.certification == "quorum_certified_reward_adoption"
+        )
         corrected = self.schema_ == "umi-public-cohort-model-results/2"
         if adopted:
             if (
@@ -175,6 +229,11 @@ class PublicModelScores(StrictProtocolModel):
             reverse=True,
         )
         for r in self.items:
+            measured = timed and r.status == "scored"
+            if measured != (r.efficiency_multiplier_ppm is not None) or measured != (
+                r.normalized_cpu_slowdown is not None
+            ):
+                raise ValueError("public CPU efficiency must cover exactly the scored models")
             if (r.status == "scored") != (
                 r.aggregate is not None and r.baseline_aggregate is not None
             ):
@@ -221,6 +280,23 @@ def _public_reward_parameters(award):
         and award.parameters.baseline_grace_bps is not None
         else None
     )
+
+
+def _public_cpu_efficiency(candidate):
+    summary = None if candidate is None else candidate.cpu_efficiency
+    if summary is None:
+        return {"efficiency_multiplier_ppm": None, "normalized_cpu_slowdown": None}
+    slowdown = sum((run.normalized_slowdown for run in summary.runs), Fraction()) / len(
+        summary.runs
+    )
+    return {
+        "efficiency_multiplier_ppm": summary.multiplier_ppm,
+        "normalized_cpu_slowdown": PublicCpuSlowdown.make(slowdown),
+    }
+
+
+def _projection_semantics(projection):
+    return CPU_EFFICIENCY_SEMANTICS if projection.cpu_efficiency_adoption_sha256 else SEMANTICS
 
 
 def project_corrected_model_scores(original, adoption, corrected):
@@ -336,7 +412,9 @@ def project_adopted_model_scores(original, adoption, effective):
     effective = CohortRewardAllocation.model_validate_json(canonical_json_bytes(effective))
     award = effective.model_award
     if (
-        original.schema_ != "umi-public-cohort-model-results/1"
+        original.schema_
+        not in {"umi-public-cohort-model-results/1", "umi-public-cohort-model-results/4"}
+        or original.certification != "quorum_certified_native_allocation"
         or original.cohort_sha256 != adoption.cohort_sha256
         or original.policy_sha256 != adoption.policy_sha256
         or original.allocation_sha256 != adoption.allocation_sha256
@@ -356,6 +434,7 @@ def project_adopted_model_scores(original, adoption, effective):
             else digest(adoption.score_correction_evidence)
         )
         or award.quality_manifest_sha256 != effective.quality_manifest_sha256
+        or award.cpu_efficiency_adoption_sha256 != original.cpu_efficiency_adoption_sha256
     ):
         raise ValueError("public reward adoption differs from its exact effective allocation")
     if adoption.signed_score_correction is not None:
@@ -387,6 +466,10 @@ def project_adopted_model_scores(original, adoption, effective):
                 or identity(candidate.recipient_hotkey) != identity(item.hotkey)
                 or ModelScore.make(candidate.aggregate) != item.aggregate
                 or ModelScore.make(candidate.baseline_aggregate) != item.baseline_aggregate
+                or any(
+                    getattr(item, field) != value
+                    for field, value in _public_cpu_efficiency(candidate).items()
+                )
             ):
                 raise ValueError("ordinary reward adoption cannot change certified model quality")
             measured = Fraction(
@@ -420,13 +503,20 @@ def project_adopted_model_scores(original, adoption, effective):
             update={
                 "items": tuple(rows),
                 "reward_parameters": parameters,
+                "efficiency_weight_applied": (
+                    parameters is not None and parameters.cpu_efficiency_rule is not None
+                )
+                if original.cpu_efficiency_adoption_sha256 is not None
+                else None,
             }
         )
     return PublicModelScores.model_validate_json(
         canonical_json_bytes(
             projected.model_copy(
                 update={
-                    "schema_": "umi-public-cohort-model-results/3",
+                    "schema_": "umi-public-cohort-model-results/4"
+                    if original.cpu_efficiency_adoption_sha256 is not None
+                    else "umi-public-cohort-model-results/3",
                     "certification": "quorum_certified_reward_adoption",
                     "allocation_sha256": digest(effective),
                     "original_allocation_sha256": original.allocation_sha256,
@@ -554,6 +644,12 @@ def project_model_scores(header, history_packet, policy, *, cohort):
         or (allocation.policy_sha256, award.roster_sha256, award.round_sha256)
         != (digest(policy), digest(roster), digest(roster.round))
         or roster.round.cohort_sha256 != cohort
+        or award.cpu_efficiency_adoption_sha256
+        != (
+            None
+            if roster.round.cpu_efficiency_adoption is None
+            else digest(roster.round.cpu_efficiency_adoption.adoption)
+        )
     ):
         raise ValueError("public score roster or policy differs from certified model award")
     candidates = {c.submission_sha256: c for c in award.candidates}
@@ -616,6 +712,7 @@ def project_model_scores(header, history_packet, policy, *, cohort):
                 if key in selected
                 else "not_selected_by_certified_rule",
                 certified_raw_weight_for_hotkey=weights.get(identity(submission.hotkey), 0),
+                **_public_cpu_efficiency(candidate),
             )
         )
     if candidates:
@@ -646,7 +743,9 @@ def project_model_scores(header, history_packet, policy, *, cohort):
         allocation=header["allocation"], roster=inputs["roster"], history=inputs["history"]
     )
     return PublicModelScores(
-        schema="umi-public-cohort-model-results/1",
+        schema="umi-public-cohort-model-results/4"
+        if award.cpu_efficiency_adoption_sha256 is not None
+        else "umi-public-cohort-model-results/1",
         cohort_sha256=cohort,
         round_sha256=award.round_sha256,
         policy_sha256=allocation.policy_sha256,
@@ -655,6 +754,12 @@ def project_model_scores(header, history_packet, policy, *, cohort):
         source_metadata_sha256=hashlib.sha256(canonical_json_bytes(metadata)).hexdigest(),
         certification="quorum_certified_native_allocation",
         reward_parameters=parameters,
+        cpu_efficiency_adoption_sha256=award.cpu_efficiency_adoption_sha256,
+        efficiency_weight_applied=(
+            parameters is not None and parameters.cpu_efficiency_rule is not None
+        )
+        if award.cpu_efficiency_adoption_sha256 is not None
+        else None,
         items=tuple(rows),
     )
 
@@ -834,7 +939,7 @@ class NativeModelScoresPublisher:
                         receipt = ScoreCompletion(
                             schema="umi-native-public-model-score-completion/1",
                             binding_sha256=self.binding,
-                            semantics_sha256=SEMANTICS,
+                            semantics_sha256=_projection_semantics(projected),
                             source_stamp=tuple(map(str, stamp)),
                             projection=projected,
                         ).sealed()
@@ -845,7 +950,7 @@ class NativeModelScoresPublisher:
                     stage = "retained_binding"
                     if (
                         receipt.binding_sha256 != self.binding
-                        or receipt.semantics_sha256 != SEMANTICS
+                        or receipt.semantics_sha256 != _projection_semantics(receipt.projection)
                         or receipt.projection.cohort_sha256 != cohort
                     ):
                         raise ValueError(
@@ -940,7 +1045,12 @@ class PublicModelScoreCache:
                         value.score_correction_statement_sha256 != expected_statement
                         and (
                             expected_statement is not None
-                            or value.schema_ != "umi-public-cohort-model-results/3"
+                            or value.schema_
+                            not in {
+                                "umi-public-cohort-model-results/3",
+                                "umi-public-cohort-model-results/4",
+                            }
+                            or value.certification != "quorum_certified_reward_adoption"
                         )
                     )
                     or tuple(_stamp(path)) != stamp
