@@ -35,7 +35,9 @@ class NativeMultipart:
     """Native multipart interface plus a streaming UploadPart HTTP transport.
 
     ``objects`` contains real completed bytes; ``uploads`` contains real parts
-    scoped by (key, upload ID). ``counts`` and ``operations`` expose all calls.
+    scoped by (key, upload ID). Completed multipart ETags retain the provider's
+    ordered-part identity, including after a lost completion reply.
+    ``counts`` and ``operations`` expose all calls.
     ``reader(role)`` supplies a separate read-only client for each reviewer.
     Closing a reader or provider records the close but keeps durable synthetic
     objects, so a new native owner can resume against the same provider state.
@@ -48,6 +50,7 @@ class NativeMultipart:
             credentials=R2Credentials("0123456789ABCDEF", "synthetic-fixture-secret-key"),
         )
         self.objects: dict[str, bytes] = {}
+        self.completed_etags: dict[str, str] = {}
         self.uploads: dict[tuple[str, str], dict[int, bytes]] = {}
         self._put_uploads: set[tuple[str, str]] = set()
         self._next_upload = 0
@@ -156,7 +159,11 @@ class NativeMultipart:
         self._key(key)
         self._record("head", key=key)
         data = self.objects.get(key)
-        return None if data is None else R2ObjectHead(size_bytes=len(data), etag=_etag(data))
+        if data is None:
+            return None
+        etag = self.completed_etags.get(key)
+        # Legacy fixture objects may be seeded directly without multipart upload.
+        return R2ObjectHead(size_bytes=len(data), etag=_etag(data) if etag is None else etag)
 
     async def complete(
         self,
@@ -191,16 +198,19 @@ class NativeMultipart:
                     "synthetic completion nonfinal part is too small",
                 )
         data = b"".join(stored[number] for number in numbers)
+        part_digests = b"".join(bytes.fromhex(part.etag) for part in parts)
+        etag = _etag(part_digests) + "-" + str(len(parts))
         self.objects[key] = data
+        self.completed_etags[key] = etag
         del self.uploads[key, upload_id]
         staging = (key, upload_id) in self._put_uploads
         self._put_uploads.discard((key, upload_id))
-        self._record("object_persisted", key=key, bytes=len(data), etag=_etag(data))
+        self._record("object_persisted", key=key, bytes=len(data), etag=etag)
         if staging and self.lose_first_complete_reply and not self.lost_complete_replies:
             self.lost_complete_replies += 1
             self._record("lost_complete_reply", key=key, upload_id=upload_id)
             raise OSError("synthetic response lost after successful staging completion")
-        return _etag(data)
+        return etag
 
     async def copy_part(
         self,
@@ -268,6 +278,7 @@ class NativeMultipart:
         self._key(key)
         self.delete_calls.append((key, at))
         self.objects.pop(key, None)
+        self.completed_etags.pop(key, None)
         self._record("delete_object", key=key)
 
     async def delete(self, key: str, *, at: datetime | None = None) -> None:
