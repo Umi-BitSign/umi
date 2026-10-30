@@ -25,6 +25,11 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 from zipfile import ZipFile
 
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10 uses the locked compatibility reader.
@@ -231,7 +236,9 @@ def source_sha256(root: Path) -> str:
     return value.hexdigest()
 
 
-def compatible_project_scripts(previous: bytes, candidate: bytes) -> list[str]:
+def compatible_project_scripts(
+    previous: bytes, candidate: bytes, *, promoted_requirements: tuple[str, ...] = ()
+) -> list[str]:
     """Permit added CLI declarations without changing cloned dependencies.
 
     This artifact installs only HOST_ENTRYPOINTS. Added miner/operator commands
@@ -244,6 +251,10 @@ def compatible_project_scripts(previous: bytes, candidate: bytes) -> list[str]:
         old, new = (tomllib.loads(raw.decode("utf-8")) for raw in (previous, candidate))
         old_scripts = old["project"].pop("scripts")
         new_scripts = new["project"].pop("scripts")
+        if promoted_requirements:
+            new["project"]["dependencies"] = [
+                item for item in new["project"]["dependencies"] if item not in promoted_requirements
+            ]
     except (ValueError, KeyError, TypeError) as error:
         raise ValueError("candidate project metadata needs a supported migration") from error
     if (
@@ -267,6 +278,225 @@ def compatible_project_scripts(previous: bytes, candidate: bytes) -> list[str]:
     ):
         raise ValueError("candidate added command declaration is unsupported")
     return added
+
+
+def _signed_metadata(previous, relative, signed_files, maximum=1024**2):
+    path = previous / relative
+    item = signed_files.get(relative)
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise ValueError("selected signed project/dependency metadata is unavailable") from error
+    if (
+        item is None
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_size != item.size_bytes
+        or info.st_size > maximum
+        or stat.S_IMODE(info.st_mode) != item.mode
+    ):
+        raise ValueError("selected signed project/dependency metadata differs")
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != item.sha256:
+        raise ValueError("selected signed project/dependency metadata differs")
+    return raw
+
+
+def _promoted_requirements(previous, candidate):
+    old, new = (tomllib.loads(raw.decode())["project"] for raw in (previous, candidate))
+    old_dependencies, new_dependencies = (item.get("dependencies", []) for item in (old, new))
+    if old_dependencies == new_dependencies:
+        return old, ()
+    if not all(
+        isinstance(values, list) and all(isinstance(item, str) for item in values)
+        for values in (old_dependencies, new_dependencies)
+    ):
+        raise ValueError("candidate project metadata has unsupported requirements")
+    added = tuple(item for item in new_dependencies if item not in old_dependencies)
+    if not added or [item for item in new_dependencies if item not in added] != old_dependencies:
+        raise ValueError("candidate project metadata changes existing requirements")
+    try:
+        parsed = [Requirement(item) for item in new_dependencies]
+    except InvalidRequirement as error:
+        raise ValueError("candidate project metadata has invalid requirements") from error
+    names = [canonicalize_name(item.name) for item in parsed]
+    if len(names) != len(set(names)):
+        raise ValueError("candidate project metadata has ambiguous requirements")
+    for raw in added:
+        item = Requirement(raw)
+        if item.marker is not None or item.extras or item.url is not None:
+            raise ValueError("promoted requirements cannot introduce markers, extras or URLs")
+    return old, added
+
+
+def _promotion_packages(old_raw, new_raw, project, requirements):
+    old, new = (tomllib.loads(raw.decode()) for raw in (old_raw, new_raw))
+    old_rows, new_rows = (value.pop("package") for value in (old, new))
+    packages = [
+        {canonicalize_name(row["name"]): row for row in rows} for rows in (old_rows, new_rows)
+    ]
+    before, after = packages
+    if (
+        old != new
+        or len(before) != len(old_rows)
+        or len(after) != len(new_rows)
+        or before.keys() != after.keys()
+    ):
+        raise ValueError("dependency promotion changes lock resolution or package membership")
+    name = canonicalize_name(project["name"])
+    if name not in before:
+        raise ValueError("dependency promotion lacks the exact locked project")
+    root, replacement = before[name], after[name]
+    if (
+        root.get("source") != {"editable": "."}
+        or root.get("version") != project.get("version")
+        or any(before[key] != after[key] for key in before if key != name)
+    ):
+        raise ValueError("dependency promotion changes a resolved package or project identity")
+    added = {canonicalize_name(Requirement(raw).name): Requirement(raw) for raw in requirements}
+    original_edges = root.get("dependencies", [])
+    if any(canonicalize_name(row["name"]) in added for row in original_edges):
+        raise ValueError("promoted dependency was already a direct locked dependency")
+    # Only unconditional original paths establish transitive reachability here.
+    # Existing conditional paths remain unchanged but do not grant a promotion.
+    reachable, pending = set(), [name]
+    while pending:
+        current = pending.pop()
+        if current in reachable:
+            continue
+        reachable.add(current)
+        pending.extend(
+            canonicalize_name(row["name"])
+            for row in before.get(current, {}).get("dependencies", [])
+            if set(row) == {"name"}
+        )
+    for promoted, requirement in added.items():
+        package = before.get(promoted)
+        if (
+            package is None
+            or promoted not in reachable
+            or set(package.get("source", {})) != {"registry"}
+            or not requirement.specifier.contains(Version(package["version"]), prereleases=True)
+        ):
+            raise ValueError(
+                "promoted requirement is not satisfied by an existing transitive package"
+            )
+    # Remove precisely the newly declared unconditional root edges/requirements;
+    # every other field, including optional requirements and markers, stays exact.
+    for field, rows in (
+        ("edges", replacement.get("dependencies", [])),
+        ("requirements", replacement.get("metadata", {}).get("requires-dist", [])),
+    ):
+        promoted_rows = [row for row in rows if canonicalize_name(row["name"]) in added]
+        if len(promoted_rows) != len(added) or {
+            canonicalize_name(row["name"]) for row in promoted_rows
+        } != set(added):
+            raise ValueError("dependency promotion has missing or duplicate root declarations")
+        for row in promoted_rows:
+            requirement = added[canonicalize_name(row["name"])]
+            if field == "edges":
+                valid = set(row) == {"name"}
+            else:
+                valid = (
+                    set(row) <= {"name", "specifier"}
+                    and SpecifierSet(row.get("specifier", "")) == requirement.specifier
+                )
+            if not valid:
+                raise ValueError("dependency promotion has unsupported root declaration semantics")
+        retained = [row for row in rows if row not in promoted_rows]
+        if field == "edges":
+            replacement["dependencies"] = retained
+        else:
+            replacement["metadata"]["requires-dist"] = retained
+    if replacement != root:
+        raise ValueError("dependency promotion changes other project lock semantics")
+    return {key: before[key] for key in added}
+
+
+def project_metadata_migration(previous, metadata_bytes, signed_files):
+    """Admit only direct declarations of already installed transitive packages.
+
+    No package resolution or payload reads occur here. The native signed clone
+    verifies unchanged payload bytes later in its ordinary first copy pass.
+    """
+    old_project = _signed_metadata(previous, "pyproject.toml", signed_files)
+    try:
+        project, requirements = _promoted_requirements(
+            old_project, metadata_bytes["pyproject.toml"]
+        )
+        scripts = compatible_project_scripts(
+            old_project, metadata_bytes["pyproject.toml"], promoted_requirements=requirements
+        )
+        if not requirements:
+            return scripts, []
+        packages = _promotion_packages(
+            _signed_metadata(previous, "uv.lock", signed_files),
+            metadata_bytes["uv.lock"],
+            project,
+            requirements,
+        )
+    except (
+        KeyError,
+        TypeError,
+        tomllib.TOMLDecodeError,
+        InvalidSpecifier,
+        InvalidVersion,
+    ) as error:
+        raise ValueError("candidate dependency promotion metadata is unsupported") from error
+    sites = list(previous.glob(".venv/lib/python*/site-packages"))
+    if len(sites) != 1:
+        raise ValueError("dependency promotion needs one installed site-packages directory")
+    site = sites[0]
+    # Supported signed hosts expose UMI through umi.pth and do not install their
+    # own distribution metadata. Never leave a present Requires-Dist stale.
+    project_name = canonicalize_name(project["name"])
+    installed_entries = {}
+    for entry in site.iterdir():
+        if entry.name.endswith((".dist-info", ".egg-info")):
+            base = entry.name.rsplit(".", 1)[0]
+            distribution = canonicalize_name(base.rsplit("-", 1)[0])
+            installed_entries.setdefault(distribution, []).append(entry)
+            if any(
+                canonicalize_name(value) == project_name for value in (base, base.rsplit("-", 1)[0])
+            ):
+                raise ValueError(
+                    "installed project distribution metadata needs a supported migration"
+                )
+    if _signed_metadata(
+        previous, (site / "umi.pth").relative_to(previous).as_posix(), signed_files
+    ).decode().strip() != str(previous / "src"):
+        raise ValueError("dependency promotion needs the supported source-only project layout")
+    reports = []
+    for requirement in requirements:
+        parsed = Requirement(requirement)
+        name = canonicalize_name(parsed.name)
+        version = packages[name]["version"]
+        distribution = site / f"{name.replace('-', '_')}-{version}.dist-info"
+        if installed_entries.get(name) != [distribution]:
+            raise ValueError("promoted dependency installation is missing or ambiguous")
+        relative = (distribution / "METADATA").relative_to(previous).as_posix()
+        raw = _signed_metadata(previous, relative, signed_files)
+        installed = email.parser.BytesParser().parsebytes(raw)
+        if (
+            len(installed.get_all("Name", [])) != 1
+            or len(installed.get_all("Version", [])) != 1
+            or canonicalize_name(installed["Name"]) != name
+            or installed["Version"] != version
+            or not parsed.specifier.contains(Version(installed["Version"]), prereleases=True)
+        ):
+            raise ValueError("installed dependency metadata does not satisfy promoted requirement")
+        reports.append(
+            {
+                "requirement": requirement,
+                "name": name,
+                "version": version,
+                "installed_metadata_path": relative,
+                "installed_metadata_sha256": signed_files[relative].sha256,
+                "project_metadata_layout": "source_only_umi_pth",
+                "dependency_payloads_changed": False,
+            }
+        )
+    return scripts, reports
 
 
 def _emit(event: dict) -> None:
@@ -488,15 +718,14 @@ def _build(
         name: (source / name).read_bytes()
         for name in ("pyproject.toml", "uv.lock", "README.md", "LICENSE")
     }
-    migration = locked_wheel_migration(
-        previous,
-        source,
-        tuple(dependency_wheels),
-        {item.path: item for item in signed.manifest.files},
-    )
-    added_scripts = compatible_project_scripts(
-        (previous / "pyproject.toml").read_bytes(), (source / "pyproject.toml").read_bytes()
-    )
+    signed_files = {item.path: item for item in signed.manifest.files}
+    added_scripts, promotions = project_metadata_migration(previous, metadata_bytes, signed_files)
+    if promotions:
+        if dependency_wheels:
+            raise ValueError("dependency promotion cannot be combined with wheel changes")
+        migration = []
+    else:
+        migration = locked_wheel_migration(previous, source, tuple(dependency_wheels), signed_files)
     signed_paths = {item.path for item in signed.manifest.files}
     actual_paths = {p.relative_to(previous).as_posix() for p in previous.rglob("*") if p.is_file()}
     extras = actual_paths - signed_paths
@@ -679,6 +908,7 @@ def _build(
         "guarded_entrypoints": sorted(HOST_ENTRYPOINTS),
         "uninstalled_added_project_scripts": added_scripts,
         "locked_dependency_migrations": [plan["report"] for plan in migration],
+        "direct_dependency_promotions": promotions,
         "wallet_accessed": False,
         "signed": False,
         "staged": False,

@@ -2633,8 +2633,28 @@ the new manifest. Added `project.scripts` declarations are supported when all
 existing commands and every other parsed project field remain unchanged. They
 are recorded as `uninstalled_added_project_scripts`: the supervisor host installs
 only its two lifecycle launchers; new miner/operator commands use the ordinary
-package installation. Changes to existing commands or other project metadata
-require a separate migration and refuse before creating a build tree.
+package installation. The direct-dependency promotion below is the other
+supported project metadata change. Other changes require a separate migration
+and refuse before creating a build tree.
+
+A new unconditional direct requirement can name an already installed transitive
+dependency without reinstalling it. The builder authenticates the previous
+`pyproject.toml`, lock and installed distribution `METADATA` against the signed
+host. The locked and installed versions must satisfy the new requirement, and
+the dependency must be reachable through unconditional original lock edges.
+Only the corresponding project-root dependency and `requires-dist` declarations
+may change: package membership, versions, source/artifact identities, dependency
+edges, optional requirements, existing markers and other lock semantics remain
+exact. New extras, markers, direct URLs, ambiguous versions and simultaneous
+wheel changes refuse. This can accompany an otherwise supported added command.
+
+The supported host imports project source through its signed `umi.pth` and has
+no project distribution metadata of its own. A present project `.dist-info` or
+`.egg-info` requires a separate metadata migration; the builder will not leave
+its `Requires-Dist` inconsistent with the new project. The build receipt lists
+`direct_dependency_promotions` and their authenticated installed metadata. The
+ordinary signed clone verifies dependency payloads once; promotion planning
+reads only bounded metadata and performs no package resolution or installation.
 
 For a locked pure-Python dependency version update, supply one explicit
 `--dependency-wheel /ABSOLUTE/package-version-py3-none-any.whl` per changed
