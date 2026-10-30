@@ -1,0 +1,84 @@
+name: Scoped historical direct reward adoption qualification
+
+on:
+  push:
+    branches: [qualification/c8-direct-adoption-20261030-v1]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bounded-selected-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        include:
+          - batch: direct_mixed
+            python: "3.12.15"
+            job_minutes: 25
+          - batch: direct_adopted
+            python: "3.12.15"
+            job_minutes: 25
+          - batch: direct_original
+            python: "3.12.15"
+            job_minutes: 25
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.job_minutes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install original policy tool dependencies
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg rclone
+          ffmpeg -version
+          ffprobe -version
+      - name: Install locked dependencies
+        run: |
+          python -m pip install --no-cache-dir uv==0.12.9
+          uv sync --locked --extra dev --no-cache --python "$(command -v python)"
+      - name: Bind request before starting the service
+        run: |
+          .venv/bin/python -I -B -u tools/control_selected_ci.py prepare \
+            --request tools/selected_requests/${{ matrix.batch }}.json --output results
+      - name: Retain startup receipt before service execution
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: selected-startup-${{ matrix.batch }}-${{ github.sha }}
+          path: |
+            results/startup-receipt.json
+            results/control-events.jsonl
+          if-no-files-found: error
+          retention-days: 14
+      - name: Execute selected cases in one invocation under detached bounded service
+        run: |
+          .venv/bin/python -I -B -u tools/control_selected_ci.py execute \
+            --request tools/selected_requests/${{ matrix.batch }}.json --output results
+      - name: Ensure service cleanup after interruption
+        if: always()
+        run: |
+          mkdir -p results
+          timeout 30s sudo -n systemctl stop umi-selected-ci-v1.service || true
+          timeout 10s sudo -n systemctl show umi-selected-ci-v1.service \
+            -p ActiveState -p SubState -p Result -p ExecMainStatus \
+            -p MemoryPeak -p MemorySwapPeak > results/final-unit-state.txt || true
+          test ! -e /run/umi-selected-ci-v1
+          printf '%s\n' 'service-owned scratch absent' > results/cleanup-confirmed.txt
+      - name: Retain phase results and controller diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: selected-result-${{ matrix.batch }}-${{ github.sha }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 14
