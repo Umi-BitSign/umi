@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from functools import partial
 
 from .competition_cohort_reward_package import CohortRewardPackage
+from .competition_progress import _failure_details
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_decisions import (
     DecisionSource,
@@ -440,14 +441,26 @@ class StandingRewardExecutor:
                 except Exception as error:
                     weight_wait = None
                     # Error text can contain RPC credentials or response data.
+                    # Reuse only bounded native locations from the shared
+                    # formatter. Diagnostics cannot interrupt ordinary retries.
+                    source_frames = "[]"
+                    with suppress(Exception):
+                        source_frames = canonical_json_bytes(
+                            [cause["source_frames"] for cause in _failure_details(error)]
+                        ).decode()
                     if isinstance(error, R2EvidenceHTTPError):
                         logger.warning(
-                            "standing_retry reason=%s r2_http_status=%d",
+                            "standing_retry reason=%s r2_http_status=%d source_frames=%s",
                             type(error).__name__,
                             error.status_code,
+                            source_frames,
                         )
                     else:
-                        logger.warning("standing_retry reason=%s", type(error).__name__)
+                        logger.warning(
+                            "standing_retry reason=%s source_frames=%s",
+                            type(error).__name__,
+                            source_frames,
+                        )
                 with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=delay)
 

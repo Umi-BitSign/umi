@@ -411,6 +411,81 @@ async def test_loop_retries_without_leaking_exception_details(executing, caplog,
     assert expected in caplog.text
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_retry_locates_native_failure_without_retaining_inputs(
+    executing, caplog, wrapped, http_log_redaction
+):
+    t, e = executing, executing.executor
+    stop, attempts = asyncio.Event(), []
+    original = e.step
+    e.period = 256  # The native reservation limit is 128; fail before reserving.
+    secret = "https://private.example/capability/secret?key=private-input"
+
+    async def step():
+        attempts.append(1)
+        try:
+            await original()
+        except ValueError as cause:
+            if wrapped:
+                raise RuntimeError(secret) from cause
+            raise
+        finally:
+            if len(attempts) == 3:
+                stop.set()
+
+    e.step = step
+    await e.run(stop, poll_seconds=0.001)
+    retries = [
+        record.message
+        for record in caplog.records
+        if record.name == execution.__name__ and record.message.startswith("standing_retry ")
+    ]
+    assert len(retries) == len(attempts) == 3
+    for message in retries:
+        causes = json.loads(message.split(" source_frames=", 1)[1])
+        assert len(causes) == (2 if wrapped else 1)
+        assert all(len(frames) <= 8 for frames in causes)
+        frames = [frame for cause in causes for frame in cause]
+        assert any(
+            frame["module"] == "umi.competition_reward_preparation"
+            and frame["function"] == "_transaction_intent"
+            for frame in frames
+        )
+        assert all(
+            set(frame) == {"module", "function", "line"}
+            and frame["module"].startswith("umi.")
+            and type(frame["line"]) is int
+            and frame["line"] > 0
+            for frame in frames
+        )
+    assert secret not in caplog.text and "private-input" not in caplog.text
+    assert "transaction mortality exceeds" not in caplog.text
+    assert __file__ not in caplog.text and execution.__file__ not in caplog.text
+    assert t.journal.pending() is None and not t.signed and not t.sent
+    assert e._descriptor is e._series_descriptor is None
+
+
+async def test_retry_survives_source_frame_formatter_failure(executing, monkeypatch, caplog):
+    e = executing.executor
+    stop, attempts = asyncio.Event(), []
+
+    def unavailable(_):
+        raise ValueError("private formatter details")
+
+    async def step():
+        attempts.append(1)
+        if len(attempts) == 3:
+            stop.set()
+        raise ConnectionError("private provider URL")
+
+    monkeypatch.setattr(execution, "_failure_details", unavailable)
+    e.step = step
+    await e.run(stop, poll_seconds=0.001)
+    assert len(attempts) == 3 and e._descriptor is e._series_descriptor is None
+    assert "standing_retry reason=ConnectionError source_frames=[]" in caplog.text
+    assert "private" not in caplog.text
+
+
 async def test_rate_wait_never_reserves_or_signs_and_retry_collects_new_state(executing):
     t, e = executing, executing.executor
     original = t.chain.weights_rate_limit
