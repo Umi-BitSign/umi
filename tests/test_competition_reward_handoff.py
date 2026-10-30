@@ -142,6 +142,7 @@ async def migration(series_case, adapter_case, monkeypatch, request):
     c.prepared = SimpleNamespace(activation=activation, reviewed_at_block=180)
     c.preparation = object.__new__(StandingRewardPreparation)
     c.preparation.reader = SimpleNamespace(series=c.series, reward_adoptions=None)
+    c.preparation.reader.refresh_reward_adoptions = lambda: None
     c.preparation.series_sha256 = digest(c.series)
 
     def check_prepared(value):
