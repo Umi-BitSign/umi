@@ -1414,7 +1414,9 @@ class RoundJournal:
                     # unchanged. Logging failure cannot alter the native refusal.
                     if capacity_diagnostic is not None:
                         with suppress(Exception):
-                            logger.warning("round_journal_capacity_exhausted %s", capacity_diagnostic)
+                            logger.warning(
+                                "round_journal_capacity_exhausted %s", capacity_diagnostic
+                            )
                     raise ValueError(capacity_error)
                 for kind, key, raw in pending:
                     db.execute("INSERT INTO records VALUES (?,?,?)", (kind, key, raw))

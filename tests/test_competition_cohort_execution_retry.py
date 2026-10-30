@@ -24,8 +24,12 @@ from .test_competition_cohort_executor import relay as relay
 from .test_competition_cohort_executor import runtime as runtime
 from .test_competition_cohort_executor import scenario as scenario
 
+BUSY = getattr(sqlite3, "SQLITE_BUSY", 5)
+FULL = getattr(sqlite3, "SQLITE_FULL", 13)
+IOERR = getattr(sqlite3, "SQLITE_IOERR", 10)
 
-def busy(code=sqlite3.SQLITE_BUSY):
+
+def busy(code=BUSY):
     error = sqlite3.OperationalError("synthetic SQLite failure")
     error.sqlite_errorcode = code
     return error
@@ -106,8 +110,8 @@ async def test_healthy_inference_does_not_consume_later_recovery_allowance(clock
         (True, ValueError("owner signature invalid")),
         (True, busy()),
         (False, unavailable()),
-        (False, busy(sqlite3.SQLITE_FULL)),
-        (False, busy(sqlite3.SQLITE_IOERR)),
+        (False, busy(FULL)),
+        (False, busy(IOERR)),
         (False, RuntimeError("immutable binding changed")),
     ],
 )
