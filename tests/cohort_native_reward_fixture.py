@@ -13,6 +13,11 @@ import pytest
 
 from umi.competition_chain import FinalizedRegistrationProvider
 from umi.competition_cohort_direct_model_review import DirectModelSettlementVerifier
+from umi.competition_reward_adoption import (
+    SignedRewardModelAdoption,
+    prepare_initial_reward_adoption,
+    select_signed_initial_reward_adoption,
+)
 from umi.competition_reward_control_journal import RewardControlTransactionJournal
 from umi.competition_reward_control_publisher import StandingControlPublisher
 from umi.competition_reward_coordinator import (
@@ -27,13 +32,13 @@ from umi.competition_reward_decisions import (
 )
 from umi.competition_reward_files import StandingRewardFiles
 from umi.competition_reward_handoff_models import LegacyRewardHandoffPlan
-from umi.competition_reward_offers import StandingRewardOffers
+from umi.competition_reward_offers import StandingRewardOffers, successor_reward_rule_ready
 from umi.competition_reward_opportunity import opportunity_rule
 from umi.competition_reward_preparation import StandingRewardPreparation
 from umi.competition_reward_service import _prepare_first
 from umi.competition_reward_signing import RewardDecisionJournal, RewardDecisionSigner
 from umi.historical_header_recovery import HistoricalHeaderRecoveryPending
-from umi.open_competition import digest, sign_object
+from umi.open_competition import digest, identity, sign_object
 from umi.private_files import ensure_private_directory, publish_private_model
 from umi.protocol import canonical_json_bytes
 from umi.validator_chain import FinalizedProofCollector
@@ -90,6 +95,46 @@ async def run_activation(
         config, policy, finality=finality, proofs=proofs, now_ms=lambda: item.clock.now
     )
     rpc.values[("System", "Account", (series.control_hotkey,))] = {"nonce": 7}
+    files, readback = (
+        StandingRewardFiles(
+            root / name,
+            maximum_package_bytes=owner.config.admission_owner.request_evidence_bytes,
+            maximum_witness_bytes=64 * 1024**2,
+        )
+        for name in ("delivery", "readback")
+    )
+    # Historical direct-delivery fixtures retain their original signed reward
+    # rules. Current activation requires an explicit signed adoption; never
+    # rewrite the settled package or bypass the announced-economics guard.
+    original_package = canonical_json_bytes(package)
+    reward_adoptions = None
+    reward_adoption = None
+    expected_allocation_sha256 = digest(package.allocation)
+    if direct is not None and not successor_reward_rule_ready(
+        package.inputs.history.plan, series.recovery.authority, None
+    ):
+        files.retain_package(package)
+        reward_adoption = prepare_initial_reward_adoption(
+            files.verified_package(digest(package)),
+            series=series,
+            policy=policy,
+            issued_at_block=activation_block,
+            previous=None,
+        )
+        attestations = []
+        for name in ("Charlie", "Dave"):
+            signatures[(name, digest(reward_adoption))] += 1
+            attestations.append(sign_object(reward_adoption, wallet(name)))
+        reward_adoptions = select_signed_initial_reward_adoption(
+            None,
+            SignedRewardModelAdoption(
+                adoption=reward_adoption,
+                signatures=tuple(sorted(attestations, key=lambda value: identity(value.hotkey))),
+            ),
+            series=series,
+            policy=policy,
+        )
+        expected_allocation_sha256 = reward_adoption.effective_allocation_sha256
     handoff = LegacyRewardHandoffPlan(
         schema="umi-legacy-reward-handoff-plan/1",
         series_sha256=digest(series),
@@ -113,9 +158,15 @@ async def run_activation(
         package_sha256=digest(package),
         recovery_tip_sha256=digest(package.inputs.history.transitions[-1].transition),
         prior_opportunity_sha256=digest(handoff),
+        reward_adoption_sha256=None if reward_adoption is None else digest(reward_adoption),
+        effective_allocation_sha256=None
+        if reward_adoption is None
+        else reward_adoption.effective_allocation_sha256,
     )
     activation_body = RewardControlDecision(
-        schema="umi-reward-control-decision/1",
+        schema="umi-reward-control-decision/1"
+        if reward_adoption is None
+        else "umi-reward-control-decision/3",
         series_sha256=digest(series),
         sequence=1,
         predecessor_sha256=digest(genesis_body),
@@ -132,6 +183,7 @@ async def run_activation(
             expected_series_sha256=digest(series),
             expected_chain_config_sha256=digest(config),
             maximum_bytes=32 * 1024**2,
+            reward_adoptions=reward_adoptions,
         )
 
     # Only the RPC simulator uses these expected control digests. The actual
@@ -151,14 +203,6 @@ async def run_activation(
     history = await make_historical(case, "exact_runtime", monkeypatch, root)
     history = await make_history_case(history, monkeypatch, root, distance=end - first + 1)
     history.reader = history.new_reader(maximum_bytes=128 * 1024**2)
-    files, readback = (
-        StandingRewardFiles(
-            root / name,
-            maximum_package_bytes=owner.config.admission_owner.request_evidence_bytes,
-            maximum_witness_bytes=64 * 1024**2,
-        )
-        for name in ("delivery", "readback")
-    )
     rule = opportunity_rule(manifest, series, policy)
     coverage = RewardCoverageJournal(root / "coverage", rule, expected_rule_sha256=digest(rule))
     offers = StandingRewardOffers(
@@ -169,6 +213,7 @@ async def run_activation(
         settlements=settled.output.parent,
         files=files,
         coverage=coverage,
+        reward_adoptions=reward_adoptions,
     )
     unavailable = True
 
@@ -205,6 +250,7 @@ async def run_activation(
                     wallet(name).hotkey.ss58_address,
                     expected_chain_config_sha256=digest(config),
                     maximum_bytes=32 * 1024**2,
+                    reward_adoptions=reward_adoptions,
                 ),
                 sign,
             )
@@ -267,6 +313,10 @@ async def run_activation(
                 except HistoricalHeaderRecoveryPending:
                     continue
                 if result.status not in {"history_pending", "review_pending"}:
+                    print(
+                        {"native_reward_status": result.status, "sequence": result.sequence},
+                        flush=True,
+                    )
                     return result
         pytest.fail("native reward control did not converge")
 
@@ -341,7 +391,9 @@ async def run_activation(
                 end,
                 4096,
             )
-        assert result.activation == activation and result.allocation == package.allocation
+        assert result.activation == activation
+        assert digest(result.allocation) == expected_allocation_sha256
+        assert canonical_json_bytes(package) == original_package
         assert not result.chain_submission_authorized
         assert max(signatures.values()) == 1
         assert not any(method.startswith("author_") for method in history.rpc_calls)
