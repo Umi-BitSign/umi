@@ -689,19 +689,21 @@ async def test_first_qualification_keeps_owner_locks_free_and_rechecks_only_boun
             raise TimeoutError("test failed to release qualified candidate")
         return result
 
+    async def check_owner_locks():
+        async with h.node.serial, h.node.controller.serial, h.node.controller.sampling_lock:
+            assert h.intake.pending_policy_adoption(h.cohort) is None
+            if changed == "tip":
+                other = prepare_request_tail_adoption_at_block(c.history, h.policy, 220)
+                h.store.commit(signed_transition(other))
+            elif changed == "input":
+                path = c.root / "videos" / (c.suite.cases[0].video_sha256 + ".mp4")
+                path.write_bytes(b"changed after exact independent qualification")
+
     monkeypatch.setattr(c.value, method, paused)
     task = asyncio.create_task(EvaluationSuiteAdoptionOwner(h.host, kind).respond(request))
     try:
         assert await asyncio.to_thread(entered.wait, 3)
-        async with asyncio.timeout(1):
-            async with h.node.serial, h.node.controller.serial, h.node.controller.sampling_lock:
-                assert h.intake.pending_policy_adoption(h.cohort) is None
-                if changed == "tip":
-                    other = prepare_request_tail_adoption_at_block(c.history, h.policy, 220)
-                    h.store.commit(signed_transition(other))
-                elif changed == "input":
-                    path = c.root / "videos" / (c.suite.cases[0].video_sha256 + ".mp4")
-                    path.write_bytes(b"changed after exact independent qualification")
+        await asyncio.wait_for(check_owner_locks(), timeout=1)
     finally:
         release.set()
     if changed == "none":

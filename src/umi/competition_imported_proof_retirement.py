@@ -288,11 +288,14 @@ class ImportedProofRetirement:
                 raise HistoryCheckpointRepairRequired("imported retirement cursor damaged")
         return row[0], value
 
-    def _check_selected(self):
+    def _check_archive_root(self):
         private_path(str(self.archive.root))
         root = self.archive.root.lstat()
         if [root.st_dev, root.st_ino, root.st_uid] != self.context["identity"]:
             raise HistoryCheckpointRepairRequired("imported retirement archive root changed")
+
+    def _check_selected(self):
+        self._check_archive_root()
         if self.enrollment is not None:
             if self._retained_enrollment() != self.enrollment:
                 raise HistoryCheckpointRepairRequired("imported retirement enrollment changed")
@@ -610,6 +613,9 @@ class ImportedProofRetirement:
     def run(self, maximum):
         if type(maximum) is not int or not 1 <= maximum <= 256:
             raise ValueError("imported retirement batch must be between 1 and 256")
+        # The mutex is inside the archive. Refuse a replaced root before opening
+        # its lock path; _state() retains the owner check after serialization.
+        self._check_archive_root()
         with self.journal.locked():
             # A retry drains its admitted generation before even reading the next
             # producer page. Do not let new claims consume finish headroom.

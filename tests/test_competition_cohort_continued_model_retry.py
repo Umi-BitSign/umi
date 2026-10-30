@@ -25,6 +25,7 @@ from umi.open_competition import sign_object
 from umi.private_files import ensure_private_directory, read_private_model
 from umi.protocol import canonical_json_bytes
 
+from .logging_helpers import json_progress_payloads
 from .test_competition_cohort_intake import capture_at
 from .test_competition_cohort_model_acceptance import certify
 from .test_competition_cohort_model_upload import signed_chunk
@@ -321,7 +322,9 @@ async def test_continued_retry_refuses_missing_or_changed_owned_facts_without_pa
     assert not f.multipart.reads
     assert_unchanged(f)
     if "byte_" in fault:
-        events = [json.loads(row.message) for row in caplog.records if row.message.startswith("{")]
+        events = json_progress_payloads(
+            caplog.records, logger="umi.competition.progress", schema="umi-transport-work-progress/1"
+        )
         assert any(row["status"] == "repair_required" for row in events)
         assert all("eta_basis" in row and "elapsed_seconds" in row for row in events)
 

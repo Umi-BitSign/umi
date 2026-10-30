@@ -25,11 +25,21 @@ jobs:
         with:
           python-version: '3.12.14'
 
+      - name: Install policy tool dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg rclone
+          ffmpeg -version
+          ffprobe -version
+
       - name: Install locked dependencies
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin 899c7c4520981a5996fab82d74bc7db6ee45eb57 c6701a197968b7fc604c66e9b020e73ec134fa02
+          git fetch --no-tags --depth=1 origin 899c7c4520981a5996fab82d74bc7db6ee45eb57 3f7847d34f9848edf4437bfd6849b17ab2914dd1
           python -m pip install --no-cache-dir uv==0.12.9
           uv sync --locked --extra dev --no-cache --python "$(command -v python)"
 

@@ -241,6 +241,11 @@ def test_imported_root_replacement_holds_before_opening_replacement_journal(tmp_
     owner = ImportedProofRetirement(reader)
     reader.archive.root.rename(tmp_path / "original-imports")
     reader.archive.root.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        owner.journal,
+        "locked",
+        lambda: pytest.fail("replaced archive must be refused before opening its journal lock"),
+    )
     with pytest.raises(HistoryCheckpointRepairRequired, match="archive root changed"):
         owner.run(16)
     assert list(reader.archive.root.iterdir()) == []
