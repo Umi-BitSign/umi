@@ -1,0 +1,31 @@
+{
+  "schema": "umi-targeted-lifetime-continuation/1",
+  "target_revision": "b9ee32bed36e1f62debc04315129cced9127f742",
+  "qualified_runtime_revision": "da3a8578c8edc66ad5220b7deae04c187c2926b1",
+  "src_tree": "afbf6b056016387d844e8b6d9e00513c062983f1",
+  "tests_tree": "0a28dc74d183cb63f1ab4855ba1ac639aaef8b97",
+  "module": "tests/test_competition_reward_delivery_lifetime.py",
+  "module_sha256": "ea90f773a3762736a33ad797ddfe257cc779efbe3268ac48d809447ff67b1e73",
+  "selector": "tests/test_competition_reward_delivery_lifetime.py::test_prefix_drops_old_graph_before_loading_next",
+  "expected_nodes": [
+    "tests/test_competition_reward_delivery_lifetime.py::test_prefix_drops_old_graph_before_loading_next[False-readback]",
+    "tests/test_competition_reward_delivery_lifetime.py::test_prefix_drops_old_graph_before_loading_next[False-delivered]",
+    "tests/test_competition_reward_delivery_lifetime.py::test_prefix_drops_old_graph_before_loading_next[True-readback]",
+    "tests/test_competition_reward_delivery_lifetime.py::test_prefix_drops_old_graph_before_loading_next[True-delivered]"
+  ],
+  "original_target_collection_metadata_identical": true,
+  "original_complete_marker_sequence": "FFFF",
+  "python": "3.12.15",
+  "uv_lock_sha256": "c261a7fee410be2fad32d1ab7c1071148a790f2a4afa305b4a17b79029f6a451",
+  "manifest_sha256": "892b9f4c28c4bb4c0e29101a580ed4474c709370ad75afa00b45261b6c1f0885",
+  "unchanged_reused_passes": 281,
+  "resources": {
+    "memory_max_bytes": 1610612736,
+    "swap_max_bytes": 0,
+    "cpu_quota_percent": 200,
+    "tasks_max": 96,
+    "service_runtime_seconds": 300,
+    "observation_seconds": 360
+  },
+  "case_selection_note": "Only four originally failed lifetime cases with corrected toy fixture contract. Collect exact identities once, persist them, then execute same invocation with phase receipts. No other test module is selected."
+}
