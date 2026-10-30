@@ -19,6 +19,7 @@ def json_progress_payloads(records, *, logger, schema):
     A malformed JSON-framed event still fails the test; unrelated text events
     are valid peers on the shared progress logger. Parse each selected line once.
     """
+    schemas = (schema,) if isinstance(schema, str) else tuple(schema)
     result = []
     for record in records:
         if record.name != logger:
@@ -27,6 +28,6 @@ def json_progress_payloads(records, *, logger, schema):
         if not message.lstrip().startswith("{"):
             continue
         event = json.loads(message)
-        if event.get("schema") == schema:
+        if event.get("schema") in schemas:
             result.append(event)
     return result

@@ -315,7 +315,7 @@ async def test_retry_wrappers_preserve_boundary_and_original_cause(
 ):
     case = delivery_case
     cause = sqlite3.OperationalError("private provider URL and local path")
-    cause.sqlite_errorcode, cause.sqlite_errorname = sqlite3.SQLITE_BUSY, "SQLITE_BUSY"
+    cause.sqlite_errorcode, cause.sqlite_errorname = getattr(sqlite3, "SQLITE_BUSY", 5), "SQLITE_BUSY"
     if stage == "receipt_lookup":
         monkeypatch.setattr(case.intake, "receipt", Mock(side_effect=cause))
     elif stage == "payload_prerequisite":
@@ -333,7 +333,7 @@ async def test_retry_wrappers_preserve_boundary_and_original_cause(
     assert details["error_stage"] == stage
     assert details["error_type"] == "ParticipationUnavailable"
     assert details["cause_type"] == "OperationalError"
-    assert details["sqlite_errorcode"] == sqlite3.SQLITE_BUSY
+    assert details["sqlite_errorcode"] == getattr(sqlite3, "SQLITE_BUSY", 5)
     assert details["sqlite_errorname"] == "SQLITE_BUSY"
     assert "private provider" not in str(details)
 

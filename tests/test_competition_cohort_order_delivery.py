@@ -5,7 +5,6 @@ claims to authorize live inference or prove an installed production service.
 """
 
 import asyncio
-import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from threading import Event
@@ -25,6 +24,7 @@ from umi.open_competition import digest, identity, sign_object
 from umi.private_files import PrivateStateBusyError
 from umi.protocol import canonical_json_bytes
 
+from .logging_helpers import json_progress_payloads
 from .test_competition_cohort_disposition import order as signed_order
 from .test_competition_cohort_order_signer import base_policy as base_policy
 from .test_competition_cohort_order_signer import harness as harness
@@ -143,12 +143,11 @@ async def test_native_queue_to_each_native_inbox_and_quiet_restart(relay, caplog
     r.h.fail_collect = True
     assert (await r.worker().poll_once())["retry_count"] == 0
     assert len(r.h.calls) == 2 and len(r.receipt_calls) == 2 and len(r.delivery_calls) == 2
-    events = [
-        json.loads(record.message)
-        for record in caplog.records
-        if record.name == "umi.competition.progress"
-        and json.loads(record.message).get("schema") == "umi-competition-work-progress/1"
-    ]
+    events = json_progress_payloads(
+        caplog.records,
+        logger="umi.competition.progress",
+        schema="umi-competition-work-progress/1",
+    )
     for stage in (
         "order_owner_history",
         "order_registration_capture",
