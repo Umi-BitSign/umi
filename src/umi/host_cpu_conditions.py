@@ -39,7 +39,112 @@ def _text(path, maximum=4096):
     return value.decode("ascii", errors="strict").strip()
 
 
-def slot_topology(cpu_root, cpu_ids, expected_numa):
+def _optional_core_property(path, *, maximum, allow_zero=False):
+    try:
+        value = _text(path)
+    except FileNotFoundError:
+        return None
+    if not value.isdecimal() or not (0 if allow_zero else 1) <= int(value) <= maximum:
+        _fail("cpu_condition_invalid_core_class_metadata")
+    return int(value)
+
+
+def slot_core_class(cpu_root, cpu_ids, *, cpuinfo=None):
+    """Bind visible core type/capacity without claiming physical VM placement.
+
+    Intel's model name/family can be identical on performance and efficiency
+    cores. It therefore requires an exposed, nonzero kernel core type. Uniform
+    AMD identities and ARM implementer/part identities remain usable as visible
+    classes when a kernel or hypervisor does not expose capacity. Their absence
+    is retained explicitly; it is never evidence of physical isolation.
+    """
+    if cpuinfo is None:
+        cpuinfo = _text(Path("/proc/cpuinfo"), 2 * 1024**2)
+    if not isinstance(cpuinfo, str) or len(cpuinfo.encode()) > 2 * 1024**2:
+        _fail("cpu_condition_invalid_core_class_metadata")
+    selected = set(cpu_ids)
+    identities = {}
+    for block in cpuinfo.strip().split("\n\n"):
+        fields = dict(
+            (key.strip(), value.strip())
+            for line in block.splitlines()
+            if ":" in line
+            for key, value in (line.split(":", 1),)
+        )
+        identifier = fields.get("processor", "")
+        if not identifier.isdecimal() or int(identifier) not in selected:
+            continue
+        cpu = int(identifier)
+        if cpu in identities:
+            _fail("cpu_condition_ambiguous_core_identity")
+        flags = set(fields.get("flags", "").split()) | set(fields.get("Features", "").split())
+        identity = {
+            key: fields[key]
+            for key in (
+                "vendor_id",
+                "cpu family",
+                "model",
+                "model name",
+                "stepping",
+                "CPU implementer",
+                "CPU architecture",
+                "CPU variant",
+                "CPU part",
+                "CPU revision",
+            )
+            if key in fields
+        }
+        if not identity:
+            _fail("cpu_condition_missing_core_identity")
+        identities[cpu] = dict(
+            identity=identity,
+            hybrid_reported=bool(flags & {"hybrid", "hybrid_cpu"}),
+            virtualization="visible_hypervisor" if "hypervisor" in flags else "not_reported",
+        )
+    if not selected or set(identities) != selected:
+        _fail("cpu_condition_missing_core_identity")
+    visible = identities[cpu_ids[0]]
+    if any(value != visible for value in identities.values()):
+        _fail("cpu_condition_heterogeneous_core_identity")
+    exposed = []
+    for cpu in cpu_ids:
+        path = Path(cpu_root) / f"cpu{cpu}"
+        exposed.append(
+            (
+                _optional_core_property(path / "topology/core_type", maximum=255, allow_zero=True),
+                _optional_core_property(path / "cpu_capacity", maximum=2**31 - 1),
+            )
+        )
+    if any(value != exposed[0] for value in exposed):
+        _fail("cpu_condition_heterogeneous_core_class")
+    core_type, capacity = exposed[0]
+    identity = visible["identity"]
+    requires_type = identity.get("vendor_id") == "GenuineIntel" or visible["hybrid_reported"]
+    if requires_type and not core_type:
+        _fail("cpu_condition_hybrid_core_class_unqualified")
+    if core_type:
+        basis = "exposed_kernel_core_type"
+    elif capacity is not None:
+        basis = "exposed_kernel_cpu_capacity"
+    elif identity.get("vendor_id") == "AuthenticAMD" and all(
+        identity.get(key) for key in ("cpu family", "model", "model name")
+    ):
+        basis = "uniform_visible_amd_identity"
+    elif all(identity.get(key) for key in ("CPU implementer", "CPU architecture", "CPU part")):
+        basis = "uniform_visible_arm_identity"
+    else:
+        _fail("cpu_condition_core_class_unqualified")
+    return dict(
+        schema="umi-visible-core-class/1",
+        basis=basis,
+        core_type=core_type,
+        cpu_capacity=capacity,
+        physical_placement="not_established",
+        **visible,
+    )
+
+
+def slot_topology(cpu_root, cpu_ids, expected_numa, *, cpuinfo=None):
     """Visible topology only; a VM can hide its underlying physical placement."""
     cores, packages, nodes, caches = [], [], [], []
     for cpu in cpu_ids:
@@ -87,7 +192,11 @@ def slot_topology(cpu_root, cpu_ids, expected_numa):
     if len(set(cores)) != len(cores) or len(set(packages)) != 1:
         _fail("cpu_condition_unequal_package_topology")
     body = dict(
-        schema="umi-visible-slot-topology/1",
+        # This is a prospective host-profile identity. Retained timing evidence
+        # still replays its original digest; old profiles cannot silently select
+        # the stronger rule without a newly qualified topology digest.
+        schema="umi-visible-slot-topology/2",
+        core_class=slot_core_class(cpu_root, cpu_ids, cpuinfo=cpuinfo),
         numa=nodes,
         single_package=True,
         unique_physical_cores=len(cores),

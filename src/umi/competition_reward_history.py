@@ -39,6 +39,7 @@ from .competition_history_source_externalization import (
     JournalSourceExternalizer,
     source_journal_version,
 )
+from .competition_imported_proof_retirement import ImportedProofRetirement
 from .competition_journal_physical_budget import JournalPhysicalBudget
 from .competition_reward_admission_checkpoint import CompletedAdmissionCheckpoint
 from .competition_reward_checkpoint_tip import OwnedCheckpointTip
@@ -319,6 +320,7 @@ class RewardControlHistoryReader:
         self._folded_export_identity = None
         self._folded_export_ranges = {}
         self._archive_backfill = None
+        self._imported_retirement = None
         self._local_archive_delivery = None
         self._archive_export_progress_next = first_block
 
@@ -1298,6 +1300,52 @@ class RewardControlHistoryReader:
     def _shutdown_requested(self):
         return self.shutdown_event is not None and self.shutdown_event.is_set()
 
+    async def _maintain_imported_retirement(self):
+        started = time.monotonic()
+        started_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        archive = self.export_archive
+        remote = None if archive is None else archive.remote
+        maximum = 0 if remote is None else remote.config.imported_object_release_batch_files
+        if not maximum or self.journal.read_only or self._shutdown_requested():
+            return
+        try:
+            async with self._lock:
+                if self._imported_retirement is None:
+                    self._imported_retirement = await run_owned_thread(
+                        ImportedProofRetirement, self
+                    )
+                self.progress.imported_object_retirement = await run_owned_thread(
+                    self._imported_retirement.run, maximum
+                )
+        except Exception as error:
+            if self._imported_retirement is not None:
+                with suppress(Exception):
+                    self.progress.imported_object_retirement = await run_owned_thread(
+                        self._imported_retirement._report, "retrying"
+                    )
+            self.progress.imported_object_retirement = dict(
+                self.progress.imported_object_retirement
+                or dict(
+                    completed=0,
+                    total=None,
+                    percent=None,
+                    elapsed_seconds=time.monotonic() - started,
+                    started_utc=started_utc,
+                    attempt_started_utc=started_utc,
+                ),
+                stage="imported_object_retirement",
+                state="repair_required"
+                if isinstance(error, (HistoryCheckpointRepairRequired, ValueError))
+                else "retrying",
+                error_type=type(error).__name__,
+                error_message=str(error),
+                eta_seconds=None,
+                planning_eta_seconds=None,
+                eta_basis="withdrawn_imported_retirement_retry_or_repair",
+                stalled_or_retrying=True,
+            )
+        self.progress.report(self, "running", force=True)
+
     async def _maintain_archive_backfill(self):
         archive = self.export_archive
         remote = None if archive is None else archive.remote
@@ -1409,6 +1457,10 @@ class RewardControlHistoryReader:
             and not (self.export_archive is not None and self.export_archive.legacy_read_through)
         )
         try:
+            # Release already completed transport independently of chain/RPC
+            # advancement. A retained retry or blocked history stage must not
+            # prevent the sole service owner from draining its admitted intents.
+            await self._maintain_imported_retirement()
             if replicate_sources and not self._shutdown_requested():
                 self.progress.stage = "history_source_replication"
                 self.progress.report(self, "running", force=True)

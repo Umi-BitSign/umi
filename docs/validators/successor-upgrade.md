@@ -160,6 +160,13 @@ Qualify actual rootless migration, bounded probe cancellation, cache ownership,
 restart cleanup and the intended concurrent lane/load profile before selection.
 Restoration completion alone records neither qualification nor contract selection.
 
+The corrected timing host additionally qualifies explicit core-class equivalence
+and shared-ancestor CPU budgets. Select the matching restorer and evaluator
+together, then qualify the new topology and measurement-profile identities.
+Do not reuse an older host qualification to approve these new enforcement rules.
+Existing signed timing evidence still decodes and replays unchanged; these are
+prospective execution checks. Upload-only clients need no protocol change.
+
 The common supervisor channel does not replace installed Python hosts. Use each
 host's supported signed maintenance/source selection and any explicit overlay
 authority. That same selected-config update must carry the private
@@ -2656,6 +2663,33 @@ only its two lifecycle launchers; new miner/operator commands use the ordinary
 package installation. The direct-dependency promotion below is the other
 supported project metadata change. Other changes require a separate migration
 and refuse before creating a build tree.
+
+A Python-only archive maintenance change can use this dependency clone while
+retaining the configured finality, substrate-proof and runtime-metadata binaries
+unchanged. The builder does not invoke Cargo or a native compiler. It still
+creates a new immutable source revision and unsigned host manifest; existing
+signed host bytes must never be patched in place. Preserve the actual artifact
+paths and digests, qualify the changed reader/configuration boundary, and use
+the normal signed maintenance selection. Recompilation is needed only when the
+native dependencies or their supported interface actually change.
+
+Imported proof-object retirement requires the selected directory's actual
+readers to adopt both the original-receipt R2 fallback and shared release lease
+before the owner unlinks anything. Inventory configuration and source bindings,
+including spawned workers and recovery commands; a matching directory name or
+new checkout is not adoption. The standing writer, coordinator and independent
+reviewer may use distinct import roots, so upgrade each affected root's readers
+without changing unrelated selections. Reference/publication and delivery
+services that only parse a coordinator config for compact outputs need a new
+parser if that particular config gains fields, even when they never read proof
+objects. Keep their existing compatible config when no change is needed.
+Ordinary model upload/inference clients have no wire change; a miner or validator
+performing full offline replay must use the compatible archive reader. Carry
+the selected source through its supported maintenance/release pointer for future
+cohorts, and verify installed behavior before enabling release. See
+[R2 proof archives](../operators/settlement.md#optional-r2-proof-archives) for
+retirement, recovery and frozen-copier requirements. This storage transition has
+no cohort-closure prerequisite.
 
 A new unconditional direct requirement can name an already installed transitive
 dependency without reinstalling it. The builder authenticates the previous

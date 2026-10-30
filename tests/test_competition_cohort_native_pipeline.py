@@ -453,7 +453,7 @@ def configure_model_reviews(o, root, client, signatures):
 
 
 async def certify_requests(
-    o, app, root, monkeypatch, signatures, admission_probe=None, *, model_only=False
+    o, app, root, monkeypatch, signatures, admission_probe=None, *, no_endpoint_participant=False
 ):
     """Use native request observation, review and handoff with synthetic readiness.
 
@@ -463,12 +463,15 @@ async def certify_requests(
     h = o.h
     cohort_index = tuple(digest(p) for p in o.config.series.cohorts).index(h.cohort)
     assert (await o.service.poll_once())["catalogs_installed"] == cohort_index + 1
-    if model_only:
+    if no_endpoint_participant:
+        # An empty endpoint roster does not disable a track in the signed round.
+        model_only = "endpoint" not in o.config.lifecycle.sources.eligible_tracks
         for catalog in h.catalogs:
             if catalog.catalog.cohort_sha256 == h.cohort:
                 readiness = await o.service.api.readiness(digest(catalog.catalog), "ab" * 16)
-                assert readiness["reason_code"] == "model_only"
-                assert readiness["new_claims_closed"] and not readiness["ready"]
+                assert readiness["reason_code"] == ("model_only" if model_only else "accepting")
+                assert readiness["ready"] is not model_only
+                assert readiness.get("new_claims_closed", False) is model_only
     node = await app.state.lifecycle.node(h.cohort)
     await node._driver("requests")
     source = app.state.lifecycle.requests[h.cohort]
@@ -726,14 +729,15 @@ async def run_pipeline(
         else:
             direct.configure_model_reviews(o, client, signatures)
 
-        # Independent artifact acceptance is required even for a baseline copy.
+        # The priority owner attempts the latest submission before its two
+        # superseded generations. Independent acceptance is still required.
         o.outages.add("dave.example")
-        assert (await o.service.models.poll_once())["entries_pending"] == 3
+        assert (await o.service.models.poll_once())["entries_pending"] == 1
         with pytest.raises(PendingModelArtifacts):
             o.service.models.owner.retained(
                 h.cohort, digest(submitted.signed_submission.submission)
             )
-        assert len(signatures) == 3
+        assert len(signatures) == 1 and set(signatures.values()) == {1}
         o.outages.clear()
         async with o.open() as app:
             assert app.state.lifecycle.provider is o.service.finality
@@ -749,13 +753,19 @@ async def run_pipeline(
         original_votes = dict(signatures)
         o.outages.clear()
         o.outages.add("charlie.example")
-        assert (await o.service.models.poll_once())["entries_exported"] == 3 * (cohort_index + 1)
+        assert (await o.service.models.poll_once())["entries_exported"] == 1
         assert all(signatures[k] == count for k, count in original_votes.items())
         accepted_artifact = o.service.models.owner.retained(
             h.cohort, digest(submitted.signed_submission.submission)
         )
         assert len(accepted_artifact.certificate.signatures) == 2
         o.outages.clear()
+        # Once latest acceptance is complete, the ordinary bounded pass also
+        # certifies/exports the original generations. Keep the full historical
+        # coverage and exact export count without changing priority scheduling.
+        assert (await o.service.models.poll_once())["entries_exported"] == 3 * (cohort_index + 1)
+        assert all(signatures[k] == count for k, count in original_votes.items())
+        assert set(signatures.values()) == {1}
 
         def evaluator(name):
             async def sign(body):
@@ -997,7 +1007,7 @@ async def run_pipeline(
                 monkeypatch,
                 signatures,
                 admission_probe,
-                model_only=not mixed,
+                no_endpoint_participant=not mixed,
             )
             assert max(signatures.values()) == 1
             settled = await run_settlement(

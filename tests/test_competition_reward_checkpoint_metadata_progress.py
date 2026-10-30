@@ -12,13 +12,13 @@ from umi import competition_reward_cutover_cli as cutover_cli
 from umi import competition_supervisor_cli as supervisor_cli
 from umi.competition_reward_checkpoint_progress import CheckpointMetadataProgress
 
+from .logging_helpers import progress_payloads
+
 
 def observations(caplog):
-    return [
-        row.args
-        for row in caplog.records
-        if row.msg == "reward_history_checkpoint_metadata_progress %s"
-    ]
+    return progress_payloads(
+        caplog.records, logger=module.__name__, event="reward_history_checkpoint_metadata_progress"
+    )
 
 
 @pytest.mark.parametrize(
@@ -43,7 +43,9 @@ def test_owner_entrypoints_emit_metadata_progress(log_context, capsys):
     assert "'native_verification_or_application_credit': False" in output
 
 
-def test_counted_metadata_eta_has_explicit_batch_scope_and_no_native_credit(caplog, monkeypatch):
+def test_counted_metadata_eta_has_explicit_batch_scope_and_no_native_credit(
+    caplog, monkeypatch, http_log_redaction
+):
     clock = [100.0]
     monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     caplog.set_level(logging.INFO, logger=module.__name__)
@@ -65,7 +67,9 @@ def test_counted_metadata_eta_has_explicit_batch_scope_and_no_native_credit(capl
     assert observations(caplog)[-1]["completed_block_checks"] == 100
 
 
-def test_missing_new_checkpoint_finishes_lookup_without_claiming_the_requested_range(caplog):
+def test_missing_new_checkpoint_finishes_lookup_without_claiming_the_requested_range(
+    caplog, http_log_redaction
+):
     caplog.set_level(logging.INFO, logger=module.__name__)
     with CheckpointMetadataProgress("checkpoint_metadata_loading", 1000, 1099) as progress:
         progress.checked()
@@ -77,7 +81,7 @@ def test_missing_new_checkpoint_finishes_lookup_without_claiming_the_requested_r
     assert last["native_verification_or_application_credit"] is False
 
 
-def test_failed_check_withdraws_eta_and_preserves_its_unfinished_work(caplog):
+def test_failed_check_withdraws_eta_and_preserves_its_unfinished_work(caplog, http_log_redaction):
     caplog.set_level(logging.INFO, logger=module.__name__)
     with (
         pytest.raises(ValueError, match="repair required"),

@@ -518,6 +518,8 @@ class CpuTimingSampler:
 
     The caller must retain the existing slot lease until after final sampling.
     Cgroup existence and matching limits do not prove that exclusive ownership.
+    Shared ancestors must have no CPU quota. Their cumulative throttle counters
+    also detect temporary quota restrictions restored between readbacks.
     """
 
     def __init__(
@@ -529,26 +531,38 @@ class CpuTimingSampler:
         proc_stat_path=Path("/proc/stat"),
         cpuinfo_path=Path("/proc/cpuinfo"),
         clock=None,
+        owned_parent=None,
     ):
         self.context, self.path = context, Path(cgroup_path)
         self.proc_stat_path = Path(proc_stat_path)
         self.cpuinfo_path = Path(cpuinfo_path)
         self.clock = clock or (lambda: time.monotonic_ns() // 1000)
-        root = Path(cgroup_root)
+        self.root = root = Path(cgroup_root)
+        self.owned_parent = Path(owned_parent) if owned_parent is not None else self.path
+        self._ancestors = []
+        self._ancestor_counters = {}
         if not root.is_absolute() or not self.path.is_absolute() or ".." in self.path.parts:
             _fail("cpu_timing_invalid_cgroup_path")
         try:
             relative = self.path.relative_to(root)
         except ValueError as error:
             raise CpuTimingInfrastructureError("cpu_timing_invalid_cgroup_path") from error
+        if not relative.parts or len(relative.parts) > 64:
+            _fail("cpu_timing_invalid_cgroup_depth")
+        if self.owned_parent not in {self.path, self.path.parent} or self.owned_parent == root:
+            _fail("cpu_timing_invalid_owned_parent")
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         descriptor = None
         try:
             descriptor = os.open(root, flags)
+            path = root
             for part in relative.parts:
-                child = os.open(part, flags, dir_fd=descriptor)
-                os.close(descriptor)
-                descriptor = child
+                observed = os.fstat(descriptor)
+                self._ancestors.append((path, descriptor, (observed.st_dev, observed.st_ino)))
+                descriptor = None
+                parent_descriptor = self._ancestors[-1][1]
+                descriptor = os.open(part, flags, dir_fd=parent_descriptor)
+                path = path / part
             self.descriptor = descriptor
             descriptor = None
             observed = os.fstat(self.descriptor)
@@ -569,6 +583,9 @@ class CpuTimingSampler:
         if descriptor is not None:
             os.close(descriptor)
             self.descriptor = None
+        for _, descriptor, _ in self._ancestors:
+            os.close(descriptor)
+        self._ancestors.clear()
 
     def __enter__(self):
         return self
@@ -576,9 +593,10 @@ class CpuTimingSampler:
     def __exit__(self, *args):
         self.close()
 
-    def _read(self, name):
+    @staticmethod
+    def _read_at(parent_descriptor, name):
         descriptor = os.open(
-            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.descriptor
+            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_descriptor
         )
         with os.fdopen(descriptor, "rb") as stream:
             raw = stream.read(4097)
@@ -586,7 +604,52 @@ class CpuTimingSampler:
             _fail("cpu_timing_kernel_metadata_too_large")
         return raw.decode("ascii", errors="strict").strip()
 
+    def _read(self, name):
+        return self._read_at(self.descriptor, name)
+
+    def _check_ancestors(self):
+        for path, descriptor, identity in self._ancestors:
+            current = path.stat(follow_symlinks=False)
+            observed = os.fstat(descriptor)
+            if (current.st_dev, current.st_ino) != identity or (
+                observed.st_dev,
+                observed.st_ino,
+            ) != identity:
+                _fail("cpu_timing_ancestor_identity_changed")
+            try:
+                quota = self._read_at(descriptor, "cpu.max").split()
+            except FileNotFoundError:
+                # The actual cgroupfs root cannot have a local bandwidth cap.
+                # Missing controls anywhere below that trusted root fail closed.
+                if path == self.root:
+                    continue
+                raise
+            if path == self.owned_parent:
+                if quota != [
+                    str(self.context.cpu_quota_usec),
+                    str(self.context.cpu_period_usec),
+                ]:
+                    _fail("cpu_timing_cpu_quota_changed")
+                continue
+            if (
+                len(quota) != 2
+                or quota[0] != "max"
+                or not quota[1].isdecimal()
+                or not 1_000 <= int(quota[1]) <= 1_000_000
+            ):
+                _fail("cpu_timing_ancestor_cpu_quota_limited")
+            counters = _key_values(self._read_at(descriptor, "cpu.stat"))
+            current_counters = counters["nr_throttled"], counters["throttled_usec"]
+            previous = self._ancestor_counters.setdefault(path, current_counters)
+            if any(
+                after < before for before, after in zip(previous, current_counters, strict=True)
+            ):
+                _fail("cpu_timing_ancestor_counter_reset")
+            if current_counters != previous:
+                _fail("cpu_timing_ancestor_cpu_throttled")
+
     def _check_context(self):
+        self._check_ancestors()
         observed = os.fstat(self.descriptor)
         context = self.context
         if (observed.st_dev, observed.st_ino) != (context.cgroup_device, context.cgroup_inode):
@@ -647,5 +710,5 @@ class CpuTimingSampler:
             self._check_context()
         except CpuTimingInfrastructureError:
             raise
-        except (OSError, ValueError, TypeError) as error:
+        except (OSError, ValueError, KeyError, TypeError) as error:
             raise CpuTimingInfrastructureError("cpu_timing_kernel_context_unavailable") from error

@@ -25,6 +25,11 @@
   failed, empty or timed-out case cannot create a speed bonus; speed cannot make
   a below-quality-gate model eligible. Normalize matched cases against the
   baseline on each evaluator using signed task weights and equivalent resources.
+  Pin execution to exclusive slots with equivalent core classes, NUMA placement,
+  SMT conditions and CPU/memory limits. Performance and efficiency cores must
+  not confer a placement advantage; matching model names alone is insufficient.
+  Check shared ancestor budgets and contention as well as container limits.
+  Visible virtual CPU topology is not proof of physical host exclusivity.
   Qualify actual CPU allocation, cache conditions and host contention before
   prospective activation; a fresh process does not establish equal OS cache
   warmth. Retain trusted timing in the existing execution/certification pass,

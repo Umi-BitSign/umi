@@ -23,6 +23,8 @@ from umi.competition_reward_executor import StandingRewardExecutor
 from umi.competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
 from umi.open_competition import digest
 
+from .logging_helpers import progress_payloads
+
 
 @pytest.fixture
 def isolated_runner(tmp_path, monkeypatch):
@@ -187,7 +189,9 @@ async def test_wrong_original_uid_refuses_before_config_provider_or_migration(
     assert not h.providers and not h.locked
 
 
-async def test_selected_config_limits_and_provider_lifetime_remain_owned(isolated_runner, caplog):
+async def test_selected_config_limits_and_provider_lifetime_remain_owned(
+    isolated_runner, caplog, http_log_redaction
+):
     h = isolated_runner
     caplog.set_level(logging.INFO, logger=runner.__name__)
     result = await runner.run_original_admission_migration(h.selection_path)
@@ -240,7 +244,9 @@ async def test_selected_config_limits_and_provider_lifetime_remain_owned(isolate
         "original_locks_exit",
     ]
     assert h.providers[0].closed and not h.locked and not h.memory_active
-    progress = [r.args for r in caplog.records if r.msg == "reward_admission_runner_progress %s"]
+    progress = progress_payloads(
+        caplog.records, logger=runner.__name__, event="reward_admission_runner_progress"
+    )
     assert [p["completed_items"] for p in progress] == [0, 1, 2, 3]
     assert progress[-1]["eta_seconds"] == 0
     assert all(
