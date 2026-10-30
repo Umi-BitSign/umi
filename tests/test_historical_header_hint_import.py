@@ -5,8 +5,10 @@ import hashlib
 import json
 import multiprocessing
 import os
+import signal
 import sqlite3
 from contextlib import closing
+from types import SimpleNamespace
 
 import pytest
 
@@ -156,7 +158,7 @@ def _native_writer_process(path, row, channel):
             try:
                 native._save(*row)
             except sqlite3.OperationalError as error:
-                channel.send(("sqlite_error", getattr(error, "sqlite_errorcode", None)))
+                channel.send(("sqlite_error", getattr(error, "sqlite_errorcode", None), str(error)))
             else:
                 channel.send(("written", None))
     finally:
@@ -195,7 +197,11 @@ def test_live_native_writer_cannot_enter_importer_transaction_after_identity_rec
                 parent.send("write")
                 assert parent.poll(10)
                 observed.append(parent.recv())
-                assert observed[-1] == ("sqlite_error", sqlite3.SQLITE_BUSY)
+                assert observed[-1] == (
+                    "sqlite_error",
+                    getattr(sqlite3, "SQLITE_BUSY", None),
+                    "database is locked",
+                )
 
         monkeypatch.setattr(service, "_recheck", synchronized_recheck)
         assert service.step()["processed_headers"] == 3
@@ -270,6 +276,91 @@ def test_cli_capacity_reports_unknown_scope_without_false_completion(tmp_path, c
     assert result["percent"] is None
     assert result["eta_seconds"] is None
     assert result["finality_authority"] is False
+    assert all_rows(target) == []
+
+
+def test_cli_native_writer_contention_retries_and_restores_signals(tmp_path, capsys, monkeypatch):
+    source, target, rows = case(tmp_path)
+    signals = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
+    waits = []
+    with closing(sqlite3.connect(target, isolation_level=None)) as holder:
+        holder.execute("BEGIN IMMEDIATE")
+        holder.execute("INSERT INTO historical_header_hints VALUES (?,?)", rows[0])
+
+        def wait(seconds):
+            waits.append(seconds)
+            assert len(waits) == 1 and seconds == 1.0
+            holder.commit()
+            return False
+
+        event = SimpleNamespace(is_set=lambda: False, set=lambda: None, wait=wait)
+        monkeypatch.setattr(cli, "threading", SimpleNamespace(Event=lambda: event))
+        cli.main(
+            [
+                "--source",
+                str(source),
+                "--target-directory",
+                str(target.parent),
+                "--operation",
+                "native-busy",
+                "--maximum-bytes",
+                str(1024**2),
+                "--maximum-database-bytes",
+                str(1024**2),
+            ]
+        )
+    output = capsys.readouterr().out
+    results = [json.loads(line) for line in output.splitlines()]
+    assert [value["state"] for value in results] == ["retrying", "completed"]
+    assert results[0]["reason"] == "sqlite_writer_busy"
+    assert results[-1]["reused_headers"] == 1
+    assert all_rows(target) == sorted(rows)
+    assert str(tmp_path) not in output
+    assert {number: signal.getsignal(number) for number in signals} == signals
+
+
+@pytest.mark.parametrize("fault", ["full", "schema"])
+def test_cli_native_storage_errors_report_capacity_or_redacted_failure(
+    tmp_path, capsys, monkeypatch, fault
+):
+    source, target, _ = case(tmp_path)
+    service = importer(source, target)
+
+    def fail():
+        with closing(sqlite3.connect(":memory:")) as db:
+            if fault == "full":
+                db.execute("PRAGMA page_size=512")
+                db.execute("PRAGMA max_page_count=2")
+                db.execute("CREATE TABLE payload (body BLOB)")
+                db.execute("INSERT INTO payload VALUES (zeroblob(8192))")
+            else:
+                db.execute("SELECT * FROM missing_private_table")
+        pytest.fail("native SQLite failure was not exercised")
+
+    monkeypatch.setattr(service, "step", fail)
+    monkeypatch.setattr(cli, "HeaderHintImport", lambda *args, **kwargs: service)
+    with pytest.raises(SystemExit) as ended:
+        cli.main(
+            [
+                "--source",
+                str(source),
+                "--target-directory",
+                str(target.parent),
+                "--operation",
+                "native-failure",
+                "--maximum-bytes",
+                str(1024**2),
+                "--maximum-database-bytes",
+                str(1024**2),
+            ]
+        )
+    assert ended.value.code == (2 if fault == "full" else 1)
+    output = capsys.readouterr().out
+    result = json.loads(output)
+    assert result["state"] == ("capacity_required" if fault == "full" else "repair_required")
+    assert "missing_private_table" not in output and str(tmp_path) not in output
+    if fault == "schema":
+        assert result["error_type"] == "OperationalError"
     assert all_rows(target) == []
 
 

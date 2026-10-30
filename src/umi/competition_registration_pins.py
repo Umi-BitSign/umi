@@ -16,6 +16,7 @@ from .competition_verification_rules import runtime_identity
 from .open_competition import digest
 from .private_files import PrivateStateBusyError
 from .protocol import canonical_json_bytes
+from .sqlite_contention import is_sqlite_contention
 
 ABI = "umi-service-registration-pin-projection/1"
 KINDS = ("service_catalog", "service_catalog_round", "service_round", "service_admission")
@@ -151,14 +152,11 @@ class RegistrationPins:
             with self.journal.read_transaction(wait=False) as db:
                 yield db
         except sqlite3.OperationalError as error:
-            if getattr(error, "sqlite_errorcode", None) in (
-                sqlite3.SQLITE_BUSY,
-                sqlite3.SQLITE_LOCKED,
-            ):
+            if is_sqlite_contention(error):
                 raise PrivateStateBusyError(
                     "registration_pin_snapshot",
                     digest(str(self.journal.path)),
-                    error.sqlite_errorcode,
+                    getattr(error, "sqlite_errorcode", None),
                 ) from error
             raise
 
@@ -642,14 +640,11 @@ class RegistrationPins:
                 index=publish,
             )
         except sqlite3.OperationalError as error:
-            if getattr(error, "sqlite_errorcode", None) in (
-                sqlite3.SQLITE_BUSY,
-                sqlite3.SQLITE_LOCKED,
-            ):
+            if is_sqlite_contention(error):
                 raise PrivateStateBusyError(
                     "registration_pin_writer",
                     digest(str(self.journal.path)),
-                    error.sqlite_errorcode,
+                    getattr(error, "sqlite_errorcode", None),
                 ) from error
             raise RegistrationPinRepairRequired(
                 "registration pin checkpoint storage unavailable"

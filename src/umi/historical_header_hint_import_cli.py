@@ -10,6 +10,7 @@ import threading
 from pathlib import Path
 
 from .historical_header_hint_import import HeaderHintImport
+from .sqlite_contention import is_sqlite_contention, is_sqlite_full
 
 
 def main(argv=None):
@@ -45,12 +46,10 @@ def main(argv=None):
             try:
                 latest = importer.step()
             except sqlite3.OperationalError as error:
-                code = getattr(error, "sqlite_errorcode", 0) & 0xFF
                 capacity = (
-                    code == sqlite3.SQLITE_FULL
-                    or str(error) == "header hint payload capacity required"
+                    is_sqlite_full(error) or str(error) == "header hint payload capacity required"
                 )
-                if code not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} and not capacity:
+                if not capacity and not is_sqlite_contention(error):
                     raise
                 state = "capacity_required" if capacity else "retrying"
                 value = importer._progress(

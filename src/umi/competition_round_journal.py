@@ -57,6 +57,7 @@ from .private_files import MAX_CONFIGURED_PRIVATE_BYTES, acquire_private_mutex
 from .private_files import MAX_PRIVATE_BYTES as MAX_BYTES
 from .private_files import ensure_private_directory as _private
 from .protocol import canonical_json_bytes, is_canonical_json, sha256_hex
+from .sqlite_contention import is_sqlite_contention
 
 # Bound reservation bodies and allowances before transferring them to Python.
 # Accounting validates key types and byte lengths separately. A rejected body
@@ -419,10 +420,7 @@ class RoundJournal:
                     _advance_reservation_validation(self, db, _OBLIGATION_COLUMNS)
                     self._check_capacity_totals(db)
             except sqlite3.OperationalError as error:
-                if getattr(error, "sqlite_errorcode", None) not in (
-                    sqlite3.SQLITE_BUSY,
-                    sqlite3.SQLITE_LOCKED,
-                ):
+                if not is_sqlite_contention(error):
                     raise
         finally:
             self._transaction_lock.release()

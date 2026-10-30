@@ -67,6 +67,7 @@ from .host_memory_request_bounds import check_stage_json, stage_count
 from .open_competition import CompetitionPolicy, digest, identity
 from .private_files import PrivateStateBusyError
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+from .sqlite_contention import is_sqlite_contention
 from .thread_gate import ThreadGate
 
 
@@ -457,12 +458,11 @@ class CohortIntake:
                     if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
                         raise ValueError("cohort intake file changed during the operation")
         except sqlite3.OperationalError as error:
-            if not wait and getattr(error, "sqlite_errorcode", None) in (
-                sqlite3.SQLITE_BUSY,
-                sqlite3.SQLITE_LOCKED,
-            ):
+            if not wait and is_sqlite_contention(error):
                 raise PrivateStateBusyError(
-                    "cohort_intake_snapshot", digest(str(self.directory)), error.sqlite_errorcode
+                    "cohort_intake_snapshot",
+                    digest(str(self.directory)),
+                    getattr(error, "sqlite_errorcode", None),
                 ) from error
             raise
         finally:
