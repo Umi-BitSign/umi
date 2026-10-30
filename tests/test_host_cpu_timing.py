@@ -30,6 +30,8 @@ def selected_host(tmp_path):
         "cpuset.cpus.partition": "root",
         "cpuset.cpus.exclusive.effective": "0-1",
         "cpuset.cpus.effective": "0-1",
+        "cpu.max": "max 100000",
+        "cpu.stat": "usage_usec 0\nnr_throttled 0\nthrottled_usec 0\n",
     }.items():
         (partition / name).write_text(value)
     for name, value in {
@@ -52,6 +54,8 @@ def selected_host(tmp_path):
         (location / "thread_siblings_list").write_text(str(cpu))
         (location / "physical_package_id").write_text("0")
         (location / "core_id").write_text(str(cpu))
+        (location / "core_type").write_text("2")
+        (location.parent / "cpu_capacity").write_text("1024")
         (location.parent / "node0").mkdir()
         cache = location.parent / "cache/index0"
         cache.mkdir(parents=True)
@@ -101,7 +105,7 @@ def selected_host(tmp_path):
         hardware_sha256=hardware,
         cpu_class_sha256=cpu_class,
         qualification_sha256="4" * 64,
-        topology_sha256=slot_topology(cpus, (0, 1), (0,)),
+        topology_sha256=slot_topology(cpus, (0, 1), (0,), cpuinfo=cpuinfo()),
         partition=host.CpuTimingKernelDirectory(**binding(partition)),
         reserved_cpu_ids=(0, 1),
         background_cpu_ids=(2, 3),

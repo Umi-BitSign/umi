@@ -1,7 +1,8 @@
-"""One public source qualification batch; service lifetime owns temporary files."""
+"""One bounded source qualification with durable individual test outcomes."""
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,16 +11,36 @@ import sys
 import time
 from urllib.parse import parse_qs, unquote, urlsplit
 
-BASE = "899c7c4520981a5996fab82d74bc7db6ee45eb57"
-STYLE_PARENT = "3f7847d34f9848edf4437bfd6849b17ab2914dd1"
+BASE = "f382e2a264666c267484ff0d4f9e652af967d784"
 STYLE_PATHS = (
-    "src/umi/competition_imported_proof_retirement.py",
-    "tests/test_competition_imported_proof_retirement.py",
-    "tests/test_competition_cohort_continued_model_retry.py",
-    "tests/test_competition_cohort_suite_adoption_api.py",
+    "src/umi/competition_cpu_timing.py",
+    "src/umi/host_cpu_conditions.py",
+    "src/umi/host_cpu_partition.py",
+    "src/umi/host_cpu_timing.py",
+    "tests/test_competition_cpu_timing.py",
+    "tests/test_cpu_partition_restoration.py",
+    "tests/test_host_cpu_timing.py",
+    "tests/test_host_cpu_core_classes.py",
 )
-TESTS = ['tests/test_competition_cohort_native_pipeline.py::test_accepted_model_reaches_native_reward_package[mixed-outage-lost-reply-precommit_model_inventory]', 'tests/test_competition_cohort_native_pipeline.py::test_accepted_model_reaches_native_reward_package[mixed-service-model-precommit_model_inventory]', 'tests/test_competition_cohort_native_pipeline.py::test_accepted_model_reaches_native_reward_package[normal-precommit_model_inventory]', 'tests/test_competition_cohort_native_pipeline.py::test_accepted_model_reaches_native_reward_package[outage-restart-precommit_model_inventory]', 'tests/test_competition_cohort_native_pipeline.py::test_explicit_aggregate_budget_through_native_request_settlement_and_reward[precommit_model_inventory]', 'tests/test_competition_cohort_native_pipeline.py::test_selected_admission_covers_native_pipeline_and_original_recovery[precommit_model_inventory]', 'tests/test_competition_cohort_native_reference_compatibility.py::test_historical_unicode_reference_reaches_native_certified_rewards[interrupted-replay-precommit_model_inventory]', 'tests/test_competition_cohort_native_reference_compatibility.py::test_historical_unicode_reference_reaches_native_certified_rewards[normal-precommit_model_inventory]', 'tests/test_competition_cohort_native_reference_compatibility.py::test_mixed_reference_encodings_survive_interrupted_native_certified_rewards[mixed-precommit_model_inventory]', 'tests/test_competition_order_continuation.py::test_authorization_cannot_request_order_continuation[umi-open-competition-policy/1]', 'tests/test_competition_order_continuation.py::test_authorization_cannot_request_order_continuation[umi-open-competition-policy/2]', 'tests/test_competition_order_continuation.py::test_changed_order_cannot_spend_an_existing_reservation[umi-open-competition-policy/1]', 'tests/test_competition_order_continuation.py::test_changed_order_cannot_spend_an_existing_reservation[umi-open-competition-policy/2]', 'tests/test_competition_order_continuation.py::test_completed_publication_order_continues_while_another_claim_is_unknown[umi-open-competition-policy/1-True]', 'tests/test_competition_order_continuation.py::test_completed_publication_order_continues_while_another_claim_is_unknown[umi-open-competition-policy/2-True]', 'tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/1-evaluation_closed]', 'tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/1-issue_closed]', 'tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/1-order_changed]', 'tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/1-quorum]', 'tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/1-stale]', 'tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/2-evaluation_closed]', 'tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/2-issue_closed]', 'tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/2-order_changed]', 'tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/2-quorum]', 'tests/test_competition_order_continuation.py::test_continuation_preserves_signing_authority_and_original_windows[umi-open-competition-policy/2-stale]', 'tests/test_competition_order_continuation.py::test_continuation_rechecks_native_receipts_and_time_immediately_before_signing[umi-open-competition-policy/1-evaluation_closed]', 'tests/test_competition_order_continuation.py::test_continuation_rechecks_native_receipts_and_time_immediately_before_signing[umi-open-competition-policy/1-final_proof]', 'tests/test_competition_order_continuation.py::test_continuation_rechecks_native_receipts_and_time_immediately_before_signing[umi-open-competition-policy/1-issue_closed]', 'tests/test_competition_order_continuation.py::test_continuation_rechecks_native_receipts_and_time_immediately_before_signing[umi-open-competition-policy/1-lost_native]', 'tests/test_competition_order_continuation.py::test_continuation_rechecks_native_receipts_and_time_immediately_before_signing[umi-open-competition-policy/2-evaluation_closed]', 'tests/test_competition_order_continuation.py::test_continuation_rechecks_native_receipts_and_time_immediately_before_signing[umi-open-competition-policy/2-final_proof]', 'tests/test_competition_order_continuation.py::test_continuation_rechecks_native_receipts_and_time_immediately_before_signing[umi-open-competition-policy/2-issue_closed]', 'tests/test_competition_order_continuation.py::test_continuation_rechecks_native_receipts_and_time_immediately_before_signing[umi-open-competition-policy/2-lost_native]', 'tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-allowance]', 'tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-assignment]', 'tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-complete]', 'tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-consumption]', 'tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-order_allowance]', 'tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-profile]', 'tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-proof]', 'tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-qualification]', 'tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-allowance]', 'tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-assignment]', 'tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-complete]', 'tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-consumption]', 'tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-order_allowance]', 'tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-profile]', 'tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-proof]', 'tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-qualification]', 'tests/test_competition_order_continuation.py::test_continuation_requires_the_retained_review_receipt[umi-open-competition-policy/1]', 'tests/test_competition_order_continuation.py::test_continuation_requires_the_retained_review_receipt[umi-open-competition-policy/2]', 'tests/test_competition_order_continuation.py::test_continuation_still_requires_every_native_receipt[umi-open-competition-policy/1-dispatch]', 'tests/test_competition_order_continuation.py::test_continuation_still_requires_every_native_receipt[umi-open-competition-policy/1-evaluator]', 'tests/test_competition_order_continuation.py::test_continuation_still_requires_every_native_receipt[umi-open-competition-policy/1-execution]', 'tests/test_competition_order_continuation.py::test_continuation_still_requires_every_native_receipt[umi-open-competition-policy/1-signing]', 'tests/test_competition_order_continuation.py::test_continuation_still_requires_every_native_receipt[umi-open-competition-policy/2-dispatch]', 'tests/test_competition_order_continuation.py::test_continuation_still_requires_every_native_receipt[umi-open-competition-policy/2-evaluator]', 'tests/test_competition_order_continuation.py::test_continuation_still_requires_every_native_receipt[umi-open-competition-policy/2-execution]', 'tests/test_competition_order_continuation.py::test_continuation_still_requires_every_native_receipt[umi-open-competition-policy/2-signing]', 'tests/test_competition_order_continuation.py::test_existing_order_does_not_recharge_a_failed_remaining_timing_envelope[umi-open-competition-policy/1]', 'tests/test_competition_order_continuation.py::test_existing_order_does_not_recharge_a_failed_remaining_timing_envelope[umi-open-competition-policy/2]', 'tests/test_competition_order_continuation.py::test_late_exact_order_signs_during_dispatch_without_changing_reservations[umi-open-competition-policy/1-False]', 'tests/test_competition_order_continuation.py::test_late_exact_order_signs_during_dispatch_without_changing_reservations[umi-open-competition-policy/1-True]', 'tests/test_competition_order_continuation.py::test_late_exact_order_signs_during_dispatch_without_changing_reservations[umi-open-competition-policy/2-False]', 'tests/test_competition_order_continuation.py::test_late_exact_order_signs_during_dispatch_without_changing_reservations[umi-open-competition-policy/2-True]', 'tests/test_competition_order_continuation.py::test_missing_completed_admission_cannot_use_continuation[umi-open-competition-policy/1-complete]', 'tests/test_competition_order_continuation.py::test_missing_completed_admission_cannot_use_continuation[umi-open-competition-policy/1-manifest]', 'tests/test_competition_order_continuation.py::test_missing_completed_admission_cannot_use_continuation[umi-open-competition-policy/2-complete]', 'tests/test_competition_order_continuation.py::test_missing_completed_admission_cannot_use_continuation[umi-open-competition-policy/2-manifest]', 'tests/test_competition_order_continuation.py::test_partial_native_admission_cannot_be_promoted_to_continuation[umi-open-competition-policy/1]', 'tests/test_competition_order_continuation.py::test_partial_native_admission_cannot_be_promoted_to_continuation[umi-open-competition-policy/2]', 'tests/test_competition_order_continuation.py::test_retained_receipt_still_enforces_logical_capacity[umi-open-competition-policy/1]', 'tests/test_competition_order_continuation.py::test_retained_receipt_still_enforces_logical_capacity[umi-open-competition-policy/2]', 'tests/test_competition_order_continuation.py::test_retained_receipt_still_rejects_stale_owned_finality[umi-open-competition-policy/1]', 'tests/test_competition_order_continuation.py::test_retained_receipt_still_rejects_stale_owned_finality[umi-open-competition-policy/2]', 'tests/test_competition_reward_preparation.py::test_automatic_coverage_capture_lost_ack_and_offline_restart[opportunity-standing]', 'tests/test_competition_reward_preparation.py::test_automatic_settlement_assembly_delivery_and_late_restart[False-standing]', 'tests/test_competition_reward_preparation.py::test_automatic_settlement_assembly_delivery_and_late_restart[True-standing]', 'tests/test_competition_reward_preparation.py::test_automatic_settlement_fetches_missing_original_pulse_and_resumes[False-standing]', 'tests/test_competition_reward_preparation.py::test_automatic_settlement_fetches_missing_original_pulse_and_resumes[True-standing]', 'tests/test_competition_reward_preparation.py::test_automatic_settlement_incomplete_sources_never_sign[catalog-standing]', 'tests/test_competition_reward_preparation.py::test_automatic_settlement_incomplete_sources_never_sign[changed-standing]', 'tests/test_competition_reward_preparation.py::test_automatic_settlement_incomplete_sources_never_sign[missing-standing]', 'tests/test_competition_reward_preparation.py::test_automatic_settlement_incomplete_sources_never_sign[pulse-standing]', 'tests/test_competition_reward_preparation.py::test_automatic_settlement_incomplete_sources_never_sign[revoked-standing]', 'tests/test_competition_reward_preparation.py::test_automatic_settlement_incomplete_sources_never_sign[round-standing]', 'tests/test_competition_reward_preparation.py::test_automatic_settlement_incomplete_sources_never_sign[superseded-standing]', 'tests/test_competition_reward_preparation.py::test_automatic_settlement_recovers_interrupted_publication[after_input-standing]', 'tests/test_competition_reward_preparation.py::test_automatic_settlement_recovers_interrupted_publication[before_input-standing]', 'tests/test_competition_reward_preparation.py::test_automatic_settlement_recovers_interrupted_publication[export-standing]', 'tests/test_competition_reward_preparation.py::test_baseline_candidate_requires_its_native_preparation_owner[standing]', 'tests/test_competition_reward_preparation.py::test_boot_reconstructs_initial_package_from_native_retained_history[standing]', 'tests/test_competition_reward_preparation.py::test_cancellation_retains_completed_native_replay[standing]', 'tests/test_competition_reward_preparation.py::test_complete_native_history_package_and_projection_restart_without_coordinator[extra_recipient-False-standing]', 'tests/test_competition_reward_preparation.py::test_complete_native_history_package_and_projection_restart_without_coordinator[matching-False-standing]', 'tests/test_competition_reward_preparation.py::test_complete_native_history_package_and_projection_restart_without_coordinator[matching-True-standing]', 'tests/test_competition_reward_preparation.py::test_complete_native_history_package_and_projection_restart_without_coordinator[missing_recipient-False-standing]', 'tests/test_competition_reward_preparation.py::test_complete_native_history_package_and_projection_restart_without_coordinator[permit_missing-False-standing]', 'tests/test_competition_reward_preparation.py::test_complete_native_history_package_and_projection_restart_without_coordinator[raw_row-False-standing]', 'tests/test_competition_reward_preparation.py::test_complete_native_history_package_and_projection_restart_without_coordinator[sparse_zeros-False-standing]', 'tests/test_competition_reward_preparation.py::test_completed_native_interval_credit_restores_with_shared_dependency_refresh[opportunity-standing]', 'tests/test_competition_reward_preparation.py::test_coverage_waits_for_both_validators_and_rebuilds_after_outage[complete_preparation_case0-standing]', 'tests/test_competition_reward_preparation.py::test_durable_snapshot_preparation_reuses_native_work_across_all_consumers[standing]', 'tests/test_competition_reward_preparation.py::test_failed_replay_retries_and_independent_bindings_are_enforced[standing]', 'tests/test_competition_reward_preparation.py::test_historical_package_requires_an_effective_allocation[admitted-standing]', 'tests/test_competition_reward_preparation.py::test_historical_package_requires_an_effective_allocation[draining-standing]', 'tests/test_competition_reward_preparation.py::test_historical_package_requires_an_effective_allocation[revoked-standing]', 'tests/test_competition_reward_preparation.py::test_historical_package_uses_effective_predecessor_during_drain[standing]', 'tests/test_competition_reward_preparation.py::test_historical_preparation_rechecks_manifest_and_package_identity[standing]', 'tests/test_competition_reward_preparation.py::test_initial_package_is_recoverable_after_successor_or_revocation[draining-standing]', 'tests/test_competition_reward_preparation.py::test_initial_package_is_recoverable_after_successor_or_revocation[revoked-standing]', 'tests/test_competition_reward_preparation.py::test_initial_package_is_recoverable_after_successor_or_revocation[selected-standing]', 'tests/test_competition_reward_preparation.py::test_installed_coverage_discovers_completes_and_recovers_without_coordinator[completion_ack-opportunity-standing]', 'tests/test_competition_reward_preparation.py::test_installed_coverage_discovers_completes_and_recovers_without_coordinator[export-opportunity-standing]', 'tests/test_competition_reward_preparation.py::test_installed_coverage_discovers_completes_and_recovers_without_coordinator[none-opportunity-standing]', 'tests/test_competition_reward_preparation.py::test_later_cached_package_cannot_backdate_certification[standing]', 'tests/test_competition_reward_preparation.py::test_lazy_native_coverage_releases_package_and_reloads_earlier_history[opportunity-standing]', 'tests/test_competition_reward_preparation.py::test_native_admission_signs_only_an_empty_reserved_control_history[signing_admission-standing]', 'tests/test_competition_reward_preparation.py::test_native_allocation_export_repairs_partial_delivery_without_replay[standing]', 'tests/test_competition_reward_preparation.py::test_native_control_publisher_recovers_original_proofs_and_finalized_history[control_publication-8-standing]', 'tests/test_competition_reward_preparation.py::test_native_coordinator_recovers_admission_then_certifies_first_activation[coordinator-8-standing]', 'tests/test_competition_reward_preparation.py::test_native_coverage_retention_retries_and_offline_restart[journal-standing]', 'tests/test_competition_reward_preparation.py::test_native_coverage_retention_retries_and_offline_restart[opportunity-standing]', 'tests/test_competition_reward_preparation.py::test_native_historical_coverage_capture[opportunity-standing]', 'tests/test_competition_reward_preparation.py::test_native_package_projection_retains_original_signing_inputs[4-standing]', 'tests/test_competition_reward_preparation.py::test_native_package_replay_is_reused_but_projection_needs_fresh_control[standing]', 'tests/test_competition_reward_preparation.py::test_native_pending_activation_signs_recovers_and_delivers_after_restart[opportunity-standing]', 'tests/test_competition_reward_preparation.py::test_native_quality_publication_progress_counts_durable_actions[standing]', 'tests/test_competition_reward_preparation.py::test_native_request_certification_starts_recurring_settlement[files-True-standing]', 'tests/test_competition_reward_preparation.py::test_native_request_certification_starts_recurring_settlement[rclone-True-standing]', 'tests/test_competition_reward_preparation.py::test_native_reward_package_uses_dedicated_aggregate_file_and_replay_budget[standing]', 'tests/test_competition_reward_preparation.py::test_native_settlement_controller_resumes_original_votes_after_peer_outage[progress-standing]', 'tests/test_competition_reward_preparation.py::test_native_settlement_controller_resumes_original_votes_after_peer_outage[transition-standing]', 'tests/test_competition_reward_preparation.py::test_native_settlement_does_not_publish_invalid_or_revoked_evidence[missing_evidence-standing]', 'tests/test_competition_reward_preparation.py::test_native_settlement_does_not_publish_invalid_or_revoked_evidence[revoked-standing]', 'tests/test_competition_reward_preparation.py::test_native_settlement_does_not_publish_invalid_or_revoked_evidence[terms-standing]', 'tests/test_competition_reward_preparation.py::test_native_settlement_does_not_publish_invalid_or_revoked_evidence[wrong_phase_result-standing]', 'tests/test_competition_reward_preparation.py::test_native_settlement_recovers_every_stage_and_keeps_one_package[closed_quality_peer-standing]', 'tests/test_competition_reward_preparation.py::test_native_settlement_recovers_every_stage_and_keeps_one_package[cohort_reward_allocation-standing]', 'tests/test_competition_reward_preparation.py::test_native_settlement_recovers_every_stage_and_keeps_one_package[publish-standing]', 'tests/test_competition_reward_preparation.py::test_native_settlement_recovers_every_stage_and_keeps_one_package[service_allocation_peer-standing]', 'tests/test_competition_reward_preparation.py::test_native_settlement_waits_for_service_votes_then_recovers_capacity[standing]', 'tests/test_competition_reward_preparation.py::test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity[0-standing]', 'tests/test_competition_reward_preparation.py::test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity[1-standing]', 'tests/test_competition_reward_preparation.py::test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity[2-standing]', 'tests/test_competition_reward_preparation.py::test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity[None-standing]', 'tests/test_competition_reward_preparation.py::test_pending_activation_can_prepare_but_cannot_project[standing]', 'tests/test_competition_reward_preparation.py::test_portable_proofs_restore_fresh_native_journals_without_history_rpc[opportunity-standing]', 'tests/test_competition_reward_preparation.py::test_projection_requires_selected_and_effective_allocation_to_agree[different_activation-standing]', 'tests/test_competition_reward_preparation.py::test_projection_requires_selected_and_effective_allocation_to_agree[missing-standing]', 'tests/test_competition_reward_preparation.py::test_recurring_settlement_certifies_without_inference_or_manual_votes[True-standing]', 'tests/test_competition_reward_preparation.py::test_recurring_settlement_certifies_without_inference_or_manual_votes[precommitted-standing]', 'tests/test_competition_reward_preparation.py::test_recurring_settlement_loops_publish_with_automatic_file_delivery[standing]', 'tests/test_competition_reward_preparation.py::test_recurring_settlement_retries_without_signing_unverified_results[changed_vote-standing]', 'tests/test_competition_reward_preparation.py::test_recurring_settlement_retries_without_signing_unverified_results[missing_execution-standing]', 'tests/test_competition_reward_preparation.py::test_recurring_settlement_retries_without_signing_unverified_results[missing_proof-standing]', 'tests/test_competition_reward_preparation.py::test_recurring_settlement_retries_without_signing_unverified_results[revoked-standing]', 'tests/test_competition_reward_preparation.py::test_reference_input_package_cannot_replace_certified_scoring_inputs[standing]', 'tests/test_competition_reward_preparation.py::test_reference_review_rejects_incomplete_or_changed_inputs[catalog-True-standing]', 'tests/test_competition_reward_preparation.py::test_reference_review_rejects_incomplete_or_changed_inputs[corrupt_reference-True-standing]', 'tests/test_competition_reward_preparation.py::test_reference_review_rejects_incomplete_or_changed_inputs[early-True-standing]', 'tests/test_competition_reward_preparation.py::test_reference_review_rejects_incomplete_or_changed_inputs[reference-True-standing]', 'tests/test_competition_reward_preparation.py::test_reference_review_rejects_incomplete_or_changed_inputs[reveal-True-standing]', 'tests/test_competition_reward_preparation.py::test_reference_review_rejects_incomplete_or_changed_inputs[suite-True-standing]', 'tests/test_competition_reward_preparation.py::test_reference_review_rejects_incomplete_or_changed_inputs[terminal-True-standing]', 'tests/test_competition_reward_preparation.py::test_reference_service_resumes_original_intent_without_fresh_observation[True-standing]', 'tests/test_competition_reward_preparation.py::test_remote_coverage_reuses_native_facts_after_eviction_restart_and_repair[opportunity-standing]', 'tests/test_competition_reward_preparation.py::test_retained_coverage_package_keeps_native_owner_and_historical_boundary[standing]', 'tests/test_competition_reward_preparation.py::test_retained_coverage_package_refuses_changed_activation_or_authority[standing]', 'tests/test_competition_reward_preparation.py::test_reviewed_automatic_inputs_require_original_replica[changed-standing]', 'tests/test_competition_reward_preparation.py::test_reviewed_automatic_inputs_require_original_replica[lost-standing]', 'tests/test_competition_reward_preparation.py::test_reviewer_imports_only_verified_history_extensions[None-True-standing]', 'tests/test_competition_reward_preparation.py::test_reviewer_imports_only_verified_history_extensions[decisions-True-standing]', 'tests/test_competition_reward_preparation.py::test_reviewer_imports_only_verified_history_extensions[filename-True-standing]', 'tests/test_competition_reward_preparation.py::test_reviewer_imports_only_verified_history_extensions[fork-True-standing]', 'tests/test_competition_reward_preparation.py::test_reviewer_imports_only_verified_history_extensions[proof-True-standing]', 'tests/test_competition_reward_preparation.py::test_reviewer_imports_only_verified_history_extensions[signature-True-standing]', 'tests/test_competition_reward_preparation.py::test_reward_delivery_consumers_reuse_snapshots_and_require_explicit_repair[standing]', 'tests/test_competition_reward_preparation.py::test_reward_input_publication_holds_incomplete_or_conflicting_inputs[missing-standing]', 'tests/test_competition_reward_preparation.py::test_reward_input_publication_holds_incomplete_or_conflicting_inputs[unsigned-standing]', 'tests/test_competition_reward_preparation.py::test_reward_input_publication_holds_incomplete_or_conflicting_inputs[wrong_allocation-standing]', 'tests/test_competition_reward_preparation.py::test_reward_input_publication_holds_incomplete_or_conflicting_inputs[wrong_package-standing]', 'tests/test_competition_reward_preparation.py::test_reward_input_publication_recovers_original_bytes_and_offline_source[decisions-standing]', 'tests/test_competition_reward_preparation.py::test_reward_input_publication_recovers_original_bytes_and_offline_source[packages-standing]', 'tests/test_competition_reward_preparation.py::test_reward_snapshot_detaches_nested_mutation_and_preserves_exact_budget[standing]', 'tests/test_competition_reward_preparation.py::test_runtime_adoption_retains_old_facts_and_new_native_archive_after_restart[forward-opportunity-Yuma-standing]', 'tests/test_competition_reward_preparation.py::test_runtime_adoption_retains_old_facts_and_new_native_archive_after_restart[historical_gap-opportunity-Yuma-standing]', 'tests/test_competition_reward_preparation.py::test_settlement_file_delivery_recovers_phases_with_independent_state[False-standing]', 'tests/test_competition_reward_preparation.py::test_settlement_file_delivery_recovers_phases_with_independent_state[True-standing]', 'tests/test_competition_reward_preparation.py::test_settlement_file_request_rejects_changes_before_history_or_proof_io[standing]', 'tests/test_competition_reward_preparation.py::test_settlement_file_reviewer_loop_recovers_after_missing_proof[standing]', 'tests/test_competition_reward_preparation.py::test_settlement_input_replica_recovers_before_quality_votes[standing]', 'tests/test_competition_reward_preparation.py::test_settlement_input_replica_rejects_missing_or_changed_evidence[standing]', 'tests/test_competition_reward_preparation.py::test_settlement_peer_replays_original_proofs_before_signing_without_blocking_loop[standing]', 'tests/test_competition_reward_preparation.py::test_settlement_phase_signing_rejects_changed_body_and_drains_cancellation[standing]', 'tests/test_competition_reward_preparation.py::test_settlement_releases_parsed_package_after_native_replay[standing]', 'tests/test_competition_reward_preparation.py::test_settlement_serialization_scope_preserves_native_checks_and_package_bytes[standing]', 'tests/test_competition_cohort_continued_model_retry.py::test_continued_retry_refuses_missing_or_changed_owned_facts_without_payload_reads', 'tests/test_competition_cohort_suite_adoption_api.py::test_first_qualification_keeps_owner_locks_free_and_rechecks_only_bound_identities', 'tests/test_competition_verification_rules.py', 'tests/test_competition_imported_proof_retirement.py']
-
+TESTS = (
+    "tests/test_competition_cohort_native_pipeline.py::test_accepted_model_reaches_native_reward_package[normal-precommit_model_inventory]",
+    "tests/test_competition_cohort_native_pipeline.py::test_accepted_model_reaches_native_reward_package[outage-restart-precommit_model_inventory]",
+    "tests/test_competition_imported_proof_retirement.py",
+    "tests/test_competition_verification_rules.py",
+    "tests/test_host_cpu_core_classes.py",
+    "tests/test_host_cpu_timing.py",
+    "tests/test_cpu_partition_restoration.py::test_restored_shared_slot_has_no_quota_but_owned_payloads_keep_exact_limit",
+    "tests/test_competition_cpu_timing.py::test_owned_parent_preserves_accounting_after_short_container_exit",
+    "tests/test_competition_cpu_timing.py::test_sampler_detects_changed_kernel_profile",
+    "tests/test_competition_cpu_timing.py::test_sampler_rejects_missing_counters_or_changed_cpu_identity",
+    "tests/test_competition_cpu_timing.py::test_sampler_refuses_symlink_cgroup_and_files",
+    "tests/test_competition_cpu_timing.py::test_finite_shared_ancestor_quota_refuses_even_when_large",
+    "tests/test_competition_cpu_timing.py::test_restored_ancestor_quota_cannot_hide_throttling",
+    "tests/test_competition_cpu_timing.py::test_ancestor_usage_and_old_throttling_do_not_reject_owned_model_cost",
+    "tests/test_competition_cpu_timing.py::test_ancestor_controls_cannot_disappear_or_reset",
+    "tests/test_competition_cpu_timing.py::test_ancestry_depth_is_bounded_before_opening_kernel_directories",
+    "tests/test_competition_cpu_timing.py::test_failed_ancestry_open_closes_all_pinned_descriptors",
+)
 
 
 def main():
@@ -34,59 +55,85 @@ def main():
     if scratch != Path("/run/umi-retirement-public-v1") or any(scratch.iterdir()):
         raise ValueError("fresh service-owned scratch required")
     if any(output.iterdir()):
-        raise ValueError("results already exist; do not replay this batch")
+        raise ValueError("results already exist; completed work must not be replayed")
+    if len(TESTS) != len(set(TESTS)):
+        raise ValueError("duplicate selectors")
     os.chdir(source)
-    os.environ.update(TMPDIR=str(scratch),
-                      XDG_CACHE_HOME=str(scratch / "cache"),
-                      PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", PYTHONDONTWRITEBYTECODE="1")
+    os.environ.update(
+        TMPDIR=str(scratch),
+        XDG_CACHE_HOME=str(scratch / "cache"),
+        PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
+        PYTHONDONTWRITEBYTECODE="1",
+    )
     started, stage = time.monotonic(), "format_and_manifest"
+
+    def durable_file(path, data):
+        with path.open("wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    def event(kind, **values):
+        row = dict(
+            schema="umi-focused-source-test-event/1",
+            kind=kind,
+            stage=stage,
+            elapsed_seconds=round(time.monotonic() - started, 6),
+            observed_utc=datetime.now(timezone.utc).isoformat(),
+            planning_eta_seconds=[0, 1800],
+            eta_basis="planning: two prior early failures, retirement boundary and bounded CPU metadata tests; no whole-suite throughput assumption",
+            stalled_or_retrying=False,
+        )
+        row.update(values)
+        with (output / "events.jsonl").open("a") as stream:
+            stream.write(json.dumps(row, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        print(json.dumps(row, sort_keys=True), flush=True)
+
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     manifest = source / "src/umi/competition_verification_rules.json"
     external = json.loads(manifest.read_bytes())["external_distributions"]
-    changed = subprocess.check_output(
-        ["git", "diff", "--name-only", STYLE_PARENT, "HEAD", "--", "src", "tests"],
-        text=True,
-    ).splitlines()
-    # Reuse the previous unaffected passes. These exact inputs comprise the
-    # missing-tool setup repairs, changed recovery path and telemetry assertions.
-    if (not set(changed) <= set(STYLE_PATHS) | {"src/umi/competition_verification_rules.json"}
-            or not set(STYLE_PATHS) - {"tests/test_competition_imported_proof_retirement.py"} <= set(changed)):
-        raise ValueError("qualification continuation differs from reviewed correction scope")
-    paths = list(STYLE_PATHS)
-    if not 1 <= len(paths) <= 64:
-        raise ValueError("expected a bounded nonempty source formatting scope")
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    result = dict(revision=revision, public_base=BASE, test_modules=TESTS, passed=False)
-
-    def progress(**values):
-        row = dict(stage=stage, elapsed_seconds=round(time.monotonic() - started, 3),
-                   observed_utc=datetime.now(timezone.utc).isoformat(),
-                   planning_eta_seconds=[60, 1800],
-                   eta_basis="planning: corrected recovery, missing-tool fixtures and changed assertions; prior unaffected passes reused",
-                   stalled_or_retrying=False)
-        row.update(values)
-        print(json.dumps(row), flush=True)
-        with (output / "progress.jsonl").open("a") as stream:
-            stream.write(json.dumps(row) + "\n")
-
+    result = dict(revision=revision, public_base=BASE, selectors=TESTS, passed=False)
+    event("run_start", revision=revision, selectors=TESTS)
     try:
-        progress(completed=0, total=4)
         try:
-            for arguments in ([str(source / ".venv/bin/ruff"), "format", "--no-cache", *paths],
-                              [str(source / ".venv/bin/ruff"), "check", "--no-cache", *paths],
-                              [sys.executable, "-I", "-B", "tools/verification_manifest.py"]):
+            for arguments in (
+                [str(source / ".venv/bin/ruff"), "format", "--no-cache", *STYLE_PATHS],
+                [str(source / ".venv/bin/ruff"), "check", "--no-cache", *STYLE_PATHS],
+                [sys.executable, "-I", "-B", "tools/verification_manifest.py"],
+            ):
                 subprocess.run(arguments, check=True, timeout=120)
             if json.loads(manifest.read_bytes())["external_distributions"] != external:
                 raise ValueError("qualified external dependency versions changed")
-            (output / "competition_verification_rules.json").write_bytes(manifest.read_bytes())
+            durable_file(output / "competition_verification_rules.json", manifest.read_bytes())
         finally:
-            with (output / "public-output.patch").open("wb") as stream:
-                subprocess.run(["git", "diff", "--binary", "--", "src", "tests"],
-                               check=True, stdout=stream, timeout=30)
-        stage = "focused_fixtures"
-        progress(completed=3, total=4)
+            patch = subprocess.check_output(
+                ["git", "diff", "--binary", "--", "src", "tests"], timeout=30
+            )
+            durable_file(output / "public-output.patch", patch)
 
-        def audit(event, arguments):
-            if event != "sqlite3.connect":
+        stage = "focused_fixtures"
+        binding = dict(
+            revision=revision,
+            source_tree=subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip(),
+            verification_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+            qualification_patch_sha256=hashlib.sha256(patch).hexdigest(),
+            locked_environment_sha256=hashlib.sha256((source / "uv.lock").read_bytes()).hexdigest(),
+            interpreter=sys.version,
+            resource_limits=dict(memory_max_bytes=1610612736, swap_max_bytes=0, cpu_quota_percent=200, runtime_max_seconds=2100),
+            selectors=TESTS,
+        )
+        durable_file(output / "binding.json", (json.dumps(binding, indent=2) + "\n").encode())
+        event("binding", **binding)
+
+        def audit(name, arguments):
+            if name != "sqlite3.connect":
                 return
             value = os.fsdecode(arguments[0])
             if value == ":memory:":
@@ -110,33 +157,62 @@ def main():
             raise ValueError("fixtures imported another source tree")
 
         class Progress:
-            total = completed = 0
-            start = time.monotonic()
+            def __init__(self):
+                self.nodes = []
+                self.phases = {}
+                self.completed = {}
 
             def pytest_collection_finish(self, session):
-                self.total = len(session.items)
+                self.nodes = [item.nodeid for item in session.items]
+                if len(self.nodes) != len(set(self.nodes)):
+                    raise ValueError("duplicate expanded test identities")
+                if self.nodes[:2] != list(TESTS[:2]):
+                    raise ValueError("the two native diagnostic cases must execute first")
+                durable_file(output / "collected-nodes.json", (json.dumps(self.nodes, indent=2) + "\n").encode())
+                event("collection", completed=0, total=len(self.nodes), nodeids=self.nodes)
+
+            def pytest_runtest_logstart(self, nodeid, location):
+                self.phases[nodeid] = {}
+                event("case_start", nodeid=nodeid, completed=len(self.completed), total=len(self.nodes))
 
             def pytest_runtest_logreport(self, report):
+                detail = report.longreprtext if report.longrepr is not None else None
+                row = dict(nodeid=report.nodeid, phase=report.when, outcome=report.outcome, duration_seconds=report.duration)
+                if detail:
+                    name = hashlib.sha256((report.nodeid + "\0" + report.when).encode()).hexdigest() + ".txt"
+                    durable_file(output / name, detail.encode())
+                    row.update(failure_detail=detail, failure_detail_path=name, failure_detail_sha256=hashlib.sha256(detail.encode()).hexdigest())
+                event("phase_outcome", **row)
+                self.phases.setdefault(report.nodeid, {})[report.when] = report.outcome
                 if report.when != "teardown":
                     return
-                self.completed += 1
-                elapsed = time.monotonic() - self.start
-                progress(completed=self.completed, total=self.total, case=report.nodeid,
-                         eta_seconds=elapsed * (self.total - self.completed) / self.completed,
-                         eta_basis="current fixture count rate; unequal fixture costs remain uncertain")
+                phases = self.phases[report.nodeid]
+                if "failed" in phases.values():
+                    outcome = "failed"
+                elif "skipped" in phases.values():
+                    outcome = "skipped"
+                elif phases == dict(setup="passed", call="passed", teardown="passed"):
+                    outcome = "passed"
+                else:
+                    outcome = "incomplete"
+                self.completed[report.nodeid] = outcome
+                event("case_terminal", nodeid=report.nodeid, outcome=outcome, phases=phases, completed=len(self.completed), total=len(self.nodes), counts={kind: list(self.completed.values()).count(kind) for kind in ("passed", "failed", "skipped", "incomplete")})
 
-        code = pytest.main(["-q", "-p", "no:cacheprovider", "-p", "pytest_asyncio.plugin",
-                            "-c", str(source / "pyproject.toml"),
-                            "--basetemp=" + str(scratch / "pytest"),
-                            "--junitxml=" + str(output / "results.xml"), *TESTS], plugins=[Progress()])
-        result.update(passed=code == 0, pytest_exit_code=int(code))
+        progress = Progress()
+        code = pytest.main(
+            ["-q", "-p", "no:cacheprovider", "-p", "pytest_asyncio.plugin", "-c", str(source / "pyproject.toml"), "--basetemp=" + str(scratch / "pytest"), "--junitxml=" + str(output / "results.xml"), *TESTS],
+            plugins=[progress],
+        )
+        result.update(passed=code == 0, pytest_exit_code=int(code), completed=progress.completed, incomplete=[node for node in progress.nodes if node not in progress.completed])
         return int(code)
-    except Exception as error:
-        result["error"] = str(error)
+    except BaseException as error:
+        result["error"] = repr(error)
+        event("run_exception", error=repr(error))
         raise
     finally:
-        result.update(stage=stage, elapsed_seconds=round(time.monotonic() - started, 3))
-        (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+        result.update(stage=stage, elapsed_seconds=round(time.monotonic() - started, 6))
+        durable_file(output / "result.json", (json.dumps(result, indent=2) + "\n").encode())
+        event("run_terminal", **result)
 
 
 if __name__ == "__main__":

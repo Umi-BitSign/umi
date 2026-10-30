@@ -229,7 +229,11 @@ def main():
             memory = plan["runtime_memory_bytes"]
             if not 0 < memory <= existing[name]["reservation_bytes"]:
                 raise RuntimeError("timed memory exceeds existing reservation")
-            write(slot_root / "cpu.max", f"{plan['runtime_cpus'] * 100000} 100000")
+            # The exclusive slot cpuset already bounds capacity. Keep shared
+            # ancestors unlimited: only the leased UID parent and its payload
+            # receive the exact quota, so extra ancestor throttling cannot bias
+            # prospective speed measurements.
+            write(slot_root / "cpu.max", "max 100000")
             write(slot_root / "memory.max", str(memory))
             write(slot_root / "memory.swap.max", "0")
             for user in ROLES.values():

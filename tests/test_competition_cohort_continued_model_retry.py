@@ -323,7 +323,9 @@ async def test_continued_retry_refuses_missing_or_changed_owned_facts_without_pa
     assert_unchanged(f)
     if "byte_" in fault:
         events = json_progress_payloads(
-            caplog.records, logger="umi.competition.progress", schema="umi-transport-work-progress/1"
+            caplog.records,
+            logger="umi.competition.progress",
+            schema="umi-transport-work-progress/1",
         )
         assert any(row["status"] == "repair_required" for row in events)
         assert all("eta_basis" in row and "elapsed_seconds" in row for row in events)

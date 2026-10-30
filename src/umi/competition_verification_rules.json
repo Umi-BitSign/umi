@@ -355,7 +355,7 @@
     "competition_host_start.py": "efb36aee6670c37cc57c96f533edc938fd7e740e027d1fdb48fcbc39adf6b600",
     "competition_host_switch.py": "bc0231238931c3dc90f1e22a3b61ea546318f6c754685dfbbcb98df49af3e8b9",
     "competition_host_upgrade.py": "cf7bada2e11d95e513210d57d9097c479eb723f3c3c6d906d812dd9939a9c263",
-    "competition_imported_proof_retirement.py": "bc85417ada2756bc4d73b4c14789970fd5f4c9ddfcdf01822dda1eab0242edea",
+    "competition_imported_proof_retirement.py": "9d9465f7cbe44847030b3c926813982c2a66e6f299d05e8bc3be44aeb9d1335b",
     "competition_initial_upgrade.py": "01b7007701a526ecf02698e542dc16467d674eb73e94fd26fcd7249ba109e17b",
     "competition_intake_archive.py": "d7f910a32621e8a72ab1b6cdc82683951773dfc858228ea2c466af782036744c",
     "competition_ip_rewards.py": "47231962c5483c62d55fee610f948aa8b0856e5771fb3f70be3798aa46f1b123",

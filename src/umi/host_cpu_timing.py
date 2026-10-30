@@ -130,8 +130,9 @@ def measurement_profile_sha256(profile, runtime):
     return hashlib.sha256(
         canonical_json_bytes(
             {
-                "schema": "umi-cpu-measurement-profile/1",
+                "schema": "umi-cpu-measurement-profile/2",
                 "measurement_semantics": "umi-exclusive-cold-model-cpu-timing/1",
+                "ancestor_quota_rule": "unlimited_shared_ancestors_no_throttle_delta/1",
                 "timing_rule": "cold_model_exec_to_validated_result/1",
                 "partition_mode": "root",
                 "bundle_cache_rule": "verified_bundle_pagecache_eviction/1",
@@ -251,16 +252,17 @@ class CpuTimingSession:
             self.check_ready()
             from .host_cpu_conditions import slot_topology
 
+            cpuinfo_raw = _text(cpuinfo_path, 2 * 1024**2)
+            hardware, cpu_class = hardware_fingerprints(cpuinfo_raw, self.slot.cpu_ids)
+            if (hardware, cpu_class) != (profile.hardware_sha256, profile.cpu_class_sha256):
+                _error("cpu_timing_profile_hardware_changed")
             if (
-                slot_topology(self.cpu_root, self.slot.cpu_ids, profile.numa_node_ids)
+                slot_topology(
+                    self.cpu_root, self.slot.cpu_ids, profile.numa_node_ids, cpuinfo=cpuinfo_raw
+                )
                 != profile.topology_sha256
             ):
                 _error("cpu_timing_visible_topology_changed")
-            hardware, cpu_class = hardware_fingerprints(
-                _text(cpuinfo_path, 2 * 1024**2), self.slot.cpu_ids
-            )
-            if (hardware, cpu_class) != (profile.hardware_sha256, profile.cpu_class_sha256):
-                _error("cpu_timing_profile_hardware_changed")
             self.context = CpuTimingContext(
                 profile_sha256=measurement_profile_sha256(profile, runtime),
                 hardware_sha256=hardware,
@@ -360,7 +362,7 @@ class CpuTimingSession:
         context = self.context.model_copy(
             update={"cgroup_device": info.st_dev, "cgroup_inode": info.st_ino}
         )
-        with CpuTimingSampler(context, path, cgroup_root=self.root) as sampler:
+        with CpuTimingSampler(context, path, cgroup_root=self.root, owned_parent=parent) as sampler:
             sampler.check_context()
 
     async def prepare_conditions(self, invocation_sha256):

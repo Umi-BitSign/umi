@@ -50,7 +50,7 @@ jobs:
           mkdir -p results
           sudo -n systemd-run --unit=umi-retirement-public-v1 --wait --pipe \
             --property=Type=exec --property=User="$(id -un)" --property=Group="$(id -gn)" \
-            --property=MemoryMax=1G --property=MemorySwapMax=0 --property=TasksMax=96 \
+            --property=MemoryMax=1536M --property=MemorySwapMax=0 --property=TasksMax=96 \
             --property=CPUQuota=200% --property=RuntimeMaxSec=35min \
             --property=TimeoutStopSec=15s --property=KillMode=control-group \
             --property=PrivateTmp=yes --property=RuntimeDirectory=umi-retirement-public-v1 \

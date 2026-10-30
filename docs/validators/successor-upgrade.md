@@ -160,6 +160,13 @@ Qualify actual rootless migration, bounded probe cancellation, cache ownership,
 restart cleanup and the intended concurrent lane/load profile before selection.
 Restoration completion alone records neither qualification nor contract selection.
 
+The corrected timing host additionally qualifies explicit core-class equivalence
+and shared-ancestor CPU budgets. Select the matching restorer and evaluator
+together, then qualify the new topology and measurement-profile identities.
+Do not reuse an older host qualification to approve these new enforcement rules.
+Existing signed timing evidence still decodes and replays unchanged; these are
+prospective execution checks. Upload-only clients need no protocol change.
+
 The common supervisor channel does not replace installed Python hosts. Use each
 host's supported signed maintenance/source selection and any explicit overlay
 authority. That same selected-config update must carry the private

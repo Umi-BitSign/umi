@@ -2417,6 +2417,22 @@ original slot file and inode and continue accounting for all busy reservations.
 Five existing shared slots do not establish five qualified CPU lanes; reserve
 background CPU capacity in the measured plan.
 
+Pin each model to its slot's exclusive CPU set and require equivalent core
+classes across every slot used for candidate/reference comparisons. Matching
+CPU model names alone cannot establish that performance and efficiency cores
+are interchangeable. Bind exposed core type and capacity in the prospective
+topology profile; reject mixed or unqualified classes. Visible virtual CPU
+classes remain guest observations, not proof of underlying physical placement.
+Keep NUMA placement, visible SMT policy, CPU allowance and memory limits equal.
+
+Shared ancestors must not impose a finite CPU budget on timed slots. The slot's
+exclusive cpuset bounds its allocated CPU count; its UID parent and model
+container retain the exact declared quota. Check ancestor identities, quotas and
+throttling at timing boundaries so an outer limit cannot silently slow one run.
+Owned model quota contention remains a model cost. These prospective host checks
+require a newly qualified measurement profile; preserve retained historical
+evidence and its original interpretation.
+
 Timed Podman execution, inspection, cleanup and retained-invocation recovery
 explicitly use `cgroupfs`. The payload is
 `<owned-parent>/libpod-<full-CID>`; `--cgroups=no-conmon` keeps conmon outside the

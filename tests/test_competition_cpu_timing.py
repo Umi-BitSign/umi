@@ -420,6 +420,128 @@ def test_sampler_refuses_symlink_cgroup_and_files(kernel):
             reader.sample()
 
 
+@pytest.fixture
+def ancestor_kernel(kernel):
+    root, parent, proc, ctx = kernel
+    shared = root / "shared.slice"
+    slot = shared / "slot"
+    slot.mkdir(parents=True)
+    moved = slot / parent.name
+    parent.rename(moved)
+    for directory in (shared, slot):
+        (directory / "cpu.max").write_text("max 100000")
+        (directory / "cpu.stat").write_text(
+            "usage_usec 100\nnr_throttled 4\nthrottled_usec 500\n"
+        )
+    return root, moved, proc, ctx
+
+
+@pytest.mark.parametrize("ancestor", ["root", "shared", "slot"])
+@pytest.mark.parametrize("quota", ["100000 100000", "10000000 100000"])
+def test_finite_shared_ancestor_quota_refuses_even_when_large(ancestor_kernel, ancestor, quota):
+    root, parent, _, _ = ancestor_kernel
+    directory = {"root": root, "shared": parent.parent.parent, "slot": parent.parent}[ancestor]
+    (directory / "cpu.max").write_text(quota)
+    with sampler(ancestor_kernel) as reader:
+        with pytest.raises(timing.CpuTimingInfrastructureError, match="ancestor_cpu_quota_limited"):
+            reader.check_context()
+
+
+@pytest.mark.parametrize("ancestor", ["shared", "slot"])
+@pytest.mark.parametrize("counter", ["nr_throttled", "throttled_usec"])
+def test_restored_ancestor_quota_cannot_hide_throttling(ancestor_kernel, ancestor, counter):
+    _, parent, _, _ = ancestor_kernel
+    directory = parent.parent.parent if ancestor == "shared" else parent.parent
+    with sampler(ancestor_kernel) as reader:
+        reader.sample()
+        # A quota reduction is no longer visible by the second snapshot, but
+        # the kernel's persistent local bandwidth counters retain its effect.
+        (directory / "cpu.max").write_text("100000 100000")
+        (directory / "cpu.max").write_text("max 100000")
+        values = {"usage_usec": 100, "nr_throttled": 4, "throttled_usec": 500}
+        values[counter] += 1
+        (directory / "cpu.stat").write_text(
+            "".join(f"{name} {value}\n" for name, value in values.items())
+        )
+        with pytest.raises(timing.CpuTimingInfrastructureError, match="ancestor_cpu_throttled"):
+            reader.sample()
+
+
+def test_ancestor_usage_and_old_throttling_do_not_reject_owned_model_cost(ancestor_kernel):
+    _, parent, proc, _ = ancestor_kernel
+    with sampler(ancestor_kernel) as reader:
+        reader.sample()
+        for directory in (parent.parent, parent.parent.parent):
+            (directory / "cpu.stat").write_text(
+                "usage_usec 10000100\nnr_throttled 4\nthrottled_usec 500\n"
+            )
+        (parent / "cpu.stat").write_text(
+            "usage_usec 10000000\nnr_throttled 9\nthrottled_usec 900000\n"
+        )
+        (proc / "stat").write_text("cpu0 550 0 0 550 0 0 0 0\ncpu1 550 0 0 550 0 0 0 0\n")
+        assert reader.sample().cgroup_throttled_periods == 9
+
+
+@pytest.mark.parametrize(
+    "change,reason",
+    [
+        ("reset", "ancestor_counter_reset"),
+        ("replace", "ancestor_identity_changed"),
+        ("missing_quota", "kernel_context_unavailable"),
+        ("missing_counter", "kernel_context_unavailable"),
+    ],
+)
+def test_ancestor_controls_cannot_disappear_or_reset(ancestor_kernel, change, reason):
+    _, parent, _, _ = ancestor_kernel
+    shared = parent.parent.parent
+    with sampler(ancestor_kernel) as reader:
+        reader.check_context()
+        if change == "reset":
+            (shared / "cpu.stat").write_text("nr_throttled 3\nthrottled_usec 500\n")
+        elif change == "replace":
+            shared.rename(shared.with_name("old-shared"))
+            shared.mkdir()
+        elif change == "missing_quota":
+            (shared / "cpu.max").unlink()
+        else:
+            (shared / "cpu.stat").write_text("usage_usec 100\n")
+        with pytest.raises(timing.CpuTimingInfrastructureError, match=reason):
+            reader.check_context()
+
+
+def test_ancestry_depth_is_bounded_before_opening_kernel_directories(kernel, monkeypatch):
+    root, _, _, ctx = kernel
+
+    def unexpected_open(*args, **kwargs):
+        pytest.fail("unbounded ancestry must be rejected before opening directories")
+
+    monkeypatch.setattr(timing.os, "open", unexpected_open)
+    with pytest.raises(timing.CpuTimingInfrastructureError, match="invalid_cgroup_depth"):
+        timing.CpuTimingSampler(ctx, root.joinpath(*("level" for _ in range(65))), cgroup_root=root)
+
+
+def test_failed_ancestry_open_closes_all_pinned_descriptors(ancestor_kernel, monkeypatch):
+    import os
+
+    root, parent, _, ctx = ancestor_kernel
+    original = timing.os.open
+    opened = []
+
+    def tracked_open(path, flags, *args, **kwargs):
+        descriptor = original(path, flags, *args, **kwargs)
+        if flags & os.O_DIRECTORY:
+            opened.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(timing.os, "open", tracked_open)
+    with pytest.raises(timing.CpuTimingInfrastructureError, match="kernel_context_unavailable"):
+        timing.CpuTimingSampler(ctx, parent / "absent", cgroup_root=root)
+    assert len(opened) == 4
+    for descriptor in opened:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
 def test_clock_fields_remain_canonical_after_long_host_uptime():
     # 200 days exceeds canonical-safe nanoseconds; microseconds remain exact.
     offset = 200 * 86400 * 1_000_000
