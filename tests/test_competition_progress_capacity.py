@@ -43,7 +43,7 @@ async def test_cached_native_progress_survives_general_read_saturation(
     monkeypatch.setattr(cohort, "CohortAdmissionQueue", lambda _: object())
     app.include_router(
         cohort.cohort_routes(
-            SimpleNamespace(bindings={C: "authority"}),
+            SimpleNamespace(bindings={C: "authority"}, admission_status=lambda _: None),
             forbidden,
             maximum_body_bytes=1024,
         )

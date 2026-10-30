@@ -753,12 +753,33 @@ async def run_pipeline(
         original_votes = dict(signatures)
         o.outages.clear()
         o.outages.add("charlie.example")
-        assert (await o.service.models.poll_once())["entries_exported"] == 1
+        # After an outage the fair scheduler may visit a background cohort
+        # before retrying this latest entry. Verify actual successful exports
+        # and the exact retained certificate, rather than one-poll placement.
+        exports, recovery_reports = [], []
+        native_export = o.service.models.owner.export
+        target = (h.cohort, digest(submitted.signed_submission.submission))
+
+        def record_export(cohort, submission, destination):
+            result = native_export(cohort, submission, destination)
+            exports.append((cohort, submission))
+            return result
+
+        with monkeypatch.context() as recovery:
+            recovery.setattr(o.service.models.owner, "export", record_export)
+            for _ in range(2 * len(h.intake.config.cohorts) + 1):
+                recovery_reports.append(await o.service.models.poll_once())
+                if target in exports:
+                    break
+            else:
+                pytest.fail(f"latest certificate did not recover: {recovery_reports}")
+        assert sum(r["entries_exported"] for r in recovery_reports) == len(exports)
         assert all(signatures[k] == count for k, count in original_votes.items())
-        accepted_artifact = o.service.models.owner.retained(
-            h.cohort, digest(submitted.signed_submission.submission)
-        )
+        accepted_artifact = o.service.models.owner.retained(*target)
         assert len(accepted_artifact.certificate.signatures) == 2
+        assert (
+            o.service.models.output / "model-reward-acceptances" / target[0] / (target[1] + ".json")
+        ).read_bytes() == canonical_json_bytes(accepted_artifact.certificate)
         o.outages.clear()
         # Once latest acceptance is complete, the ordinary bounded pass also
         # certifies/exports the original generations. Keep the full historical
