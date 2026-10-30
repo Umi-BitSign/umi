@@ -51,6 +51,7 @@ from umi.competition_cohort_participation import (
 )
 from umi.competition_cohort_phase_vote_http import phase_vote_routes
 from umi.competition_cohort_progress_signer import CohortProgressSigner, CohortProgressSignerConfig
+from umi.competition_cohort_recovery import cohort_tracks
 from umi.competition_cohort_request_closure import PendingRequestClosure, build_request_closure
 from umi.competition_cohort_request_files import RequestCompletionFiles
 from umi.competition_cohort_request_readiness import LiveRequestPhaseObserver, RequestReadiness
@@ -464,8 +465,20 @@ async def certify_requests(
     cohort_index = tuple(digest(p) for p in o.config.series.cohorts).index(h.cohort)
     assert (await o.service.poll_once())["catalogs_installed"] == cohort_index + 1
     if no_endpoint_participant:
-        # An empty endpoint roster does not disable a track in the signed round.
-        model_only = "endpoint" not in o.config.lifecycle.sources.eligible_tracks
+        # Host capabilities can span mixed and model-only cohorts. Read the
+        # current signed cohort/adoption rather than the host-wide union.
+        history = h.intake.history(h.cohort)
+        adoption = next(
+            (
+                item.transition.model_delivery_adoption
+                for item in reversed(history.transitions)
+                if item.transition.model_delivery_adoption is not None
+            ),
+            None,
+        )
+        model_only = "endpoint" not in cohort_tracks(
+            history.plan, o.config.lifecycle.sources.eligible_tracks, adoption=adoption
+        )
         for catalog in h.catalogs:
             if catalog.catalog.cohort_sha256 == h.cohort:
                 readiness = await o.service.api.readiness(digest(catalog.catalog), "ab" * 16)
