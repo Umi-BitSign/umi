@@ -2408,6 +2408,13 @@ noise limits are 100 basis points external CPU activity, 50 basis points steal,
 disagreement. Infrastructure/noise invalidations are held for explicit retry or
 repair; they are not scored as a model failure or silently assigned neutral speed.
 
+Capacity checks include the complete timing record: both CPU samples, repeated
+contexts, eight-CPU probes, pressure observations and the bundle-cache receipt.
+The cohort journal reserves 48 KiB separately for the pending result and finished
+step; the full timed step must fit that allowance. Aggregate export and history
+budgets remain separate. Historical `WorkPlan` execution has no CPU-efficiency
+authority, so its untimed bytes and exact reservation calculations remain unchanged.
+
 The contract requires an exclusive cpuset partition with
 `cpuset.cpus.partition=root`, preserving normal internal scheduler balancing.
 Do not use per-thread affinity or isolated partition mode. The existing native
