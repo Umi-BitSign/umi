@@ -70,11 +70,11 @@ async def test_progress_reuses_one_batch_but_rechecks_final_dependencies(
         )
     resolve, attempts = h.item.provider._resolve_control_header, []
 
-    async def progressing(ref, encoded):
+    async def progressing(ref, encoded, **options):
         attempts.append(ref.block_number)
         if len(attempts) <= 3:
             raise progress_error(ref.block_number, len(attempts))
-        return await resolve(ref, encoded)
+        return await resolve(ref, encoded, **options)
 
     monkeypatch.setattr(h.item.provider, "_resolve_control_header", progressing)
     caplog.set_level(logging.INFO, logger="umi.competition_reward_history_progress")
@@ -110,7 +110,7 @@ async def test_changed_retained_dependency_during_ancestry_never_applies_cached_
     h, _, loads = await retained(history_case, monkeypatch)
     resolve = h.item.provider._resolve_control_header
 
-    async def progressing(ref, _):
+    async def progressing(ref, _, **options):
         raise progress_error(ref.block_number)
 
     monkeypatch.setattr(h.item.provider, "_resolve_control_header", progressing)
@@ -143,7 +143,7 @@ async def test_changed_bounded_interval_drops_previous_pending_batch(history_cas
     h, _, loads = await retained(history_case, monkeypatch)
     resolve = h.item.provider._resolve_control_header
 
-    async def progressing(ref, _):
+    async def progressing(ref, _, **options):
         raise progress_error(ref.block_number)
 
     monkeypatch.setattr(h.item.provider, "_resolve_control_header", progressing)
@@ -163,7 +163,7 @@ async def test_cancelled_pending_restore_drops_batch_and_preserves_completed_che
     resolve, entered = h.item.provider._resolve_control_header, asyncio.Event()
     attempts = 0
 
-    async def blocked(ref, _):
+    async def blocked(ref, _, **options):
         nonlocal attempts
         attempts += 1
         if attempts == 1:
@@ -202,7 +202,7 @@ async def test_writer_owner_failure_during_progress_drops_batch_and_drains_monit
             assert h.reader.progress.latest["stage_eta_seconds"] == 30
             raise ValueError("stopped owner lost")
 
-    async def progressing(ref, _):
+    async def progressing(ref, _, **options):
         raise progress_error(ref.block_number)
 
     monkeypatch.setattr(h.item.provider, "_resolve_control_header", progressing)
@@ -230,18 +230,22 @@ async def test_restore_stage_clock_includes_initial_metadata_load(history_case, 
     native_load = h.reader.checkpoints.load_many
     native_tip = h.reader._validate_checkpoint_tip
 
-    def delayed_load(*args):
-        values = native_load(*args)
+    def delayed_load(*args, **options):
+        values = native_load(*args, **options)
         clock[0] += 5
         return values
 
-    async def delayed_tip(*args):
-        result = await native_tip(*args)
+    async def delayed_tip(*args, **options):
+        result = await native_tip(*args, **options)
         clock[0] += 3
         return result
 
     # Do not change asyncio's global clock or a provider's signed clocks.
-    fake_time = SimpleNamespace(monotonic=lambda: clock[0])
+    fake_time = SimpleNamespace(
+        monotonic=lambda: clock[0],
+        gmtime=history_module.time.gmtime,
+        strftime=history_module.time.strftime,
+    )
     monkeypatch.setattr(history_module, "time", fake_time)
     monkeypatch.setattr(progress_module, "time", fake_time)
     monkeypatch.setattr(h.reader.checkpoints, "load_many", delayed_load)

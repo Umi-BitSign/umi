@@ -11,7 +11,7 @@ import fcntl
 import logging
 import os
 import sqlite3
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, closing, nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -612,10 +612,13 @@ async def test_migration_reports_bounded_progress_and_scope(
 async def test_malformed_retained_source_is_bounded_explicit_repair(admission_case, damage):
     c = admission_case
     await c.migrate()
-    with c.source.journal.transaction() as db:
-        if damage == "numeric_binding":
+    if damage == "numeric_binding":
+        # Model damaged storage outside the managed writer, which correctly
+        # refuses a malformed binding before committing its own transaction.
+        with closing(sqlite3.connect(c.source.journal.path, isolation_level=None)) as db:
             db.execute("UPDATE binding SET body=?", (10**12,))
-        else:
+    else:
+        with c.source.journal.transaction() as db:
             body = {
                 "numeric_vote": 10**12,
                 "text_vote": "{}",
