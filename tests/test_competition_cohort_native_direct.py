@@ -312,6 +312,9 @@ class NativeDirect:
                 h.cohort, maximum_bytes=1024**2, maximum_records=8
             )
         ]
+        # Intake exports retained consent by digest, not submission chronology.
+        # Deliver each original generation before issuing its replacement.
+        requests.sort(key=lambda request: request.signed_submission.submission.sequence)
         h.block += 5
         submitted = model_request(scenario, h.model, sequence=3, block=h.block)
         requests.append(submitted)
@@ -352,12 +355,12 @@ class NativeDirect:
             except asyncio.TimeoutError as error:
                 raise AssertionError(events[-10:]) from error
 
-        async def poll():
-            while True:
-                await o.service.direct_uploads.poll_once()
-                await asyncio.sleep(0.005)
-
-        task = asyncio.create_task(poll())
+        # Use the native reconciliation owner: an issued-selection race retries
+        # its metadata instead of terminating the poller during a live upload.
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            o.service._poll_component(stop, "direct_uploads", o.service._poll_direct_uploads)
+        )
         try:
             app = application(owner)
             for request in requests:
@@ -392,6 +395,7 @@ class NativeDirect:
                 self.provider.bytes_uploaded,
             )
         finally:
+            stop.set()
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task

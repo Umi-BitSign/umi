@@ -83,6 +83,17 @@ async def test_invocation_lease_covers_case_video_and_execution(
     case = SimpleNamespace(video_sha256="ab" * 32, case_id="inert")
     monkeypatch.setattr(sandbox, "case_role_model", lambda *_: (case, "candidate", object()))
     monkeypatch.setattr(sandbox, "prepared_runtime_authorization", lambda *_: None)
+    from umi import competition_cpu_efficiency_policy as efficiency
+
+    monkeypatch.setattr(efficiency, "prepared_cpu_efficiency_authorization", lambda *_: None)
+
+    @asynccontextmanager
+    async def cache_lease(*args, **kwargs):
+        # This focused lease test uses an inert model; cache behavior has its
+        # own native cases and must not run before the tested admission gate.
+        yield None
+
+    monkeypatch.setattr(sandbox, "model_cache_lease", cache_lease)
 
     def read(*_):
         assert held
