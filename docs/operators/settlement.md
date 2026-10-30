@@ -538,6 +538,18 @@ input frames are released, including through the series scheduler. A retry
 withdraws the current ETA until progress supplies a new sample; diagnostic sink
 failures cannot change the retry or cancellation result.
 
+Standing writer `standing_retry` warnings retain the exception class and, for
+R2 HTTP failures, the numeric status. Their `source_frames` field identifies the
+native module, function and line for each causal exception, bounded to eight
+causes and eight frames per cause. It omits exception messages, local variables,
+absolute paths, URLs and input values. Inspect the next ordinary retry to locate
+the failed predicate; this diagnostic does not rerun work or change signing,
+freshness, recovery or publication requirements. Installed native writers obtain
+this code through the qualified host-maintenance selection described in
+[validator upgrades](../validators/successor-upgrade.md); supervisor image
+polling does not replace host Python source. Miner upload clients and reference
+followers do not run this writer and need no protocol or artifact changes.
+
 Report the stage name with every percentage and ETA. Separate nested substages
 and repeated replays; do not add their percentages or describe a completed
 object inventory as completed certification. Use the native certified phase
