@@ -29,7 +29,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin 899c7c4520981a5996fab82d74bc7db6ee45eb57
+          git fetch --no-tags --depth=1 origin 899c7c4520981a5996fab82d74bc7db6ee45eb57 c6701a197968b7fc604c66e9b020e73ec134fa02
           python -m pip install --no-cache-dir uv==0.12.9
           uv sync --locked --extra dev --no-cache --python "$(command -v python)"
 

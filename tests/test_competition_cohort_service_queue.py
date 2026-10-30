@@ -741,7 +741,10 @@ def test_different_namespace_requires_native_migration_instead_of_rebinding(queu
     shutil.copytree(c.cfg.directory, target)
     with pytest.raises(
         ReservationValidationRepairRequired,
-        match="^reservation validation repair required: checkpoint or validation dependency changed$",
+        match=(
+            r"^reservation validation repair required: "
+            r"checkpoint or validation dependency changed$"
+        ),
     ):
         ServiceWorkQueue(c.cfg.model_copy(update={"directory": target}), c.h.batch["policy"])
 

@@ -11,6 +11,11 @@ import time
 from urllib.parse import parse_qs, unquote, urlsplit
 
 BASE = "899c7c4520981a5996fab82d74bc7db6ee45eb57"
+STYLE_PARENT = "c6701a197968b7fc604c66e9b020e73ec134fa02"
+STYLE_PATHS = (
+    "tests/test_competition_cohort_service_queue.py",
+    "tests/test_competition_registration_pin_background.py",
+)
 TESTS = """
 tests/test_competition_acceptance_stage_eta.py
 tests/test_competition_cohort_continued_model_retry.py
@@ -68,8 +73,16 @@ def main():
     started, stage = time.monotonic(), "format_and_manifest"
     manifest = source / "src/umi/competition_verification_rules.json"
     external = json.loads(manifest.read_bytes())["external_distributions"]
-    changed = subprocess.check_output(["git", "diff", "--name-only", BASE, "HEAD"], text=True).splitlines()
-    paths = [name for name in changed if name.startswith(("src/", "tests/")) and name.endswith(".py")]
+    changed = subprocess.check_output(
+        ["git", "diff", "--name-only", STYLE_PARENT, "HEAD", "--", "src", "tests"],
+        text=True,
+    ).splitlines()
+    # The preceding run completed formatting and reported lint failures only
+    # in these two files. Reuse its other unchanged results and its returned
+    # formatting patch; manifest generation and pytest have not run yet.
+    if set(changed) != set(STYLE_PATHS) | {"tests/test_host_memory_requests.py"}:
+        raise ValueError("style continuation differs from the reviewed three-file correction")
+    paths = list(STYLE_PATHS)
     if not 1 <= len(paths) <= 64:
         raise ValueError("expected a bounded nonempty source formatting scope")
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()

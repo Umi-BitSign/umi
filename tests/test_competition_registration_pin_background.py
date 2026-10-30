@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from umi.competition_cohort_service_host import ServiceAdmissionHost
 from umi.competition_cohort_readiness_wake import CohortReadinessWakes
+from umi.competition_cohort_service_host import ServiceAdmissionHost
 from umi.competition_registration_pins import RegistrationPinProjectionPending
 from umi.private_files import PrivateStateBusyError
 

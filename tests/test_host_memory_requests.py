@@ -548,7 +548,13 @@ async def test_stage_keeps_pin_owner_but_holds_intake_polling_until_stop(stage):
         pytest.fail("requests-only stage must not run intake or catalog reconciliation")
 
     host._poll_registration_pins = pins
-    for name in ("catalogs", "legacy_uploads", "direct_uploads", "reserved_participation", "models"):
+    for name in (
+        "catalogs",
+        "legacy_uploads",
+        "direct_uploads",
+        "reserved_participation",
+        "models",
+    ):
         setattr(host, "_poll_" + name, forbidden)
     with bind(stage):
         task = asyncio.create_task(host._poll(stop))
