@@ -40,7 +40,7 @@ async def test_cached_native_progress_survives_general_read_saturation(
         dict(cohort_sha256=C, stage="model_evaluation", completed=97, total=103, percent=94.175),
     )
     monkeypatch.setattr(cohort, "PUBLIC_COHORT_PROGRESS", snapshots)
-    monkeypatch.setattr(cohort, "CohortAdmissionQueue", lambda _: None)
+    monkeypatch.setattr(cohort, "CohortAdmissionQueue", lambda _: object())
     app.include_router(
         cohort.cohort_routes(
             SimpleNamespace(bindings={C: "authority"}),

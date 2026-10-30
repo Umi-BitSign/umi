@@ -914,6 +914,7 @@ async def test_real_lifecycle_node_seeds_and_publishes_with_selected_finality(
     host.service, host.policy, host.provider = h.host.service, h.policy, h
     host.config = SimpleNamespace(maximum_state_bytes=1024**3)
     host.root, host.nodes, host.stores, host.gate = tmp_path / "native-lifecycle", {}, {}, None
+    host.forecast_ledger = None
     with ExitStack() as host.resources:
         if selected_profile:
             with pytest.raises(OSError, match="owned height"):
