@@ -15,9 +15,7 @@ def cpuinfo(*, vendor="GenuineIntel", flags="", arm=False):
         if arm
         else f"vendor_id : {vendor}\ncpu family : 6\nmodel : 170\nmodel name : Same model"
     )
-    return "\n\n".join(
-        f"processor : {cpu}\n{identity}\nflags : {flags}" for cpu in range(4)
-    )
+    return "\n\n".join(f"processor : {cpu}\n{identity}\nflags : {flags}" for cpu in range(4))
 
 
 @pytest.fixture
@@ -36,7 +34,10 @@ def topology(tmp_path):
         cache = path / "cache/index0"
         cache.mkdir(parents=True)
         for name, value in {
-            "level": "1", "type": "Data", "size": "32K", "shared_cpu_list": str(cpu)
+            "level": "1",
+            "type": "Data",
+            "size": "32K",
+            "shared_cpu_list": str(cpu),
         }.items():
             (cache / name).write_text(value)
     return root
@@ -135,15 +136,21 @@ def test_invalid_exposed_capacity_is_not_treated_as_absent(topology, capacity):
 def test_stronger_topology_requires_fresh_profile_without_rewriting_old_digest(topology):
     expose(topology, (0, 1), core_type=2, capacity=1024)
     legacy = dict(
-        schema="umi-visible-slot-topology/1", numa=[(0,), (0,)], single_package=True,
+        schema="umi-visible-slot-topology/1",
+        numa=[(0,), (0,)],
+        single_package=True,
         unique_physical_cores=2,
-        cache_shape=[[
-            dict(level=1, type="Data", size="32K", slot_members=(index,), total_visible_members=1)
-        ] for index in range(2)],
+        cache_shape=[
+            [dict(level=1, type="Data", size="32K", slot_members=(index,), total_visible_members=1)]
+            for index in range(2)
+        ],
     )
     legacy_digest = hashlib.sha256(canonical_json_bytes(legacy)).hexdigest()
-    current = dict(legacy, schema="umi-visible-slot-topology/2",
-                   core_class=slot_core_class(topology, (0, 1), cpuinfo=cpuinfo()))
+    current = dict(
+        legacy,
+        schema="umi-visible-slot-topology/2",
+        core_class=slot_core_class(topology, (0, 1), cpuinfo=cpuinfo()),
+    )
     expected = hashlib.sha256(canonical_json_bytes(current)).hexdigest()
     assert slot_topology(topology, (0, 1), (0,), cpuinfo=cpuinfo()) == expected
     assert expected != legacy_digest

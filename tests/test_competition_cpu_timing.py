@@ -430,9 +430,7 @@ def ancestor_kernel(kernel):
     parent.rename(moved)
     for directory in (shared, slot):
         (directory / "cpu.max").write_text("max 100000")
-        (directory / "cpu.stat").write_text(
-            "usage_usec 100\nnr_throttled 4\nthrottled_usec 500\n"
-        )
+        (directory / "cpu.stat").write_text("usage_usec 100\nnr_throttled 4\nthrottled_usec 500\n")
     return root, moved, proc, ctx
 
 
@@ -442,9 +440,11 @@ def test_finite_shared_ancestor_quota_refuses_even_when_large(ancestor_kernel, a
     root, parent, _, _ = ancestor_kernel
     directory = {"root": root, "shared": parent.parent.parent, "slot": parent.parent}[ancestor]
     (directory / "cpu.max").write_text(quota)
-    with sampler(ancestor_kernel) as reader:
-        with pytest.raises(timing.CpuTimingInfrastructureError, match="ancestor_cpu_quota_limited"):
-            reader.check_context()
+    with (
+        sampler(ancestor_kernel) as reader,
+        pytest.raises(timing.CpuTimingInfrastructureError, match="ancestor_cpu_quota_limited"),
+    ):
+        reader.check_context()
 
 
 @pytest.mark.parametrize("ancestor", ["shared", "slot"])

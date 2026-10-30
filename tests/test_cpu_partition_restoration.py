@@ -32,7 +32,9 @@ def test_active_pool_refuses_startup_restoration_before_mutation(monkeypatch):
     assert writes == []
 
 
-def test_restored_shared_slot_has_no_quota_but_owned_payloads_keep_exact_limit(tmp_path, monkeypatch):
+def test_restored_shared_slot_has_no_quota_but_owned_payloads_keep_exact_limit(
+    tmp_path, monkeypatch
+):
     from umi import host_cpu_partition as module
 
     root = tmp_path / "cgroup"
@@ -40,7 +42,12 @@ def test_restored_shared_slot_has_no_quota_but_owned_payloads_keep_exact_limit(t
     unit = domain / "umi-cpu-partition.service"
     partition = unit / "models"
     (unit / "setup").mkdir(parents=True)
-    for name, path in {"ROOT": root, "DOMAIN": domain, "UNIT": unit, "PARTITION": partition}.items():
+    for name, path in {
+        "ROOT": root,
+        "DOMAIN": domain,
+        "UNIT": unit,
+        "PARTITION": partition,
+    }.items():
         monkeypatch.setattr(module, name, path)
     locks = tmp_path / "locks"
     locks.mkdir()

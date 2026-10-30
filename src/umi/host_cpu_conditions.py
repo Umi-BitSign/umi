@@ -81,8 +81,16 @@ def slot_core_class(cpu_root, cpu_ids, *, cpuinfo=None):
         identity = {
             key: fields[key]
             for key in (
-                "vendor_id", "cpu family", "model", "model name", "stepping",
-                "CPU implementer", "CPU architecture", "CPU variant", "CPU part", "CPU revision",
+                "vendor_id",
+                "cpu family",
+                "model",
+                "model name",
+                "stepping",
+                "CPU implementer",
+                "CPU architecture",
+                "CPU variant",
+                "CPU part",
+                "CPU revision",
             )
             if key in fields
         }
@@ -101,10 +109,12 @@ def slot_core_class(cpu_root, cpu_ids, *, cpuinfo=None):
     exposed = []
     for cpu in cpu_ids:
         path = Path(cpu_root) / f"cpu{cpu}"
-        exposed.append((
-            _optional_core_property(path / "topology/core_type", maximum=255, allow_zero=True),
-            _optional_core_property(path / "cpu_capacity", maximum=2**31 - 1),
-        ))
+        exposed.append(
+            (
+                _optional_core_property(path / "topology/core_type", maximum=255, allow_zero=True),
+                _optional_core_property(path / "cpu_capacity", maximum=2**31 - 1),
+            )
+        )
     if any(value != exposed[0] for value in exposed):
         _fail("cpu_condition_heterogeneous_core_class")
     core_type, capacity = exposed[0]
@@ -125,8 +135,12 @@ def slot_core_class(cpu_root, cpu_ids, *, cpuinfo=None):
     else:
         _fail("cpu_condition_core_class_unqualified")
     return dict(
-        schema="umi-visible-core-class/1", basis=basis, core_type=core_type,
-        cpu_capacity=capacity, physical_placement="not_established", **visible,
+        schema="umi-visible-core-class/1",
+        basis=basis,
+        core_type=core_type,
+        cpu_capacity=capacity,
+        physical_placement="not_established",
+        **visible,
     )
 
 

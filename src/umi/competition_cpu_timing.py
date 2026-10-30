@@ -641,7 +641,9 @@ class CpuTimingSampler:
             counters = _key_values(self._read_at(descriptor, "cpu.stat"))
             current_counters = counters["nr_throttled"], counters["throttled_usec"]
             previous = self._ancestor_counters.setdefault(path, current_counters)
-            if any(after < before for before, after in zip(previous, current_counters, strict=True)):
+            if any(
+                after < before for before, after in zip(previous, current_counters, strict=True)
+            ):
                 _fail("cpu_timing_ancestor_counter_reset")
             if current_counters != previous:
                 _fail("cpu_timing_ancestor_cpu_throttled")
