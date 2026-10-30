@@ -453,7 +453,7 @@ def configure_model_reviews(o, root, client, signatures):
 
 
 async def certify_requests(
-    o, app, root, monkeypatch, signatures, admission_probe=None, *, model_only=False
+    o, app, root, monkeypatch, signatures, admission_probe=None, *, no_endpoint_participant=False
 ):
     """Use native request observation, review and handoff with synthetic readiness.
 
@@ -463,12 +463,15 @@ async def certify_requests(
     h = o.h
     cohort_index = tuple(digest(p) for p in o.config.series.cohorts).index(h.cohort)
     assert (await o.service.poll_once())["catalogs_installed"] == cohort_index + 1
-    if model_only:
+    if no_endpoint_participant:
+        # An empty endpoint roster does not disable a track in the signed round.
+        model_only = "endpoint" not in o.config.lifecycle.sources.eligible_tracks
         for catalog in h.catalogs:
             if catalog.catalog.cohort_sha256 == h.cohort:
                 readiness = await o.service.api.readiness(digest(catalog.catalog), "ab" * 16)
-                assert readiness["reason_code"] == "model_only"
-                assert readiness["new_claims_closed"] and not readiness["ready"]
+                assert readiness["reason_code"] == ("model_only" if model_only else "accepting")
+                assert readiness["ready"] is not model_only
+                assert readiness.get("new_claims_closed", False) is model_only
     node = await app.state.lifecycle.node(h.cohort)
     await node._driver("requests")
     source = app.state.lifecycle.requests[h.cohort]
@@ -1004,7 +1007,7 @@ async def run_pipeline(
                 monkeypatch,
                 signatures,
                 admission_probe,
-                model_only=not mixed,
+                no_endpoint_participant=not mixed,
             )
             assert max(signatures.values()) == 1
             settled = await run_settlement(

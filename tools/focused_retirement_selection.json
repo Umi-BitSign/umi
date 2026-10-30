@@ -1,0 +1,74 @@
+{
+  "schema": "umi-focused-source-groups/1",
+  "qualified_runtime_revision": "db78a4536d556c26c341a039a8ffb2470ac440cc",
+  "manifest_sha256": "892b9f4c28c4bb4c0e29101a580ed4474c709370ad75afa00b45261b6c1f0885",
+  "reuse_basis": [
+    "81pass v5",
+    "165pass native189-reuse-decision-v1"
+  ],
+  "groups": {
+    "native_model": {
+      "python": "3.12.14",
+      "limit_seconds": 2100,
+      "format_fixture": true,
+      "nodes": [
+        "tests/test_competition_cohort_native_pipeline.py::test_accepted_model_reaches_native_reward_package[normal-precommit_model_inventory]",
+        "tests/test_competition_cohort_native_pipeline.py::test_accepted_model_reaches_native_reward_package[outage-restart-precommit_model_inventory]"
+      ]
+    },
+    "native_reference": {
+      "python": "3.12.14",
+      "limit_seconds": 2100,
+      "format_fixture": false,
+      "nodes": [
+        "tests/test_competition_cohort_native_reference_compatibility.py::test_mixed_reference_encodings_survive_interrupted_native_certified_rewards[mixed-precommit_model_inventory]"
+      ]
+    },
+    "changed_assertions": {
+      "python": "3.12.14",
+      "limit_seconds": 1500,
+      "format_fixture": false,
+      "nodes": [
+        "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-allowance]",
+        "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-assignment]",
+        "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-complete]",
+        "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-consumption]",
+        "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-order_allowance]",
+        "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-profile]",
+        "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-proof]",
+        "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/1-qualification]",
+        "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-allowance]",
+        "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-assignment]",
+        "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-complete]",
+        "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-consumption]",
+        "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-order_allowance]",
+        "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-profile]",
+        "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-proof]",
+        "tests/test_competition_order_continuation.py::test_continuation_rejects_changed_native_bindings[umi-open-competition-policy/2-qualification]",
+        "tests/test_competition_order_continuation.py::test_missing_completed_admission_cannot_use_continuation[umi-open-competition-policy/1-complete]",
+        "tests/test_competition_order_continuation.py::test_missing_completed_admission_cannot_use_continuation[umi-open-competition-policy/1-manifest]",
+        "tests/test_competition_order_continuation.py::test_missing_completed_admission_cannot_use_continuation[umi-open-competition-policy/2-complete]",
+        "tests/test_competition_order_continuation.py::test_missing_completed_admission_cannot_use_continuation[umi-open-competition-policy/2-manifest]",
+        "tests/test_competition_reward_preparation.py::test_native_settlement_controller_resumes_original_votes_after_peer_outage[progress-standing]",
+        "tests/test_competition_reward_preparation.py::test_native_settlement_controller_resumes_original_votes_after_peer_outage[transition-standing]",
+        "tests/test_competition_reward_preparation.py::test_settlement_serialization_scope_preserves_native_checks_and_package_bytes[standing]",
+        "tests/test_competition_cohort_continued_model_retry.py::test_continued_retry_refuses_missing_or_changed_owned_facts_without_payload_reads[missing_byte_result-model-awards-legacy6]",
+        "tests/test_competition_cohort_continued_model_retry.py::test_continued_retry_refuses_missing_or_changed_owned_facts_without_payload_reads[damaged_byte_result-model-awards-legacy6]",
+        "tests/test_competition_cohort_continued_model_retry.py::test_continued_retry_refuses_missing_or_changed_owned_facts_without_payload_reads[missing_byte_receipt-model-awards-legacy6]"
+      ]
+    },
+    "adoption_py310": {
+      "python": "3.10",
+      "limit_seconds": 1500,
+      "format_fixture": false,
+      "nodes": [
+        "tests/test_competition_cohort_suite_adoption_api.py::test_first_qualification_keeps_owner_locks_free_and_rechecks_only_bound_identities[none-prepare]",
+        "tests/test_competition_cohort_suite_adoption_api.py::test_first_qualification_keeps_owner_locks_free_and_rechecks_only_bound_identities[none-reserve]",
+        "tests/test_competition_cohort_suite_adoption_api.py::test_first_qualification_keeps_owner_locks_free_and_rechecks_only_bound_identities[tip-prepare]",
+        "tests/test_competition_cohort_suite_adoption_api.py::test_first_qualification_keeps_owner_locks_free_and_rechecks_only_bound_identities[tip-reserve]",
+        "tests/test_competition_cohort_suite_adoption_api.py::test_first_qualification_keeps_owner_locks_free_and_rechecks_only_bound_identities[input-prepare]",
+        "tests/test_competition_cohort_suite_adoption_api.py::test_first_qualification_keeps_owner_locks_free_and_rechecks_only_bound_identities[input-reserve]"
+      ]
+    }
+  }
+}
