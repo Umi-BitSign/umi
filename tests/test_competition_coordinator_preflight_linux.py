@@ -11,6 +11,7 @@ import json
 import os
 import secrets
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -19,7 +20,12 @@ import pytest
 from umi import competition_coordinator_namespace as coordinator
 from umi import competition_initial_upgrade as upgrade
 
-from .coordinator_rehearsal import LEGACY_FRAGMENT, coordinator_roots, fixture_validator_hotkey
+from .coordinator_rehearsal import (
+    LEGACY_FRAGMENT,
+    coordinator_roots,
+    fixture_validator_hotkey,
+    preflight_failure_journal,
+)
 from .test_competition_chain import chain_config as chain_config
 from .test_competition_initial_preflight_linux import (
     _signed_preflight_case,
@@ -82,6 +88,7 @@ def test_each_rooted_signed_host_stages_and_rehearses_without_cross_instance_sta
         before_other = sorted(path.name for path in other_state.iterdir())
         _command("/usr/bin/loginctl", "enable-linger", user.pw_name)
         _command("/usr/bin/systemctl", "start", f"user@{user.pw_uid}.service")
+        started = time.time()
         pid = os.fork()
         if pid == 0:
             try:
@@ -116,7 +123,9 @@ def test_each_rooted_signed_host_stages_and_rehearses_without_cross_instance_sta
                 case.tree.recheck()
                 _write(run / "result.json", json.dumps({"preflight": "passed"}))
             except BaseException:
-                _write(run / "failure.txt", traceback.format_exc())
+                _write(
+                    run / "failure.txt", traceback.format_exc() + preflight_failure_journal(started)
+                )
                 os._exit(1)
             os._exit(0)
         _, status = os.waitpid(pid, 0)

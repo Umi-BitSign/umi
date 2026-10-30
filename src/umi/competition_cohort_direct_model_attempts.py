@@ -33,8 +33,7 @@ _HEADS_SQL = (
 )
 _POLL_CURSOR = "direct_upload_poll_cursor"
 _POLL_CURSOR_SQL = (
-    f"CREATE TABLE {_POLL_CURSOR} (id INTEGER PRIMARY KEY CHECK(id=1), "
-    "after_key TEXT NOT NULL)"
+    f"CREATE TABLE {_POLL_CURSOR} (id INTEGER PRIMARY KEY CHECK(id=1), after_key TEXT NOT NULL)"
 )
 
 

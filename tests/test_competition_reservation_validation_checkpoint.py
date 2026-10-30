@@ -318,8 +318,11 @@ def test_checkpoint_count_integrity_does_not_shorten_service_review_envelope(
 def test_checkpoint_still_refuses_invalid_count_integrity(tmp_path, count):
     journal = RoundJournal(tmp_path / "journal", {})
     journal.reserve_records("batch", ())
-    with journal.read_transaction() as db, pytest.raises(
-        checkpoint.ReservationValidationRepairRequired,
-        match="checkpoint or validation dependency changed",
+    with (
+        journal.read_transaction() as db,
+        pytest.raises(
+            checkpoint.ReservationValidationRepairRequired,
+            match="checkpoint or validation dependency changed",
+        ),
     ):
         checkpoint.check(journal, AggregateCountSnapshot(db, count))

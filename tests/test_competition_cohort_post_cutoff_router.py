@@ -70,9 +70,7 @@ async def reserved_router(delivery, tmp_path, monkeypatch, request):
     )
 
     async def authorize(value):
-        authorize_model_delivery(
-            intake, value, capture_at(212), mechanism="direct_r2_multipart_v1"
-        )
+        authorize_model_delivery(intake, value, capture_at(212), mechanism="direct_r2_multipart_v1")
 
     async def sign(value):
         return sign_object(value, wallet("Charlie"))
@@ -169,9 +167,7 @@ async def test_issued_upload_uses_real_router_outside_intake_lock(
             concurrent.append(h.intake.retain(value, capture_at(212), reservation=original))
         return original
 
-    receipt = h.intake.retain(
-        h.request, capture_at(220), reservation_provider=original_reservation
-    )
+    receipt = h.intake.retain(h.request, capture_at(220), reservation_provider=original_reservation)
     assert lookups == [h.request]
     assert events[0] == "reservation", "post-cutoff deferral needlessly replayed history"
     assert receipt["certified"] is False
@@ -181,9 +177,10 @@ async def test_issued_upload_uses_real_router_outside_intake_lock(
     def unnecessary_lookup(_):
         pytest.fail("an exact retained receipt must not call the reservation provider")
 
-    assert h.intake.retain(
-        h.request, capture_at(230), reservation_provider=unnecessary_lookup
-    ) == receipt
+    assert (
+        h.intake.retain(h.request, capture_at(230), reservation_provider=unnecessary_lookup)
+        == receipt
+    )
     assert h.direct.admission_reservation(h.request) == h.reservation
     with h.intake._connection() as (db, _):
         assert db.execute("SELECT COUNT(*) FROM cohort_consents").fetchone() == (1,)
@@ -239,9 +236,7 @@ async def test_cutoff_crossed_during_native_history_read_defers_router_lookup(
         return h.router.admission_reservation(value)
 
     monkeypatch.setattr(CohortRecoveryStore, "published_history", crossing)
-    receipt = h.intake.retain(
-        h.request, capture_at(220), reservation_provider=original_reservation
-    )
+    receipt = h.intake.retain(h.request, capture_at(220), reservation_provider=original_reservation)
     assert receipt["certified"] is False
     assert lookups == [h.request]
     with h.intake._connection() as (db, _):

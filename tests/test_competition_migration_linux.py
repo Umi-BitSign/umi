@@ -18,6 +18,7 @@ import os
 import secrets
 import shutil
 import sys
+import time
 import traceback
 from pathlib import Path
 from types import SimpleNamespace
@@ -40,6 +41,7 @@ from .coordinator_rehearsal import (
     LEGACY_FRAGMENT,
     coordinator_roots,
     fixture_validator_hotkey,
+    preflight_failure_journal,
     rooted_podman,
 )
 from .test_competition_bridge_recovery import add_attempt
@@ -262,6 +264,7 @@ def _prepare_legacy(layout, user, target, signer, *, pending=False):
 
 
 def _fork(run, label, action, *, exit_code=0):
+    started = time.time()
     pid = os.fork()
     if pid == 0:
         try:
@@ -281,6 +284,7 @@ def _fork(run, label, action, *, exit_code=0):
                         failure += "\n" + json.dumps({"unit": unit, "snapshot": values})
                     except BaseException as error:
                         failure += "\nfixture snapshot unavailable: " + type(error).__name__
+            failure += preflight_failure_journal(started)
             _write(run / (label + "-failure.txt"), failure)
             os._exit(1)
         os._exit(0)
