@@ -50,7 +50,8 @@ async def retain(t, encoded=None):
     )
 
 
-async def test_original_context_and_signed_bytes_survive_restart(retained):
+@pytest.mark.parametrize("reopened_bytes", [16 * 1024**2, 32 * 1024**3])
+async def test_original_context_and_signed_bytes_survive_restart(retained, reopened_bytes):
     t = retained
     unsigned = await reserve(t)
     assert unsigned.signed is None and unsigned.chain_submission_authorized is False
@@ -60,7 +61,9 @@ async def test_original_context_and_signed_bytes_survive_restart(retained):
     assert t.journal.pending() == unsigned
     signed = await retain(t)
     assert bytes.fromhex(signed.signed.signed_extrinsic) == t.encoded
-    t.journal = t.reopen(maximum_bytes=16 * 1024**2)
+    inode = t.journal.journal.path.stat().st_ino
+    t.journal = t.reopen(maximum_bytes=reopened_bytes)
+    assert t.journal.journal.path.stat().st_ino == inode
     assert t.journal.pending() == signed == await reserve(t) == await retain(t)
     assert signed.chain_submission_authorized is False
     for original in (

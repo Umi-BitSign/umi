@@ -28,6 +28,7 @@ Block = Annotated[int, Field(ge=1, le=2**53 - 1)]
 MAX_CONTEXT_BYTES = 32 * 1024**2
 MAX_INTENT_BYTES = 128 * 1024
 MAX_SIGNED_RECORD_BYTES = 2 * MAX_SIGNED_EXTRINSIC_BYTES + 1024
+MAX_STANDING_JOURNAL_BYTES = 512 * 1024**3
 _END_ISSUER = object()
 
 
@@ -232,6 +233,12 @@ class StandingWeightSuccessor(StrictProtocolModel):
     prior_signed_extrinsic_hash: BlockHash | None
 
 
+class _StandingWeightRecordJournal(RoundJournal):
+    """Standing retention uses its service allowance without changing round limits."""
+
+    MAXIMUM_BYTES = MAX_STANDING_JOURNAL_BYTES
+
+
 class StandingWeightJournal:
     """Reuse the common journal's locking, atomic writes and capacity reservations.
 
@@ -263,7 +270,7 @@ class StandingWeightJournal:
                 or any(c not in "0123456789abcdef" for c in value)
             ):
                 raise ValueError("standing journal digest is invalid")
-        self.journal = RoundJournal(
+        self.journal = _StandingWeightRecordJournal(
             root,
             self.binding,
             maximum_bytes=maximum_bytes,

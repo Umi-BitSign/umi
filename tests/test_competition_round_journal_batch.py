@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import os
 import sqlite3
 import threading
@@ -502,7 +503,16 @@ def test_batch_existing_hold_blocks_all_new_records(journal):
     assert retained(journal) == before
 
 
-def test_batch_kind_capacity_rolls_back_earlier_records(journal):
+def capacity_logs(caplog):
+    prefix = "round_journal_capacity_exhausted "
+    return [
+        ast.literal_eval(record.getMessage()[len(prefix) :])
+        for record in caplog.records
+        if record.name == rounds.__name__ and record.getMessage().startswith(prefix)
+    ]
+
+
+def test_batch_kind_capacity_rolls_back_earlier_records(journal, caplog, http_log_redaction):
     journal.put("work", "retained", {"keep": True})
     before = retained(journal)
     with pytest.raises(ValueError, match="record capacity exhausted"):
@@ -512,10 +522,17 @@ def test_batch_kind_capacity_rolls_back_earlier_records(journal):
         )
     assert retained(journal) == before
     assert holds(journal) == []
+    (diagnostic,) = capacity_logs(caplog)
+    assert diagnostic["kind_count"] == diagnostic["maximum_rounds"] == 2
+    assert diagnostic["kind_limit_exceeded"] is True
+    assert diagnostic["record_limit_exceeded"] is diagnostic["byte_limit_exceeded"] is False
+    assert all(type(value) in {int, bool} for value in diagnostic.values())
 
 
 @pytest.mark.parametrize("capacity", ["records", "bytes"])
-def test_batch_total_capacity_rolls_back_earlier_records(tmp_path, capacity):
+def test_batch_total_capacity_rolls_back_earlier_records(
+    tmp_path, capacity, monkeypatch, caplog, http_log_redaction
+):
     journal = rounds.RoundJournal(
         tmp_path / "journal",
         {},
@@ -531,14 +548,46 @@ def test_batch_total_capacity_rolls_back_earlier_records(tmp_path, capacity):
         journal.put("work", "retained", {})
         records = (("work", "new-a", "x" * 600), ("work", "new-b", "y" * 600))
     before = retained(journal)
-    with pytest.raises(ValueError, match="round journal capacity exhausted"):
+    reads, capacity_reads = [], []
+    read, read_capacity = journal._record, journal._record_capacity
+
+    def tracked_read(db, kind, key):
+        reads.append((kind, key))
+        return read(db, kind, key)
+
+    def tracked_capacity(db):
+        capacity_reads.append(True)
+        return read_capacity(db)
+
+    monkeypatch.setattr(journal, "_record", tracked_read)
+    monkeypatch.setattr(journal, "_record_capacity", tracked_capacity)
+    with pytest.raises(ValueError, match="round journal capacity exhausted") as caught:
         journal.put_many(records)
+    assert type(caught.value) is ValueError
+    assert reads == [(kind, key) for kind, key, _ in records]
+    assert capacity_reads == [True]
     assert retained(journal) == before
     assert holds(journal) == []
+    (diagnostic,) = capacity_logs(caplog)
+    assert diagnostic == {
+        "used_bytes": 160 if capacity == "records" else 604,
+        "extra_bytes": 2 if capacity == "records" else 602,
+        "maximum_bytes": 4096 if capacity == "records" else 1024,
+        "record_count": 80 if capacity == "records" else 2,
+        "extra_count": 1,
+        "maximum_records": 80,
+        "kind_count": 80 if capacity == "records" else 2,
+        "maximum_rounds": 1,
+        "byte_limit_exceeded": capacity == "bytes",
+        "record_limit_exceeded": capacity == "records",
+        "kind_limit_exceeded": False,
+    }
 
 
 @pytest.mark.parametrize("conflict", ["retained", "duplicate"])
-def test_capacity_exhaustion_does_not_hide_later_conflicts(tmp_path, conflict):
+def test_capacity_exhaustion_does_not_hide_later_conflicts(
+    tmp_path, conflict, caplog, http_log_redaction
+):
     journal = rounds.RoundJournal(tmp_path / "journal", {}, maximum_rounds=1, maximum_bytes=1024)
     journal.put("work", "retained", {"v": 1})
     records = [("work", "new-a", "x" * 600), ("work", "new-b", "y" * 600)]
@@ -550,11 +599,25 @@ def test_capacity_exhaustion_does_not_hide_later_conflicts(tmp_path, conflict):
         conflicted = "new-b"
     with pytest.raises(ValueError, match="conflict retained"):
         journal.put_many(records)
+    assert capacity_logs(caplog) == []
     assert holds(journal) == [(conflicted,)]
     with journal.transaction() as db:
         assert db.execute("SELECT kind,id,body FROM records").fetchall() == [
             ("work", "retained", canonical_json_bytes({"v": 1}))
         ]
+
+
+def test_capacity_log_failure_preserves_original_refusal_and_rollback(tmp_path, monkeypatch):
+    journal = rounds.RoundJournal(tmp_path / "journal", {}, maximum_bytes=1024)
+
+    def broken_logger(*args, **kwargs):
+        raise RuntimeError("logging unavailable")
+
+    monkeypatch.setattr(rounds.logger, "warning", broken_logger)
+    with pytest.raises(ValueError, match="round journal capacity exhausted") as caught:
+        journal.put_many((("work", "a", "x" * 600), ("work", "b", "y" * 600)))
+    assert type(caught.value) is ValueError
+    assert journal.keys("work") == []
 
 
 @pytest.mark.parametrize("retry", [False, True])

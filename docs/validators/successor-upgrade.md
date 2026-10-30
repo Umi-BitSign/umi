@@ -1270,6 +1270,26 @@ signer/executor startup. A
 exception text or credentials. A stage entry records attempted work; use the
 retained journal and finalized chain update to confirm completion.
 
+The standing writer's `service.maximum_journal_bytes` and its actual journal
+constructor both accept 1 KiB through 512 GiB. This is a logical retention
+allowance, not a physical disk reservation; ordinary round journals retain their
+16 GiB ceiling. A supported host update can first select the corrected source
+with the existing boot, then adopt a separately qualified larger writer allowance
+without changing the original journal directory, binding or signed records.
+Retain the selected boot through subsequent automatic host updates. Capacity
+changes still require the normal disk and memory admission and authenticated
+host-selection path; do not patch an installed signed tree or reset the journal.
+This host-local change needs no new miner protocol or approved-row follower format.
+
+An actual batch capacity refusal emits `round_journal_capacity_exhausted` with
+numeric byte, record and per-kind counters and flags identifying the exhausted
+limit. Counters include preceding staged entries in the same batch; that whole
+batch is rolled back. The log reuses the transaction's existing counters without
+additional database or proof reads and contains no record keys or payloads.
+Conflicts keep precedence over capacity, and the original `ValueError` remains
+unchanged. Logical counters do not establish SQLite physical growth or justify
+reducing operating reserves.
+
 Legacy handoff reports separate `legacy_handoff_packages` and
 `legacy_handoff_expiry` work inventories, elapsed time and stage ETAs. Retained
 successor continuations use the shared checked history reader rather than

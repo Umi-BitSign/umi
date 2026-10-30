@@ -135,13 +135,14 @@ async def installed(migration, monkeypatch, tmp_path):
     c.publish = publish
     c.publish(canonical_json_bytes(c.approval))
     monkeypatch.setattr(activation, "_root_owner_uid", os.getuid)
+    c.maximum_journal_bytes = 128 * 1024**2
     c.bind = lambda runtime, handoff: bind_standing_reward_host(
         runtime,
         approval_path=c.approval_path,
         preparation=c.preparation,
         first=c.prepared,
         handoff=handoff,
-        maximum_journal_bytes=128 * 1024**2,
+        maximum_journal_bytes=c.maximum_journal_bytes,
     )
     c.check = lambda bound: bound.recheck(
         journal=bound.journal,
@@ -152,8 +153,10 @@ async def installed(migration, monkeypatch, tmp_path):
     return c
 
 
-async def test_binding_reopens_original_journal_after_restart(installed):
+@pytest.mark.parametrize("maximum_bytes", [128 * 1024**2, 32 * 1024**3])
+async def test_binding_reopens_original_journal_after_restart(installed, maximum_bytes):
     c = installed
+    c.maximum_journal_bytes = maximum_bytes
     identities = []
     for _ in range(2):
         async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
