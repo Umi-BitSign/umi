@@ -8,6 +8,7 @@ Neither case qualifies installed rewards or production chain effects.
 
 import asyncio
 import hashlib
+import traceback
 from collections import Counter
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -756,7 +757,7 @@ async def run_pipeline(
         # After an outage the fair scheduler may visit a background cohort
         # before retrying this latest entry. Verify actual successful exports
         # and the exact retained certificate, rather than one-poll placement.
-        exports, recovery_reports = [], []
+        exports, recovery_reports, recovery_errors = [], [], []
         native_export = o.service.models.owner.export
         target = (h.cohort, digest(submitted.signed_submission.submission))
 
@@ -765,14 +766,30 @@ async def run_pipeline(
             exports.append((cohort, submission))
             return result
 
+        native_one = o.service.models._one
+
+        async def observe_one(*args, **kwargs):
+            try:
+                return await native_one(*args, **kwargs)
+            except Exception as error:
+                if not recovery_errors:
+                    recovery_errors.append(
+                        {"repr": repr(error), "traceback": traceback.format_exc(limit=40)}
+                    )
+                raise
+
         with monkeypatch.context() as recovery:
             recovery.setattr(o.service.models.owner, "export", record_export)
+            recovery.setattr(o.service.models, "_one", observe_one)
             for _ in range(2 * len(h.intake.config.cohorts) + 1):
                 recovery_reports.append(await o.service.models.poll_once())
                 if target in exports:
                     break
             else:
-                pytest.fail(f"latest certificate did not recover: {recovery_reports}")
+                pytest.fail(
+                    f"latest certificate did not recover: {recovery_reports}; "
+                    f"first native failure: {recovery_errors}"
+                )
         assert sum(r["entries_exported"] for r in recovery_reports) == len(exports)
         assert all(signatures[k] == count for k, count in original_votes.items())
         accepted_artifact = o.service.models.owner.retained(*target)
