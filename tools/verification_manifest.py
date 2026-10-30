@@ -76,6 +76,9 @@ seeds = [
     "competition_cohort_model_delivery_candidate",
     "competition_cohort_review_config",
     "competition_cohort_service_host",
+    # The signed batch-adoption producer uses runpy and imports its stable
+    # request model, operator and series path outside the standing host graph.
+    "competition_cohort_model_batch_adoption_cli",
     "competition_model_byte_store_cli",
     "competition_miner_transition_cli",
 ]
@@ -131,11 +134,12 @@ body = {
         "shared_incumbent_source_terminal_v2": "umi-native-shared-incumbent/2",
         "shared_incumbent_source_participant_v2": "umi-native-shared-incumbent/2",
     },
-    "compatibility_basis": (
+    "compatibility_basis": prior.get(
+        "compatibility_basis",
         "Native signed closure, endpoint ancestry/content, execution, paid-work, restart, "
         "interruption and reward lifecycle fixture parity; source manifest alone does not "
         "establish certification. Update only after qualification; advance ABI when "
-        "accepted semantics change."
+        "accepted semantics change.",
     ),
     "sources": {
         n + ".py": hashlib.sha256((ROOT / (n + ".py")).read_bytes()).hexdigest()

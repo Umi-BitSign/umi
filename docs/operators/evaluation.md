@@ -70,6 +70,13 @@ Missing or inconsistent source metadata holds readiness; actual materialization
 and execution retain their existing byte-verification requirements and durable
 completed results.
 
+An inherited baseline does not require every evaluator to have reviewed its
+original upload. The [certified baseline source path](promotion.md) authenticates
+its original metadata and retains that result separately from local review
+votes. Deploy the compatible native evaluator reader through its supported
+source-selection path while preserving the existing execution journal. The
+upload protocol and signed baseline do not change; miners do not resubmit.
+
 <a id="open-competition-evaluator--inputs-and-identity"></a>
 
 ### Inputs and identity
@@ -372,7 +379,10 @@ read-then-write decisions retain the writer transaction. Every snapshot checks
 current conflict holds, journal generation and reservation fences; this is not a
 cache of mutable authorization state.
 
-Inbox assignment readers release that snapshot before static proof validation.
+Inbox assignment readers copy bounded originals and release that snapshot before
+canonical validation, hashing and static proof validation. Self-owned single-record
+reads also close before canonical validation; borrowed transactions remain owned
+by their caller. Fresh conflict and authority checks still apply.
 Concurrent local readers of the same exact assignment share its first successful
 validation, then receive separate private copies. Changed retained bytes, owner
 bindings or conflict holds still require their normal checks; current finality
@@ -727,6 +737,13 @@ reruns would be identical. Failures remain failures, and an unfinished source
 holds its consumers. Started legacy jobs keep their original recovery path and
 cannot be retroactively selected as the source.
 
+Consumers waiting for that fixed source defer before reserving model-cache,
+preparation or inference capacity. This leaves capacity available when an
+interrupted source resumes its saved steps. The scheduling check grants no
+execution authority: the normal current-history, source and reuse checks still
+apply before inference. A missing or damaged selected source requires repair;
+waiting never replaces it or repeats completed source inference.
+
 Shared evidence, execution archives and partial manifests use `/2`, explicitly
 referencing the original signed source terminal and the original reservation and
 reuse observations. Readers authenticate the source assignment and participation,
@@ -752,7 +769,12 @@ not downgrade any consumer that may read `/2` evidence.
 With an explicit boot-disk model cache, CPU model evaluation retains a bounded
 set of model archives under the existing shared allocation and filesystem reserves. It
 finishes a paired assignment's case/role steps before rotating to another model,
-keeping candidate and reference bytes resident when they fit. Each step still
+keeping the models needed for remaining inference resident when they fit. An
+authenticated shared-incumbent consumer reserves and restores only its candidate;
+the reference observations retain their original source evidence. The ordinary
+evidence/reuse pass supplies this private scheduling decision, including after
+restart. A readiness hint alone cannot omit the reference, and the first source
+producer and legacy independent jobs retain both models. Each step still
 uses its original authority checks, inference deadline and durable result.
 Candidate observations are never borrowed from another assignment. The original
 `archive` slot and interrupted transfers stay in place across upgrades. The idle
@@ -782,6 +804,12 @@ so an ordinary long inference is not classified as a sixty-second byte-transfer
 stall. This changes telemetry only; signed clocks and inference deadlines remain
 unchanged. `model_pair_queue` and `model_cache_capacity` distinguish initial
 physical admission and a subsequent external capacity loss.
+The queue reason distinguishes allocation ownership, an individual model's size,
+incoming or active exclusive work, pair concurrency, slot count and cumulative
+model bytes. Matching `model_pair_capacity` events include the decision's existing
+counts and limits without another filesystem scan. Waiting has no measured ETA
+until the blocking owner or capacity changes; these diagnostics do not raise the
+cache limit or relax host reserves.
 On startup, the worker reads only directory names in its bounded managed cache
 and a small set of recent assignment IDs. It gives matching acknowledged jobs
 one scheduling turn before continuing the unchanged fair cursor. This preference

@@ -93,12 +93,12 @@ class CohortCpuSandbox:
             if runtime_authorization is None
             else {"runtime_authorization": runtime_authorization}
         )
-        video = await run_owned_thread(
-            read_case_video, self.videos, case.video_sha256, job.runtime.maximum_video_bytes
-        )
         path = self._path(attempt)
 
-        async def execute():
+        async def execute(native_capacity=None):
+            video = await run_owned_thread(
+                read_case_video, self.videos, case.video_sha256, job.runtime.maximum_video_bytes
+            )
             return await execute_offline_case(
                 bundle=model,
                 archive=archive,
@@ -109,13 +109,16 @@ class CohortCpuSandbox:
                 video=video,
                 invocation_sha256=digest(attempt),
                 workspace=path,
+                **({} if native_capacity is None else {"native_capacity": native_capacity}),
                 **runtime_options,
             )
 
         if self.execution_admission is None:
             return await execute()
-        async with self.execution_admission.invocation(job.runtime, **runtime_options):
-            return await execute()
+        async with self.execution_admission.invocation(
+            job.runtime, **runtime_options
+        ) as native_capacity:
+            return await execute(native_capacity)
 
 
 def _direct_model_cache_path(workspace: Path, boot) -> Path:
@@ -195,6 +198,14 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
     def prepared_execution_scope(self):
         return getattr(self, "parallel", None) is not None
 
+    @property
+    def execution_scope_before_reserve(self):
+        return getattr(self, "parallel", None) is not None
+
+    @property
+    def execution_scope_roles(self):
+        return getattr(self, "parallel", None) is not None
+
     async def models_available(self, orders):
         """Check one authenticated source per model, without filling the local cache."""
         plans, local, resolved = {}, {}, set()
@@ -256,7 +267,9 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         return tuple(sorted(revisions))
 
     @asynccontextmanager
-    async def execution_scope(self, order):
+    async def execution_scope(
+        self, order, *, before_reserve=None, model_roles=("candidate", "incumbent")
+    ):
         """Finish a paired job while its bounded working set remains resident.
 
         This changes scheduling only. Every step retains its own authority,
@@ -265,6 +278,8 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         """
         enabled = self.boot is not None and order.submission.submission.track == "model"
         if not enabled:
+            if before_reserve is not None:
+                await before_reserve()
             yield False
             return
         if getattr(self, "parallel", None) is not None:
@@ -273,6 +288,8 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
                 async with self.parallel.scope(
                     order,
                     runtime_authorization=prepared_runtime_authorization(order.round, self.policy),
+                    before_reserve=before_reserve,
+                    model_roles=model_roles,
                 ) as active:
                     yield active
             finally:
@@ -280,6 +297,8 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
             return
         token = PUBLIC_COHORT_SCOPE.set(order.round.cohort_sha256)
         try:
+            if before_reserve is not None:
+                await before_reserve()
             with TransferProgress("model_pair_queue", 1, unit="jobs") as progress:
                 await self.paired_execution.acquire()
                 progress.advance(1)
@@ -468,13 +487,16 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         request = self.request(job) if role == "candidate" else None
         if inspect.isawaitable(request):
             request = await request
-        source = (
-            None
-            if self.legacy_artifacts is None
-            else await run_owned_thread(
-                self.legacy_artifacts.execution_source, job, role, bundle, request
+        source = None
+        if self.legacy_artifacts is not None:
+            resolve = getattr(self.legacy_artifacts, "resolve_execution_source", None)
+            source = (
+                await resolve(job, role, bundle, request)
+                if resolve is not None
+                else await run_owned_thread(
+                    self.legacy_artifacts.execution_source, job, role, bundle, request
+                )
             )
-        )
         if source is None and (role != "candidate" or request.direct_artifact is None):
             return None
         if bundle is None:

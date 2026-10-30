@@ -265,7 +265,9 @@ def report_settlement_retry(*, cohort, role, stage, error):
         )
 
 
-def report_execution_retry(*, slot, error):
+def report_execution_retry(
+    *, slot, error, retry_count=None, retry_elapsed_seconds=None, retry_remaining_seconds=None
+):
     """Expose native execution failures without exception text or retained inputs."""
     _emit(
         {
@@ -277,6 +279,22 @@ def report_execution_retry(*, slot, error):
             "eta_seconds": None,
             "eta_basis": "retry_requires_new_progress_sample",
             "certification_authority": False,
+            **(
+                {
+                    "stage": "resident_execution_recovery",
+                    "completed": 0,
+                    "total": 1,
+                    "retry_count": retry_count,
+                    "elapsed_seconds": round(retry_elapsed_seconds, 3),
+                    "retry_remaining_seconds": round(retry_remaining_seconds, 3),
+                    "planning_eta_seconds": [0, round(retry_remaining_seconds, 3)],
+                    "eta_basis": "bounded_retry_allowance_not_completion_prediction",
+                    "eta_scope": "failed_resident_operation_only",
+                    "stalled_or_retrying": True,
+                }
+                if retry_count is not None
+                else {}
+            ),
         },
         failed=True,
     )

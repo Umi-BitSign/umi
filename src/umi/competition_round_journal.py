@@ -228,8 +228,9 @@ class RoundJournal:
         # Read/write envelope only. Existing reservation allowances, manifests,
         # bindings and total journal capacity are never enlarged by this value.
         self.maximum_record_bytes = maximum_record_bytes
-        # Serialize this instance's writers. Read-only snapshots own separate
-        # connections and must not queue behind unrelated writer work.
+        # Serialize this instance's writers and opt-in bulk read snapshots.
+        # Cheap ordinary reads keep independent connections and do not queue
+        # behind unrelated writer work.
         self._transaction_lock = threading.RLock()
         self._capacity_migration = None
         self.existing_only, self.read_only = existing_only, read_only
@@ -600,14 +601,31 @@ class RoundJournal:
         return version
 
     @contextmanager
-    def read_transaction(self, *, wait: bool = True) -> Iterator[sqlite3.Connection]:
+    def read_transaction(
+        self, *, wait: bool = True, coordinated: bool = False
+    ) -> Iterator[sqlite3.Connection]:
         """Read one current snapshot without reserving SQLite's writer slot.
 
         Authorization that reads and then mutates state must keep using
         ``transaction``. This connection cannot write or repair schema fences.
         Conflict holds and generation markers are read afresh on every call.
         Advisory probes can set ``wait=False`` to refuse SQLite contention promptly.
+        Multi-record snapshots can coordinate with this instance's writers;
+        they must copy bounded bytes and release before decoding or validation.
         """
+        if coordinated:
+            acquired = self._transaction_lock.acquire(blocking=wait)
+            if not acquired:
+                raise sqlite3.OperationalError("database is locked")
+        try:
+            with self._read_transaction(wait=wait) as db:
+                yield db
+        finally:
+            if coordinated:
+                self._transaction_lock.release()
+
+    @contextmanager
+    def _read_transaction(self, *, wait: bool) -> Iterator[sqlite3.Connection]:
         self._check_files()
         db = sqlite3.connect(
             self.path.resolve().as_uri() + "?mode=ro",
@@ -1254,22 +1272,27 @@ class RoundJournal:
         # up unrelated signing and retirement. Missing or different bytes still
         # use the native writer, which retains conflicts atomically.
         with self.read_transaction() as db:
-            prior = self.get_raw(kind, key, db=db)
-            if prior is not None:
-                raw = canonical_json_bytes(value)
-                if len(raw) > self.maximum_record_bytes:
-                    raise ValueError("round journal object exceeds its byte bound")
-                if prior == raw:
-                    doc = self._obligation(db, kind, key) if self._version(db) == 2 else None
-                    if doc is not None and (
-                        len(raw) > doc["maximum_bytes"]
-                        or (
-                            doc["value_sha256"] is not None
-                            and sha256_hex(raw) != doc["value_sha256"]
-                        )
-                    ):
-                        raise ValueError("retained round record differs from reservation")
-                    return
+            prior = self._copy_raw(db, kind, key)
+            doc = (
+                self._obligation(db, kind, key)
+                if prior is not None and self._version(db) == 2
+                else None
+            )
+        # The conflict fence and bounded obligation belong to the same snapshot.
+        # Large canonical validation/hashing must not keep its read lock alive
+        # while an unrelated case commits. Different bytes still take the writer.
+        prior = self._check_record_bytes(prior, kind)
+        if prior is not None:
+            raw = canonical_json_bytes(value)
+            if len(raw) > self.maximum_record_bytes:
+                raise ValueError("round journal object exceeds its byte bound")
+            if prior == raw:
+                if doc is not None and (
+                    len(raw) > doc["maximum_bytes"]
+                    or (doc["value_sha256"] is not None and sha256_hex(raw) != doc["value_sha256"])
+                ):
+                    raise ValueError("retained round record differs from reservation")
+                return
         self.put_many(((kind, key, value),))
 
     def put_many(
@@ -1409,7 +1432,13 @@ class RoundJournal:
         if conflicts:
             raise ValueError("round journal conflict retained")
 
-    def _record(self, db, kind, key):
+    def _copy_record_bytes(self, db, kind, key, *, maximum_bytes=None):
+        """Copy bounded, unvalidated bytes for a short owning snapshot.
+
+        A caller must apply ``_check_record_bytes`` after releasing its snapshot
+        before decoding or using these bytes. Conflict checks remain the
+        caller's responsibility, as with ``_record``.
+        """
         size = db.execute(
             "SELECT length(body) FROM records WHERE kind=? AND id=?", (kind, key)
         ).fetchone()
@@ -1417,16 +1446,36 @@ class RoundJournal:
             return None
         bound_kind = "declaration" if kind in {"service_catalog", "service_round"} else "object"
         maximum = stage_limit("maximum_" + bound_kind + "_bytes", self.maximum_record_bytes)
+        if maximum_bytes is not None:
+            maximum = min(maximum, maximum_bytes)
         if type(size[0]) is not int or not 1 <= size[0] <= maximum:
             raise ValueError("retained round object exceeds its byte bound")
         row = db.execute("SELECT body FROM records WHERE kind=? AND id=?", (kind, key)).fetchone()
-        raw = bytes(row[0])
+        return bytes(row[0])
+
+    def _check_record_bytes(self, raw, kind):
+        if raw is None:
+            return None
+        bound_kind = "declaration" if kind in {"service_catalog", "service_round"} else "object"
         if bound_kind == "declaration":
             charge_stage_declaration(len(raw))
         check_stage_json(raw, kind=bound_kind)
         if not is_canonical_json(raw):
             raise ValueError("retained round object is not canonical")
         return raw
+
+    def _record(self, db, kind, key):
+        return self._check_record_bytes(self._copy_record_bytes(db, kind, key), kind)
+
+    def _copy_raw(self, db, kind, key, *, maximum_bytes=None):
+        """Copy original bytes and their fresh conflict fence in one snapshot.
+
+        Like ``_copy_record_bytes``, the result is unvalidated. The snapshot
+        owner must check it after releasing the connection.
+        """
+        if db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone():
+            raise ValueError("round journal conflict held")
+        return self._copy_record_bytes(db, kind, key, maximum_bytes=maximum_bytes)
 
     def get(self, kind: str, key: str, *, db: sqlite3.Connection | None = None) -> JsonValue:
         """Read canonical JSON, borrowing this journal's transaction when supplied.
@@ -1442,11 +1491,15 @@ class RoundJournal:
     def get_raw(self, kind: str, key: str, *, db: sqlite3.Connection | None = None) -> bytes | None:
         """Read bounded canonical bytes with the same fresh conflict fence."""
         if db is None:
+            # Single-record reads keep their non-coordinated contract: they
+            # can inspect committed state while this instance has a writer.
             with self.read_transaction() as db:
-                return self.get_raw(kind, key, db=db)
-        if db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone():
-            raise ValueError("round journal conflict held")
-        return self._record(db, kind, key)
+                raw = self._copy_raw(db, kind, key)
+        else:
+            # A borrowed transaction belongs to its caller; never close or
+            # commit it just to move validation outside the snapshot.
+            raw = self._copy_raw(db, kind, key)
+        return self._check_record_bytes(raw, kind)
 
     def keys(self, kind: str) -> list[str]:
         with self.read_transaction() as db:

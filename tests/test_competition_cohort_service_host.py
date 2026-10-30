@@ -755,12 +755,15 @@ async def test_successor_inventory_keeps_refreshing_while_older_cohort_read_wait
 ):
     from types import SimpleNamespace
 
+    from umi.competition_cohort_readiness_wake import CohortReadinessWakes
+
     old, successor = "a" * 64, "b" * 64
     host = object.__new__(ServiceAdmissionHost)
     host.intake = SimpleNamespace(
+        readiness_wakes=CohortReadinessWakes(),
         config=SimpleNamespace(
             cohorts=(SimpleNamespace(cohort_sha256=old), SimpleNamespace(cohort_sha256=successor))
-        )
+        ),
     )
     host.models = SimpleNamespace()
     host.uploads = host.direct_uploads = None

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import sys
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,7 @@ from umi import competition_runner as runner
 from umi.competition_artifacts import preserve_bundle
 from umi.competition_cohort_execution_journal import CohortExecutionAttempt
 from umi.open_competition import BundleFile, digest
+from umi.protocol import StrictProtocolModel
 
 from .test_competition_cohort_order_signer import base_policy as base_policy
 from .test_competition_cohort_order_signer import legacy_scenario as legacy_scenario
@@ -24,6 +26,96 @@ from .test_competition_cohort_order_signer import runtime as runtime
 from .test_competition_cohort_order_signer import scenario as scenario
 from .test_competition_execution import boundary
 from .test_open_competition import bundle_at, submission
+
+
+@pytest.mark.parametrize("cancel_before_admission", [False, True])
+async def test_invocation_lease_covers_case_video_and_execution(
+    tmp_path, monkeypatch, cancel_before_admission
+):
+    class Job(StrictProtocolModel):
+        runtime: runner.OfflineCpuRuntime
+        round: str = "inert"
+
+    class Attempt(StrictProtocolModel):
+        job_sha256: str
+        step_index: int = 0
+
+    job = Job(
+        runtime=runner.OfflineCpuRuntime(
+            schema="umi-offline-cpu-runtime/1",
+            image="ghcr.io/example/evaluator@sha256:" + "ab" * 32,
+            cpus=2,
+            memory_bytes=1024**3,
+            scratch_bytes=16 * 1024**2,
+            pids_limit=64,
+            maximum_video_bytes=1024,
+        )
+    )
+    attempt = Attempt(job_sha256=digest(job))
+    waiting, admit = asyncio.Event(), asyncio.Event()
+    events = []
+    held = False
+    native_capacity = object()
+
+    class Admission:
+        @asynccontextmanager
+        async def invocation(self, runtime):
+            nonlocal held
+            assert runtime == job.runtime
+            events.append("waiting")
+            waiting.set()
+            await admit.wait()
+            held = True
+            events.append("admitted")
+            try:
+                yield native_capacity
+            finally:
+                held = False
+                events.append("released")
+
+    port = sandbox.CohortCpuSandbox(
+        object(),
+        archive=tmp_path / "archive",
+        videos=tmp_path / "videos",
+        workspace=tmp_path / "scratch",
+        execution_admission=Admission(),
+    )
+    case = SimpleNamespace(video_sha256="ab" * 32, case_id="inert")
+    monkeypatch.setattr(sandbox, "case_role_model", lambda *_: (case, "candidate", object()))
+    monkeypatch.setattr(sandbox, "prepared_runtime_authorization", lambda *_: None)
+
+    def read(*_):
+        assert held
+        events.append("video_read")
+        return b"inert video"
+
+    async def execute(**arguments):
+        assert held and arguments["video"] == b"inert video"
+        assert arguments["native_capacity"] is native_capacity
+        events.append("execute")
+        await asyncio.sleep(0)
+        assert held
+        return "finished"
+
+    monkeypatch.setattr(sandbox, "read_case_video", read)
+    monkeypatch.setattr(sandbox, "execute_offline_case", execute)
+    task = asyncio.create_task(port._invoke(job, attempt, port.archive))
+    try:
+        await asyncio.wait_for(waiting.wait(), 5)
+        assert events == ["waiting"] and not held
+        if cancel_before_admission:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert events == ["waiting"]
+        else:
+            admit.set()
+            assert await asyncio.wait_for(task, 5) == "finished"
+            assert events == ["waiting", "admitted", "video_read", "execute", "released"]
+        assert not held
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.fixture
@@ -715,8 +807,9 @@ async def test_resident_pair_scope_cancellation_releases_real_scheduler(cpu):
     assert PUBLIC_COHORT_SCOPE.get() == initial
 
 
+@pytest.mark.parametrize("reused", [False, True])
 async def test_selected_parallel_port_executes_distinct_models_with_one_reference(
-    cpu, tmp_path, monkeypatch
+    cpu, tmp_path, monkeypatch, reused
 ):
     from umi.competition_model_cache_space import BootDiskModelCacheConfig
     from umi.private_files import ensure_private_directory
@@ -793,7 +886,8 @@ async def test_selected_parallel_port_executes_distinct_models_with_one_referenc
     monkeypatch.setattr(port, "_invoke", invoke)
 
     async def run(selected):
-        async with port.execution_scope(selected):
+        options = {"model_roles": ("candidate",)} if reused else {}
+        async with port.execution_scope(selected, **options):
             return await port.invoke(
                 selected, attempt.model_copy(update={"job_sha256": digest(selected)})
             )
@@ -801,7 +895,10 @@ async def test_selected_parallel_port_executes_distinct_models_with_one_referenc
     tasks = [asyncio.create_task(run(selected)) for selected in (job, second)]
     try:
         await asyncio.wait_for(entered.wait(), 5)
-        assert len(loaded) == 3 and len(source_calls) == 4
+        assert len(loaded) == (2 if reused else 3)
+        assert len(source_calls) == (2 if reused else 4)
+        if reused:
+            assert all(role == "candidate" for _, role in source_calls)
     finally:
         release.set()
         await asyncio.gather(*tasks)

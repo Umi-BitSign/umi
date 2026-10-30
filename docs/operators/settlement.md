@@ -135,8 +135,17 @@ successor, without restarting the coordinator, run:
 sudo umi-reward-coordinator approve-successor --config /path/to/coordinator.json --predecessor <current-decision-sha256> --cohort <successor-cohort-sha256> --package <certified-package-sha256> --reason 'Operator approved successor reward release'
 ```
 
-This signs an approval document using the configured control hotkey. It sends no
-transaction and does not bypass independent review or quorum. An exact retry
+This root command signs the exact approval in an isolated child running as the
+configured key file's existing account, then verifies and publishes the signed
+document as root. Root-owned and service-account-owned mode-0400 keys are both
+supported; do not copy the key, change its ownership, or make the approval
+directory writable by the signer. The child uses the selected operator source
+and Python interpreter. Upgrade this operator command through the supported
+source installation before using an older installation with a service-owned key;
+the running miner, reviewer and writer formats remain compatible and need no
+restart for this command-only correction.
+
+It sends no transaction and does not bypass independent review or quorum. An exact retry
 reuses the recorded approval without reopening the key or signing again. A held
 cohort refuses approval; remove a hold only through its separately authorized
 admission/settlement transition. Without approval, the producer waits for the
@@ -766,9 +775,12 @@ Recurring evaluator partial exports retain small source facts in
 `<request-export-directory>/.model-partial-export`. For an unfinished public-model
 job, these bind the actual journal file, assignment, policy/verifier semantics,
 precomputed step identities and the already reviewed partial manifest. Each poll
-still checks fresh assignment/step conflict fences and exact committed metadata,
-plus the existing output-publication file stamps. An unchanged job skips evidence
-collection, repeated job hashing, assignment copies and native partial review.
+still checks fresh assignment/step conflict fences, exact committed original bytes
+and the existing output-publication file stamps. Originals, including shared-baseline
+bindings, are copied within one coherent, aggregate-bounded read snapshot; canonical
+validation and hashing run after it closes. This still reads unchanged originals.
+An unchanged job skips evidence collection, repeated job hashing, assignment
+reconstruction and native partial review.
 The first changed step invalidates only that job's source fact; completing all
 steps always resumes normal terminal sealing. Endpoint retirement and request
 inventory continuation keep their original paths.
@@ -2684,6 +2696,9 @@ Run the selected runtime's isolated module command:
 A source-maintenance handoff uses its already selected interpreter and the
 qualified source wrapper for this same module. No new console launcher,
 dependency installation or write inside the signed interpreter tree is needed.
+Actor publication uses the same bounded canonical request in module and
+source-wrapper launches. Existing candidates and signed selections retain their
+exact bytes and require no conversion when updating this entry point.
 The root-owned canonical configuration uses
 schema `umi-model-batch-adoption-operator/1` and supplies `state_directory`,
 `policy_file`, `history_file`, `expected_tip_sha256`, `effective_at_block`, an
@@ -2736,7 +2751,9 @@ hashes whenever owner or reviewer configuration changes. Its authenticated
 history snapshot producer supplies `<cohort>.json` under `histories_directory`;
 missing history remains visible as pending work. The runner derives each new
 job from the owner’s actual configured cohort bindings and authenticated intake
-history. It skips earlier cohorts and histories whose intake phase has closed.
+history. It filters earlier cohorts using the selected series plans before
+requesting history; retained inactive plans do not require exports or block
+eligible selected cohorts. It skips histories whose intake phase has closed.
 The earliest effective block comes from that signed history, and each reviewer
 independently checks current authority before signing.
 
@@ -3897,6 +3914,32 @@ at most the configured batch size. No additional workers are started. Historical
 recovery still checks for an
 existing native receipt before applying the current selection fence, so an old
 committed request can finish its original evidence preservation.
+
+The intake host coalesces local readiness notifications after a new durable
+upload-object receipt, payload/review readiness checkpoint, preserved
+participation or membership certificate. A notification advances the existing
+serial owner's next scheduling boundary; work already running finishes first.
+Backfilled participation readiness wakes its owner only after the retained
+selection fence is available. Direct-upload scheduling marks only the affected
+cohort pending and preserves the four-priority-poll/background rotation. The
+supported chunk-upload path wakes its existing finalizer when newly appended
+bytes complete a declared file. HTTP handlers do no additional payload hashing
+or certification.
+
+These notifications are process-local: the admission owner's existing independent
+reviewer request loops each receive their own coalesced hint; remote signer
+processes keep their existing request path. Startup scans and configured polling
+recover lost notifications, external-process commits and interrupted work.
+Exact retained retries emit no new hint, and contention retains its configured
+retry delay. Host reconciliation reports and admission reviewer reports include
+`readiness_wake` counts, queued state, queue time, elapsed time and pass duration
+as observed at the end of each pass. Its ETA scope is only the next scheduling
+boundary; active work and
+fairness rotation can leave that ETA unknown. The existing per-cohort stage
+progress remains the source for verification and certification completion.
+Select the change through the supported intake-host source update, preserving
+the installed config, state directories and signed clocks. Miner upload requests,
+validator readers and retained artifacts use their existing formats.
 
 The cached progress API exposes this work under `components.reserved_participation`.
 During the ready-participation stage, its top-level counts and ETA describe
@@ -5212,6 +5255,18 @@ bytes require explicit repair. Completion state/output can be transferred to the
 supported durable locations without changing the selected native source/history
 namespace or redoing completed certification. Preserve these records in R2 with
 their recovery controls. Publication never gates settlement or reward activation.
+
+Catalog completion identity includes only the selected cohort's admission
+deadline. Adding or changing another cohort's deadline preserves completed work.
+On upgrade, an exact match to the previous unscoped selection migrates only the
+unsigned binding/checksum wrapper and retains the original bytes under
+`<state_directory>/binding-history/<cohort>/<checksum>.json` before replacement.
+Keep that history while rollback to an older catalog watcher remains supported;
+restore its exact matching original if rolling back. The authenticated projection,
+score identity and trigger stamp remain unchanged. A changed own-cohort deadline
+or an older foreign-deadline selection that no longer matches the retained config
+requires explicit repair using that exact historical config; never discard the
+completion or repeat native projection to bypass the mismatch.
 
 Deliver only `<cohort_sha256>.json` score artifacts to the public account's
 `<results.directory>/model-results/`, through the bounded public-metadata delivery

@@ -13,6 +13,7 @@ import logging
 import os
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -48,13 +49,38 @@ from .competition_execution import ExecutionBoundary, ExecutionStep, PendingExec
 from .competition_round_journal import RecordReservation, RoundJournal
 from .competition_runner import OfflineCaseExecution, validate_case_execution
 from .competition_verification_rules import runtime_identity
+from .host_memory_request_bounds import stage_limit
 from .open_competition import CompetitionPolicy, digest, digest_canonical_bytes, identity
 from .private_files import ensure_private_directory, lock_private_file
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
+_STEP_RECORD_BYTES = 48 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class _StepRecords:
+    """Unvalidated immutable bytes copied together by the journal owner."""
+
+    step: bytes | None
+    head: str | None
+    attempt: bytes | None
+    result: bytes | None
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionScopeState:
+    """Private scheduling result of the ordinary retained-evidence validation."""
+
+    evidence: RecoverableExecutionEvidence | RecoverableSharedIncumbentEvidence | None
+    model_roles: tuple[str, ...] = ("candidate", "incumbent")
+
 
 class PartialExportSourceRepairRequired(ValueError):
     """A previously verified immutable source disappeared or changed."""
+
+
+class IncumbentSourcePending(OSError):
+    """The fixed source must finish before this consumer can prepare models."""
 
 
 def _partial_export_source_repair(checkpoint, reason, index=None):
@@ -286,37 +312,75 @@ class CohortExecutionJournal:
         return assignment, job
 
     def partial_export_unchanged(self, checkpoint: PartialExportCheckpoint) -> bool:
-        """Fresh exact source reads; never cache conflict holds or new steps."""
+        """Check fresh original bytes after releasing their coherent snapshot."""
         if not self.partial_export_context_matches(checkpoint):
             return False
-        with self.journal.read_transaction() as db:
-            raw = self.journal.get_raw("assignment", checkpoint.slot, db=db)
-            if raw is None:
-                _partial_export_source_repair(checkpoint, "assignment_missing")
-            if digest_canonical_bytes(raw) != checkpoint.assignment_sha256:
-                _partial_export_source_repair(checkpoint, "assignment_changed")
-            for index, (key, expected) in enumerate(
-                zip(checkpoint.step_keys, checkpoint.step_sha256s, strict=True)
-            ):
-                raw = self.journal.get_raw("step", key, db=db)
-                if (None if raw is None else digest_canonical_bytes(raw)) != expected:
-                    if expected is not None:
-                        _partial_export_source_repair(
-                            checkpoint,
-                            "completed_step_missing" if raw is None else "completed_step_changed",
-                            index,
-                        )
-                    return False
-            if isinstance(checkpoint, SharedPartialExportCheckpoint):
-                for ref in checkpoint.source_records:
-                    raw = self.journal.get_raw(ref.kind, ref.key, db=db)
-                    if raw is None or digest_canonical_bytes(raw) != ref.sha256:
-                        _partial_export_source_repair(
-                            checkpoint, "shared_source_missing_or_changed"
-                        )
-            elif self.journal.get_raw("incumbent_reuse", checkpoint.job_sha256, db=db) is not None:
-                # An unchanged /1 partial fact cannot authorize a new /2 source.
+        # Published objects bound assignment/step bodies. A borrowed step can
+        # occur under both consumer and source keys; allow two copies plus the
+        # three native source bindings and a newly appeared record. Retain the
+        # journal's existing per-record envelope, including legacy originals,
+        # rather than applying the current 48 KiB step reservation to all kinds.
+        remaining = stage_limit(
+            "maximum_input_bytes",
+            min(
+                self.journal.maximum_bytes,
+                2 * checkpoint.maximum_bytes + 4 * self.journal.maximum_record_bytes,
+            ),
+        )
+        records = {}
+
+        def copy(db, kind, key):
+            nonlocal remaining
+            if (kind, key) not in records:
+                raw = self.journal._copy_raw(db, kind, key, maximum_bytes=remaining)
+                remaining -= 0 if raw is None else len(raw)
+                records[kind, key] = raw
+            return records[kind, key]
+
+        with self.journal.read_transaction(coordinated=True) as db:
+            copy(db, "assignment", checkpoint.slot)
+            changed_prefix = False
+            for key, expected in zip(checkpoint.step_keys, checkpoint.step_sha256s, strict=True):
+                if copy(db, "step", key) is not None and expected is None:
+                    # The first new step already invalidates this prefix. Its
+                    # original bytes are still checked below, in the same order.
+                    changed_prefix = True
+                    break
+            if not changed_prefix:
+                if isinstance(checkpoint, SharedPartialExportCheckpoint):
+                    for ref in checkpoint.source_records:
+                        copy(db, ref.kind, ref.key)
+                else:
+                    copy(db, "incumbent_reuse", checkpoint.job_sha256)
+
+        def checked(kind, key):
+            return self.journal._check_record_bytes(records[kind, key], kind)
+
+        raw = checked("assignment", checkpoint.slot)
+        if raw is None:
+            _partial_export_source_repair(checkpoint, "assignment_missing")
+        if digest_canonical_bytes(raw) != checkpoint.assignment_sha256:
+            _partial_export_source_repair(checkpoint, "assignment_changed")
+        for index, (key, expected) in enumerate(
+            zip(checkpoint.step_keys, checkpoint.step_sha256s, strict=True)
+        ):
+            raw = checked("step", key)
+            if (None if raw is None else digest_canonical_bytes(raw)) != expected:
+                if expected is not None:
+                    _partial_export_source_repair(
+                        checkpoint,
+                        "completed_step_missing" if raw is None else "completed_step_changed",
+                        index,
+                    )
                 return False
+        if isinstance(checkpoint, SharedPartialExportCheckpoint):
+            for ref in checkpoint.source_records:
+                raw = checked(ref.kind, ref.key)
+                if raw is None or digest_canonical_bytes(raw) != ref.sha256:
+                    _partial_export_source_repair(checkpoint, "shared_source_missing_or_changed")
+        elif checked("incumbent_reuse", checkpoint.job_sha256) is not None:
+            # An unchanged /1 partial fact cannot authorize a new /2 source.
+            return False
         return True
 
     def partial_export_checkpoint(
@@ -451,10 +515,11 @@ class CohortExecutionJournal:
         # Static proof verification must not reserve the journal writer or keep
         # unrelated reads waiting on its process lock. This read grants no
         # current authority; dispatch still checks its owned fresh capture.
-        with self.journal.read_transaction() as db:
-            raw = self.journal.get_raw("assignment", slot, db=db)
-            if raw is None:
-                raise FileNotFoundError("execution assignment has not been retained")
+        with self.journal.read_transaction(coordinated=True) as db:
+            raw = self.journal._copy_raw(db, "assignment", slot)
+        raw = self.journal._check_record_bytes(raw, "assignment")
+        if raw is None:
+            raise FileNotFoundError("execution assignment has not been retained")
         key = assignment_reuse_key(
             self.journal, slot, (raw,), self.config, self.policy, self.cohorts
         )
@@ -517,7 +582,7 @@ class CohortExecutionJournal:
             raise ValueError("shared incumbent source selection requires repair")
         return value
 
-    def _source_evidence(self, job, source):
+    def _source_job(self, job, source):
         _, original = self.assignment_and_job(source.source_slot)
         if (
             digest(original) != source.source_job_sha256
@@ -525,6 +590,10 @@ class CohortExecutionJournal:
             or self.journal.get("incumbent_reuse", digest(original)) is not None
         ):
             raise ValueError("shared incumbent source assignment differs or forms a cycle")
+        return original
+
+    def _source_evidence(self, job, source):
+        self._source_job(job, source)
         evidence = self.evidence(source.source_slot)
         if evidence is not None:
             check_boundary(evidence.steps[0].started, source.reserved_at)
@@ -550,6 +619,42 @@ class CohortExecutionJournal:
             if self._source_evidence(job, source) is None:
                 pending.append(source.source_slot)
         return tuple(pending)
+
+    def incumbent_source_status(
+        self, slot: str, job: RecoverableExecutionJob
+    ) -> Literal["ready", "pending", "unselected"]:
+        """Read-only scheduling hint; ordinary execution still checks authority.
+
+        Only opted-in, unstarted model consumers can wait here. Count retained
+        source step identities without loading outputs or replaying evidence.
+        The source reservation and all execution/reuse writes stay on their
+        existing authenticated path.
+        """
+        if job.mode != "paired_model" or job.incumbent_observation_mode is None:
+            return "ready"
+        if self.journal.get_raw("incumbent_reuse", digest(job)) is not None:
+            return "ready"
+        if self._execution_started(job):
+            return "ready"
+        source = self._incumbent_source(job)
+        if source is None:
+            return "unselected"
+        if source.source_slot == slot:
+            if source.source_job_sha256 != digest(job):
+                raise ValueError("shared incumbent source changed its job")
+            return "ready"
+        original = self._source_job(job, source)
+        with self.journal.read_transaction() as db:
+            if self._checkpoint_count(source.source_job_sha256, step_count(original), db) == (
+                step_count(original)
+            ):
+                return "ready"
+            if (
+                self.journal.get_raw("incumbent_source_complete", digest(source), db=db) is not None
+                or self.journal.get_raw("request_terminal", source.source_slot, db=db) is not None
+            ):
+                raise ValueError("completed shared incumbent source requires repair")
+        return "pending"
 
     def _reserve_incumbent_source(self, slot, job, observed):
         # Different job locks do not serialize this shared immutable decision.
@@ -593,6 +698,13 @@ class CohortExecutionJournal:
         return self.reuse_incumbent(slot, job, observed)
 
     def reuse_incumbent(self, slot, job, observed):
+        return self._reuse_incumbent(slot, job, observed)
+
+    def prepare_execution_scope(self, slot, job, observed):
+        """Return roles from the same authenticated reuse pass, without replaying it."""
+        return self._reuse_incumbent(slot, job, observed, for_scope=True)
+
+    def _reuse_incumbent(self, slot, job, observed, *, for_scope=False):
         """Reserve one future source, keeping legacy executions in place.
 
         Existing attempts remain independent. Endpoint reuse retains its /1
@@ -601,10 +713,12 @@ class CohortExecutionJournal:
         observations keep their original times and have no consumer attempts.
         """
         started_clock = time.monotonic()
+        read_evidence = self.execution_scope_state if for_scope else self.evidence
+        independent = ExecutionScopeState(None) if for_scope else None
         if self.journal.get("incumbent_reuse", digest(job)) is not None:
-            return self.evidence(slot)
+            return read_evidence(slot)
         if job.mode == "paired_model" and job.incumbent_observation_mode is None:
-            return None
+            return independent
         if self._execution_started(job):
             if job.mode == "paired_model":
                 source = self._incumbent_source(job)
@@ -614,7 +728,7 @@ class CohortExecutionJournal:
                     or source.source_job_sha256 != digest(job)
                 ):
                     raise ValueError("started shared incumbent source selection requires repair")
-            return None
+            return independent
         if job.mode == "paired_model" and not self.config.share_paired_incumbent:
             source = self._incumbent_source(job)
             if (
@@ -622,7 +736,7 @@ class CohortExecutionJournal:
                 and source.source_slot == slot
                 and source.source_job_sha256 == digest(job)
             ):
-                return None
+                return independent
             raise OSError("shared incumbent order awaits reader-enabled producer")
         _, retained_job = self.assignment_and_job(slot)
         if retained_job != job:
@@ -631,10 +745,10 @@ class CohortExecutionJournal:
         if source.source_slot == slot:
             if source.source_job_sha256 != digest(job):
                 raise ValueError("shared incumbent source changed its job")
-            return None
+            return independent
         evidence = self._source_evidence(job, source)
         if evidence is None:
-            raise OSError("shared incumbent source remains unfinished")
+            raise IncumbentSourcePending("shared incumbent source remains unfinished")
         check_boundary(observed, evidence.steps[-1].finished)
         receipt = CohortIncumbentReuse(
             schema="umi-cohort-incumbent-reuse/1",
@@ -681,7 +795,7 @@ class CohortExecutionJournal:
                 separators=(",", ":"),
             )
         )
-        return self.evidence(slot)
+        return read_evidence(slot)
 
     def _reused_incumbent(self, slot, job, raw):
         value = CohortIncumbentReuse.model_validate_json(canonical_json_bytes(raw))
@@ -701,15 +815,15 @@ class CohortExecutionJournal:
         if job.mode == "paired_model":
             steps = []
             previous = value.observed_at
-            with self.journal.read_transaction() as db:
-                for index in range(step_count(job)):
-                    step = self.step(job, index, db=db, shared=(value, source, evidence))
-                    if step is None:
-                        return None
-                    if index % 2 == 0:
-                        check_boundary(step.started, previous)
-                        previous = step.finished
-                    steps.append(step)
+            for index, step in enumerate(
+                self.steps_snapshot(job, shared=(value, source, evidence), stop_at_missing=True)
+            ):
+                if step is None:
+                    return None
+                if index % 2 == 0:
+                    check_boundary(step.started, previous)
+                    previous = step.finished
+                steps.append(step)
             return RecoverableSharedIncumbentEvidence(
                 schema="umi-recoverable-execution-evidence/2",
                 job=job,
@@ -756,22 +870,23 @@ class CohortExecutionJournal:
 
     def checkpoint_count(self, job: RecoverableExecutionJob) -> int:
         """Metadata-only progress; execution still validates each retained step."""
-        job_sha256 = digest(job)
+        with self.journal.read_transaction() as db:
+            return self._checkpoint_count(digest(job), step_count(job), db)
+
+    @staticmethod
+    def _checkpoint_count(job_sha256, total, db):
         keys = [
             digest({"schema": "umi-cohort-execution-step/1", "job": job_sha256, "index": i})
-            for i in range(step_count(job))
+            for i in range(total)
         ]
         completed = 0
-        with self.journal.read_transaction() as db:
-            for offset in range(0, len(keys), 128):
-                batch = keys[offset : offset + 128]
-                placeholders = ",".join("?" for _ in batch)
-                completed += db.execute(
-                    "SELECT COUNT(*) FROM records WHERE kind='step' AND id IN ("
-                    + placeholders
-                    + ")",
-                    batch,
-                ).fetchone()[0]
+        for offset in range(0, len(keys), 128):
+            batch = keys[offset : offset + 128]
+            placeholders = ",".join("?" for _ in batch)
+            completed += db.execute(
+                "SELECT COUNT(*) FROM records WHERE kind='step' AND id IN (" + placeholders + ")",
+                batch,
+            ).fetchone()[0]
         return completed
 
     def recent_assignment_slots(self, *, limit=32):
@@ -790,27 +905,47 @@ class CohortExecutionJournal:
     def step(
         self, job: RecoverableExecutionJob, index: int, *, db=None, shared=None
     ) -> ExecutionStep | None:
+        if shared is None and job.mode == "paired_model" and index % 2:
+            shared = self.paired_incumbent_reuse(job)
+        key = execution_step_key(job, index)
         if db is None:
-            with self.journal.read_transaction() as db:
-                return self.step(job, index, db=db, shared=shared)
-        raw = self.journal.get("step", execution_step_key(job, index), db=db)
-        if job.mode == "paired_model" and index % 2:
-            if shared is None:
-                shared = self.paired_incumbent_reuse(job)
-            if shared:
-                original = shared[2].steps[index]
-                if raw is None or canonical_json_bytes(raw) != canonical_json_bytes(original):
-                    raise ValueError("borrowed incumbent observation requires repair")
-                if self.head(job, index, db=db) is not None:
-                    raise ValueError("borrowed incumbent has an unexpected local invocation")
-                return original
-        if raw is None:
+            with self.journal.read_transaction(coordinated=True) as db:
+                records = self._copy_step_records(db, key)
+        else:
+            records = self._copy_step_records(db, key)
+        return self._checked_step_records(job, index, records, shared=shared)
+
+    def _copy_step_records(self, db, key):
+        def read(kind, ident):
+            return self.journal._copy_raw(db, kind, ident, maximum_bytes=_STEP_RECORD_BYTES)
+
+        step = read("step", key)
+        if step in (None, b"null"):
+            return _StepRecords(step, None, None, None)
+        row = db.execute("SELECT attempt FROM execution_heads WHERE step=?", (key,)).fetchone()
+        if row is None:
+            return _StepRecords(step, None, None, None)
+        return _StepRecords(step, row[0], read("attempt", row[0]), read("result", row[0]))
+
+    def _checked_step_records(self, job, index, records, *, shared):
+        raw = self.journal._check_record_bytes(records.step, "step")
+        raw_attempt = self.journal._check_record_bytes(records.attempt, "attempt")
+        raw_result = self.journal._check_record_bytes(records.result, "result")
+        if job.mode == "paired_model" and index % 2 and shared:
+            original = shared[2].steps[index]
+            if raw != canonical_json_bytes(original):
+                raise ValueError("borrowed incumbent observation requires repair")
+            if records.head is not None:
+                self._checked_head(job, index, records.head, raw_attempt)
+                raise ValueError("borrowed incumbent has an unexpected local invocation")
+            return original
+        if raw in (None, b"null"):
             return None
-        attempt = self.head(job, index, db=db)
-        if attempt is None:
+        if records.head is None:
             raise ValueError("completed step has no attempt")
-        record = ExecutionStep.model_validate_json(canonical_json_bytes(raw))
-        pending = self.result(job, attempt, db=db)
+        attempt = self._checked_head(job, index, records.head, raw_attempt)
+        record = ExecutionStep.model_validate_json(raw)
+        pending = self._checked_result(job, attempt, raw_result)
         if pending is None or (record.role, record.started, record.execution) != (
             pending.role,
             pending.started,
@@ -820,13 +955,38 @@ class CohortExecutionJournal:
         check_boundary(record.finished, record.started)
         return record
 
+    def steps_snapshot(self, job, *, shared=None, stop_at_missing=False):
+        """Copy one bounded snapshot, then validate outside SQLite ownership.
+
+        Step/head/result records remain bound to one committed snapshot. Only
+        native per-step metadata is copied, with the same 48 KiB record bound
+        as execution reservations; no model bytes or chain proofs are loaded.
+        """
+        if shared is None:
+            shared = self.paired_incumbent_reuse(job) or False
+        job_sha256 = digest(job)
+        keys = [
+            digest({"schema": "umi-cohort-execution-step/1", "job": job_sha256, "index": index})
+            for index in range(step_count(job))
+        ]
+        records = []
+        with self.journal.read_transaction(coordinated=True) as db:
+            for key in keys:
+                copied = self._copy_step_records(db, key)
+                records.append(copied)
+                if stop_at_missing and copied.step in (None, b"null"):
+                    break
+        return tuple(
+            self._checked_step_records(job, index, copied, shared=shared)
+            for index, copied in enumerate(records)
+        )
+
     def first_unfinished(self, job):
         """One source read and one consumer snapshot for a scheduling scan."""
         shared = self.paired_incumbent_reuse(job) or False
-        with self.journal.read_transaction() as db:
-            for index in range(step_count(job)):
-                if self.step(job, index, db=db, shared=shared) is None:
-                    return index
+        for index, step in enumerate(self.steps_snapshot(job, shared=shared, stop_at_missing=True)):
+            if step is None:
+                return index
         return None
 
     def head(
@@ -841,10 +1001,14 @@ class CohortExecutionJournal:
         ).fetchone()
         if row is None:
             return None
-        raw = self.journal.get("attempt", row[0], db=db)
-        attempt = CohortExecutionAttempt.model_validate_json(canonical_json_bytes(raw))
+        return self._checked_head(
+            job, index, row[0], self.journal.get_raw("attempt", row[0], db=db)
+        )
+
+    def _checked_head(self, job, index, key, raw):
+        attempt = CohortExecutionAttempt.model_validate_json(b"null" if raw is None else raw)
         if (
-            digest(attempt) != row[0]
+            digest(attempt) != key
             or attempt.job_sha256 != digest(job)
             or attempt.step_index != index
         ):
@@ -854,10 +1018,14 @@ class CohortExecutionJournal:
     def result(
         self, job: RecoverableExecutionJob, attempt: CohortExecutionAttempt, *, db=None
     ) -> PendingExecutionStep | None:
-        raw = self.journal.get("result", digest(attempt), db=db)
-        if raw is None:
+        return self._checked_result(
+            job, attempt, self.journal.get_raw("result", digest(attempt), db=db)
+        )
+
+    def _checked_result(self, job, attempt, raw):
+        if raw in (None, b"null"):
             return None
-        result = PendingExecutionStep.model_validate_json(canonical_json_bytes(raw))
+        result = PendingExecutionStep.model_validate_json(raw)
         self.check_result(job, attempt, result.execution)
         if (
             result.started != attempt.started
@@ -930,7 +1098,7 @@ class CohortExecutionJournal:
         elif shared is not None:
             reuse = CohortIncumbentReuse.model_validate_json(canonical_json_bytes(shared))
             check_boundary(started, reuse.observed_at)
-        with self.journal.transaction() as db:
+        with self.journal.read_transaction() as db:
             if (
                 db.execute("SELECT COUNT(*) FROM records WHERE kind='attempt'").fetchone()[0]
                 >= self.config.maximum_attempts
@@ -950,8 +1118,8 @@ class CohortExecutionJournal:
         self.journal.reserve_records(
             key,
             (
-                RecordReservation("result", key, 48 * 1024),
-                RecordReservation("step", step_key, 48 * 1024),
+                RecordReservation("result", key, _STEP_RECORD_BYTES),
+                RecordReservation("step", step_key, _STEP_RECORD_BYTES),
                 RecordReservation("stopped", key, 1024),
             ),
         )
@@ -1008,23 +1176,27 @@ class CohortExecutionJournal:
 
     @canonical_json_reuse()
     def evidence(self, slot: str) -> RecoverableExecutionEvidence | None:
+        return self.execution_scope_state(slot).evidence
+
+    @canonical_json_reuse()
+    def execution_scope_state(self, slot: str) -> ExecutionScopeState:
         _, job = self._validated_assignment(slot)
         shared = self.journal.get("incumbent_reuse", digest(job))
         if shared is not None:
-            return self._reused_incumbent(slot, job, shared)
+            evidence = self._reused_incumbent(slot, job, shared)
+            roles = ("candidate",) if job.mode == "paired_model" else ("incumbent",)
+            return ExecutionScopeState(evidence, roles)
         steps = []
-        # A completed result's steps, heads and observations belong to one
-        # snapshot. Avoid opening and checking a database for every record.
-        # Fresh calls still check current conflict holds and every original
-        # output/boundary; this does not cache evidence or grant authority.
-        with self.journal.read_transaction() as db:
-            for index in range(step_count(job)):
-                step = self.step(job, index, db=db, shared=False)
-                if step is None:
-                    return None
-                if steps:
-                    check_boundary(step.started, steps[-1].finished)
-                steps.append(step)
-        return RecoverableExecutionEvidence(
-            schema="umi-recoverable-execution-evidence/1", job=job, steps=tuple(steps)
+        # Copy one committed snapshot; decoding and output checks must not keep
+        # an exporter read lock open while another case commits its highwater.
+        for step in self.steps_snapshot(job, shared=False, stop_at_missing=True):
+            if step is None:
+                return ExecutionScopeState(None)
+            if steps:
+                check_boundary(step.started, steps[-1].finished)
+            steps.append(step)
+        return ExecutionScopeState(
+            RecoverableExecutionEvidence(
+                schema="umi-recoverable-execution-evidence/1", job=job, steps=tuple(steps)
+            )
         )

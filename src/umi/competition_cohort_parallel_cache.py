@@ -1,8 +1,11 @@
 """Bounded resident pairs with per-slot readers and shared host preparation."""
 
 import asyncio
+import json
+import logging
+import time
 from collections import Counter
-from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 
 from .competition_cohort_public_progress import execution_job_scope
@@ -60,7 +63,9 @@ class ParallelModelCache:
 
     def plan(self, job, role):
         selected = self.pairs.get(digest(job))
-        return None if selected is None else selected.get(role)
+        if selected is not None and role not in selected:
+            raise ValueError("execution requested a role omitted by its validated model scope")
+        return None if selected is None else selected[role]
 
     def owns(self, job):
         return digest(job) in self.pairs
@@ -97,26 +102,46 @@ class ParallelModelCache:
             await asyncio.wait_for(self.condition.wait(), self.capacity_poll_seconds)
 
     @asynccontextmanager
-    async def scope(self, job, *, runtime_authorization=None):
+    async def scope(
+        self,
+        job,
+        *,
+        runtime_authorization=None,
+        before_reserve=None,
+        model_roles=("candidate", "incumbent"),
+    ):
         runtime_options = (
             {}
             if runtime_authorization is None
             else {"runtime_authorization": runtime_authorization}
         )
         with execution_job_scope(digest(job)):
-            async with self._scope(job, runtime_options) as enabled:
+            async with self._scope(job, runtime_options, before_reserve, model_roles) as enabled:
                 yield enabled
 
+    @staticmethod
+    def _roles(roles):
+        if roles not in (("candidate", "incumbent"), ("candidate",), ("incumbent",)):
+            raise ValueError("invalid validated model execution roles")
+        return roles
+
     @asynccontextmanager
-    async def _scope(self, job, runtime_options):
-        plans = {
-            role: await self.port._source_plan(job, role) for role in ("candidate", "incumbent")
-        }
+    async def _scope(
+        self, job, runtime_options, before_reserve=None, model_roles=("candidate", "incumbent")
+    ):
+        plans = {role: await self.port._source_plan(job, role) for role in self._roles(model_roles)}
         budget = self.budget()
         sizes = {p.identity: budget.model_bytes(p.bundle) for p in plans.values() if p}
         if any(size > budget.maximum_bytes for size in sizes.values()):
             raise OSError("selected model exceeds the bounded boot cache")
-        async with self._reserve_pair(job, plans, budget, sizes, runtime_options) as exclusive:
+        if before_reserve is not None:
+            remaining = await before_reserve()
+            if remaining is not None:
+                if not set(self._roles(remaining)) <= plans.keys():
+                    raise ValueError("authenticated reservation expanded its model scope")
+                plans = {role: plans[role] for role in remaining}
+                sizes = {p.identity: sizes[p.identity] for p in plans.values() if p}
+        async with self._reserve_pair(job, plans, budget, sizes) as exclusive:
             if not exclusive:
                 async with self.admission.hold(job.runtime, preparation=True, **runtime_options):
                     selected = []
@@ -131,59 +156,90 @@ class ParallelModelCache:
     async def _selection(self, plans, budget, sizes):
         """Select a mode without holding scarce inference/preparation slots."""
         capacity = await self._resident_capacity(budget)
-        if capacity is None or any(size > capacity for size in sizes.values()):
-            return None
+        counts = dict(
+            resident_capacity_bytes=capacity,
+            requested_model_count=len(sizes),
+            requested_model_bytes=sum(sizes.values()),
+            largest_requested_model_bytes=max(sizes.values(), default=0),
+            active_pair_count=len(self.pairs),
+            pair_limit=self.concurrency,
+            model_slot_limit=len(self.slots),
+        )
+        if capacity is None:
+            return None, "cache_allocation_owner", counts
+        if any(size > capacity for size in sizes.values()):
+            return None, "individual_model_capacity", counts
         exclusive = sum(sizes.values()) > capacity
         if self.pairs:
+            if exclusive:
+                return None, "requested_pair_exclusive", counts
+            if self.exclusive:
+                return None, "active_pair_exclusive", counts
+            if len(self.pairs) >= self.concurrency:
+                return None, "pair_concurrency", counts
             working_set = self._models(plans)
-            if (
-                exclusive
-                or self.exclusive
-                or len(self.pairs) >= self.concurrency
-                or len(working_set) > len(self.slots)
-                or sum(budget.model_bytes(b) for b in working_set.values()) > capacity
-            ):
-                return None
-        return exclusive
+            counts["working_model_count"] = len(working_set)
+            if len(working_set) > len(self.slots):
+                return None, "model_slot_count", counts
+            counts["working_model_bytes"] = sum(budget.model_bytes(b) for b in working_set.values())
+            if counts["working_model_bytes"] > capacity:
+                return None, "cumulative_model_bytes", counts
+        return exclusive, None, counts
 
     @asynccontextmanager
-    async def _reserve_pair(self, job, plans, budget, sizes, runtime_options):
+    async def _reserve_pair(self, job, plans, budget, sizes):
         key = digest(job)
-        async with AsyncExitStack() as ownership:
-            with TransferProgress("model_pair_queue", 1, unit="jobs") as progress:
-                while True:
-                    async with self.condition:
-                        exclusive = await self._selection(plans, budget, sizes)
-                        if exclusive is None:
-                            progress.emit("waiting", reason="resident_model_working_set")
-                            await self._capacity_changed()
-                            continue
-                    async with AsyncExitStack() as candidate:
-                        await candidate.enter_async_context(
-                            self.admission.hold(job.runtime, exclusive=exclusive, **runtime_options)
-                        )
-                        async with self.condition:
-                            # Hardware admission may have waited while peers or
-                            # disk usage changed. A non-fitting waiter releases
-                            # its token so a smaller ready pair can use it.
-                            if await self._selection(plans, budget, sizes) != exclusive:
-                                continue
-                            if key in self.pairs:
-                                raise ValueError("paired job already owns resident capacity")
-                            self.pairs[key] = plans
-                            self.exclusive = exclusive
-                            self.pins.update(p.identity for p in plans.values() if p)
-                        ownership.push_async_callback(candidate.pop_all().aclose)
-                        progress.advance(1)
-                        break
-            # Queue diagnostics complete now; only hardware/cache ownership
-            # continues throughout the model execution.
-            completed = False
-            try:
-                yield exclusive
-                completed = True
-            finally:
-                await self._release_pair(key, plans, completed)
+        last_decision = None
+        with TransferProgress("model_pair_queue", 1, unit="jobs") as progress:
+            while True:
+                async with self.condition:
+                    exclusive, reason, counts = await self._selection(plans, budget, sizes)
+                    if exclusive is None:
+                        progress.emit("waiting", reason=reason)
+                        decision = (reason, counts)
+                        if decision != last_decision:
+                            logging.getLogger("umi.competition.progress").info(
+                                json.dumps(
+                                    dict(
+                                        schema="umi-model-pair-capacity-progress/1",
+                                        stage="model_pair_capacity",
+                                        status="waiting",
+                                        job_sha256=key,
+                                        reason_code=reason,
+                                        completed=0,
+                                        total=1,
+                                        unit="working_sets",
+                                        elapsed_seconds=round(
+                                            time.monotonic() - progress.started, 3
+                                        ),
+                                        eta_seconds=None,
+                                        eta_basis="waiting_for_resident_capacity_release",
+                                        stalled_or_retrying=True,
+                                        **counts,
+                                    ),
+                                    separators=(",", ":"),
+                                )
+                            )
+                            last_decision = decision
+                        await self._capacity_changed()
+                        continue
+                    if key in self.pairs:
+                        raise ValueError("paired job already owns resident capacity")
+                    self.pairs[key] = plans
+                    self.exclusive = exclusive
+                    self.pins.update(p.identity for p in plans.values() if p)
+                    progress.advance(1)
+                    break
+        # Pairs own disk residency only. Native invocation admission follows
+        # preparation and ends after container cleanup, before another swap.
+        # Holding model-memory slots here lets idle pairs exhaust the headroom
+        # their preparation needs, preventing every owner from reaching work.
+        completed = False
+        try:
+            yield exclusive
+            completed = True
+        finally:
+            await self._release_pair(key, plans, completed)
 
     async def _release_pair(self, key, plans, completed):
         async def release():
@@ -197,7 +253,7 @@ class ParallelModelCache:
                         and not self.pins[self.assigned.get(path)]
                         and path.name.startswith("slot-")
                         and completed
-                        and plans["candidate"] is not None
+                        and plans.get("candidate") is not None
                         and self.assigned.get(path) == plans["candidate"].identity
                     ):
                         # Expanded idle slots are disposable after the last

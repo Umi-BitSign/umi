@@ -886,12 +886,25 @@ async def test_held_sampling_retains_native_credit_without_seal_and_releases_aft
         assert node.controller.store.status(h.cohort)[0].phase == "requests"
 
 
-async def test_older_lifecycle_boot_owns_separate_epoch_client_until_shutdown(host):
+@pytest.mark.parametrize("legacy_constructor", [False, True])
+async def test_lifecycle_boot_owns_separate_epoch_client_until_shutdown(
+    host, monkeypatch, legacy_constructor
+):
+    if legacy_constructor:
+        constructor = boot.LifecycleHost
+
+        def older_boot(service, resources, client, credentials, sign, epoch_client):
+            # Exercise the supported five-argument constructor itself.
+            return constructor(service, resources, client, credentials, sign)
+
+        monkeypatch.setattr(boot, "LifecycleHost", older_boot)
     o = host
     async with o.open() as app:
         lifecycle = app.state.lifecycle
         advisory = lifecycle.producer_epochs.client
         assert advisory is not lifecycle.client and not advisory.is_closed
+        assert lifecycle.producer_epochs.work.client is advisory
+        assert lifecycle.producer_epochs.settlement.client is advisory
     assert advisory.is_closed
 
 

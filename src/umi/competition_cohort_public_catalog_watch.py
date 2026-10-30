@@ -126,7 +126,7 @@ class NativePublicCatalogWatcher:
         return self.config.template.model_copy(update={"native_intake": source})
 
     @staticmethod
-    def _binding(config):
+    def _binding(config, *, legacy_deadlines=False):
         # Publication location and HTTP capacities may change without redoing
         # successful native release checks. Their shape is checked on publish.
         value = config.model_dump(mode="json", by_alias=True)
@@ -138,6 +138,17 @@ class NativePublicCatalogWatcher:
             for row in source["config"]["cohorts"]
             if row["cohort_sha256"] == source["cohort_sha256"]
         ]
+        if not legacy_deadlines:
+            deadlines = [
+                row
+                for row in source["config"].get("admission_deadlines", ())
+                if row["cohort_sha256"] == source["cohort_sha256"]
+            ]
+            if deadlines:
+                source["config"]["admission_deadlines"] = deadlines
+            else:
+                # Preserve the exact identity of completions predating deadlines.
+                source["config"].pop("admission_deadlines", None)
         return digest_binding(dict(semantics=SEMANTICS, native_selection=value))
 
     def _output_stamps(self, report, cohort):
@@ -273,7 +284,7 @@ class NativePublicCatalogWatcher:
         ) as meter:
             for cohort in candidates:
                 stage = "catalog_completion"
-                receipt = projection = enriched = None
+                receipt = projection = enriched = receipt_raw = None
                 try:
                     config = self._selected(cohort)
                     receipt_path, score_path = (
@@ -300,13 +311,11 @@ class NativePublicCatalogWatcher:
                         cached = self.receipts.get(cohort)
                         if cached is None:
                             self.receipts.clear()
-                        receipt = (
-                            cached[1]
-                            if cached is not None and cached[0] == stamp
-                            else CatalogCompletion.model_validate_json(
-                                read_owned_file(receipt_path, MAX_COMPLETION_BYTES)
-                            ).checked()
-                        )
+                        if cached is not None and cached[0] == stamp:
+                            receipt = cached[1]
+                        else:
+                            receipt_raw = read_owned_file(receipt_path, MAX_COMPLETION_BYTES)
+                            receipt = CatalogCompletion.model_validate_json(receipt_raw).checked()
                     except FileNotFoundError:
                         if (self.output / "cohorts" / (cohort + ".json")).exists():
                             raise ValueError(
@@ -363,16 +372,43 @@ class NativePublicCatalogWatcher:
                         # output; a partial publication resumes without native reads.
                         atomic_write(receipt_path, raw)
                         stamp = tuple(_stamp(receipt_path))
-                    self.receipts[cohort] = (stamp, receipt)
-                    while len(self.receipts) > 1:
-                        self.receipts.popitem(last=False)
+                    binding = self._binding(config)
                     if (
-                        receipt.binding_sha256 != self._binding(config)
-                        or receipt.projection.catalog.cohort_sha256 != cohort
-                    ):
+                        receipt.binding_sha256 != binding
+                        and receipt.binding_sha256 != self._binding(config, legacy_deadlines=True)
+                    ) or receipt.projection.catalog.cohort_sha256 != cohort:
                         raise ValueError(
                             "catalog completion binding changed; explicit repair required"
                         )
+                    if receipt.binding_sha256 != binding:
+                        stage = "catalog_binding_compatibility"
+                        with WorkProgress(
+                            stage,
+                            1,
+                            unit="completions",
+                            estimate=False,
+                            planning_range_seconds=(0, 30),
+                            planning_basis="bounded_local_metadata_copy_and_atomic_wrapper_replacement",
+                        ) as compatibility:
+                            # Only an exact historical selection may migrate. Keep
+                            # its original bytes for rollback before replacing the
+                            # unsigned wrapper; authenticated projection is unchanged.
+                            history = self.state / "binding-history" / cohort
+                            owned_directory(history, create=True)
+                            if receipt_raw is None:
+                                receipt_raw = read_owned_file(receipt_path, MAX_COMPLETION_BYTES)
+                            atomic_write(history / (receipt.checksum + ".json"), receipt_raw)
+                            receipt = receipt.model_copy(
+                                update={"binding_sha256": binding}
+                            ).sealed()
+                            atomic_write(
+                                receipt_path, canonical_json_bytes(receipt), immutable=False
+                            )
+                            stamp = tuple(_stamp(receipt_path))
+                            compatibility.advance()
+                    self.receipts[cohort] = (stamp, receipt)
+                    while len(self.receipts) > 1:
+                        self.receipts.popitem(last=False)
                     if (
                         score_path.exists()
                         and tuple(map(str, _stamp(score_path))) != receipt.source_stamp

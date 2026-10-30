@@ -20,6 +20,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Annotated, Literal
 
 from pydantic import Field, model_serializer, model_validator
@@ -295,6 +296,8 @@ class DirectModelUploadOwner:
         selection_context=None,
         selection_authority=None,
         participation_ready=None,
+        continuation_ready=None,
+        object_ready=None,
     ) -> None:
         self.config = DirectModelUploadOwnerConfig.model_validate_json(canonical_json_bytes(config))
         if not callable(authorize) or not callable(sign):
@@ -304,6 +307,9 @@ class DirectModelUploadOwner:
         self.selection_context = selection_context
         self.selection_authority = selection_authority
         self.participation_ready = participation_ready
+        self.continuation_ready = continuation_ready
+        self._participation_wake_pending = False
+        self.object_ready = object_ready
         # Diagnostics only; admission and signed historical consumers continue
         # to use their exact retained artifacts. Refreshed before each poll.
         self._selection_holds = {}
@@ -541,6 +547,8 @@ class DirectModelUploadOwner:
                                     completed_at_unix_ms=now_unix_ms,
                                 ),
                             )
+                            if self.object_ready is not None:
+                                self.object_ready(self.config.cohort_sha256)
                     return signed
                 provider = self._provider(current)
                 if provider is not None and not superseded:
@@ -1135,6 +1143,8 @@ class DirectModelUploadOwner:
                 completed_at_unix_ms=now_unix_ms,
             )
             self.journal.put("direct-object", key, result)
+            if self.object_ready is not None:
+                self.object_ready(self.config.cohort_sha256)
             return result
 
     async def _verify_object(
@@ -1692,6 +1702,17 @@ class DirectModelUploadOwner:
         ) = await run_owned_thread(self._poll_projection)
         self._selection_holds = selection_holds
         self._selection_hold_fence = selection_fence
+        backfill_complete = False
+
+        def wake_participation():
+            if (
+                backfill_complete
+                and self._continuation_selection is not None
+                and self._participation_wake_pending
+            ):
+                self._participation_wake_pending = False
+                if self.continuation_ready is not None:
+                    self.continuation_ready()
 
         def source_finished(key):
             size = pending_sources.pop(key, None)
@@ -1703,7 +1724,9 @@ class DirectModelUploadOwner:
             nonlocal continuation_retrying, last_retry_error
             if self.participation_ready is not None:
                 try:
-                    await run_owned_thread(self.participation_ready, self, reservation)
+                    if await run_owned_thread(self.participation_ready, self, reservation):
+                        self._participation_wake_pending = True
+                    wake_participation()
                 except (ValueError, OSError, RuntimeError, sqlite3.Error) as error:
                     # Readiness metadata failure never invalidates verified
                     # model bytes or becomes a miner's terminal review hold.
@@ -1742,6 +1765,8 @@ class DirectModelUploadOwner:
         self._continuation_selection = (
             None if continuation_retrying else (selection_fence, frozenset(selection_holds))
         )
+        backfill_complete = True
+        wake_participation()
 
         def publish(position=None, reservation=None, model=None, stage="metadata_inventory"):
             if report is None:
@@ -2046,6 +2071,8 @@ class DirectModelUploadOwners:
         self._priority_polls = 0
         self._background_next = 0
         self._reports = {}
+        self._dirty = set()
+        self._dirty_lock = Lock()
         # Diagnostic partial snapshots never become scheduler completion facts.
         self._progress_reports = {}
         self._report_observed_unix_ms = {}
@@ -2054,7 +2081,18 @@ class DirectModelUploadOwners:
         self._waiting_since = dict.fromkeys(self.owners, started)
         self._polls_completed = dict.fromkeys(self.owners, 0)
 
+    def mark_pending(self, cohort):
+        # Bounded by configured cohorts, independent of retained verdicts and
+        # of reports that an already active pass may still publish.
+        if cohort not in self.owners:
+            raise ValueError("readiness hint is outside configured direct owners")
+        with self._dirty_lock:
+            self._dirty.add(cohort)
+
     def _pending(self, cohort):
+        with self._dirty_lock:
+            if cohort in self._dirty:
+                return None
         report = self._reports.get(cohort)
         return (
             None
@@ -2177,6 +2215,8 @@ class DirectModelUploadOwners:
         async with self._poll_mutex:
             current = time.time_ns() // 1_000_000 if now_unix_ms is None else now_unix_ms
             cohort, scope = self._select()
+            with self._dirty_lock:
+                self._dirty.discard(cohort)
             started = time.monotonic()
             waited = round(max(0, started - self._waiting_since[cohort]), 3)
             self._progress_reports.pop(cohort, None)

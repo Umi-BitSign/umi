@@ -12,12 +12,22 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import Protocol
 
-from .competition_cohort_execution import RecoverableExecutionEvidence, RecoverableExecutionJob
+from .competition_cohort_execution import (
+    RecoverableExecutionEvidence,
+    RecoverableExecutionJob,
+    RecoverableSharedIncumbentEvidence,
+)
 from .competition_cohort_execution_journal import (
     CohortExecutionAssignment,
     CohortExecutionAttempt,
     CohortExecutionJournal,
+    ExecutionScopeState,
+    IncumbentSourcePending,
     step_count,
+)
+from .competition_cohort_execution_retry import (
+    resident_execution_retries,
+    retry_resident_operation,
 )
 from .competition_cohort_order_inbox import CohortOrderInbox
 from .competition_cohort_order_signer import (
@@ -99,7 +109,9 @@ class CohortExecutionAuthority:
         timeout = self.journal.config.read_timeout_seconds
         cohort = assignment.certificate.order.round.cohort_sha256
         source = await await_progress(
-            wait_for_owned(self.history(cohort), timeout=timeout),
+            retry_resident_operation(
+                lambda: wait_for_owned(self.history(cohort), timeout=timeout), history=True
+            ),
             stage="execution_owner_history",
             cohort=cohort,
         )
@@ -153,7 +165,9 @@ class CohortExecutionAuthority:
             cohort=cohort,
         )
         current = await await_progress(
-            wait_for_owned(self.history(cohort), timeout=timeout),
+            retry_resident_operation(
+                lambda: wait_for_owned(self.history(cohort), timeout=timeout), history=True
+            ),
             stage="execution_history_freshness",
             cohort=cohort,
         )
@@ -219,28 +233,69 @@ class CohortExecutor(CohortExecutionAuthority):
         if scope is None:
             return await self.advance(assignment)
         slot = order_slot(assignment.certificate.order)
-        evidence = await self._completed(assignment, slot)
+        role_aware = getattr(self.sandbox, "execution_scope_roles", False)
+        state = await self._completed(assignment, slot, scope_state=role_aware)
+        evidence = state.evidence if role_aware and state is not None else state
         if evidence is not None:
             return evidence
         job = await self._journal_progress(assignment, self.journal.validate_assignment, assignment)
+        scope_options = {}
+        if role_aware and state is not None:
+            scope_options["model_roles"] = state.model_roles
+        if job.mode == "paired_model" and job.incumbent_observation_mode is not None:
+            status = getattr(self.journal, "incumbent_source_status", None)
+            if status is None:
+                raise RuntimeError("shared incumbent scheduling requires its journal reader")
+            readiness = await self._journal_progress(job, status, slot, job)
+            if readiness == "pending":
+                raise IncumbentSourcePending("shared incumbent source remains unfinished")
+            if readiness == "unselected":
+                # The first source uses the ordinary authenticated reservation
+                # before any model resources. Supported caches first check their
+                # source plans and fixed size bounds, without acquiring capacity.
+                async def before_reserve():
+                    with self.journal.locked(slot):
+                        if role_aware:
+                            prepared = await self._prepare_scope(assignment, slot)
+                            return prepared.model_roles
+                        await self._prepare_current(assignment, slot)
+
+                if getattr(self.sandbox, "execution_scope_before_reserve", False):
+                    scope_options["before_reserve"] = before_reserve
+                else:
+                    # Legacy/simple scopes have no pre-reservation cache checks.
+                    await before_reserve()
+            elif readiness != "ready":
+                raise RuntimeError("shared incumbent scheduling status is invalid")
+            elif role_aware and (state is None or state.model_roles != ("candidate",)):
+                # A ready hint also includes first producers. Only the ordinary
+                # current-authority/reuse path may establish candidate-only work.
+                with self.journal.locked(slot):
+                    prepared = await self._prepare_scope(assignment, slot)
+                if prepared.evidence is not None:
+                    return prepared.evidence
+                scope_options["model_roles"] = prepared.model_roles
         scope_input = (
             job
             if getattr(self.sandbox, "prepared_execution_scope", False)
             else (assignment.certificate.order)
         )
-        async with scope(scope_input) as enabled:
+        async with scope(scope_input, **scope_options) as enabled:
             if not enabled:
                 return await self.advance(assignment)
             total = step_count(job)
             restored = await self._journal_progress(job, self.journal.checkpoint_count, job)
             reused = await self._journal_progress(job, self.journal.reused_checkpoint_count, job)
-            with TransferProgress(
-                "model_pair_execution",
-                total,
-                unit="case_role_steps",
-                planning_unit_seconds=(1, job_policy_timeout(self.journal)),
-                idle_stall_seconds=job_policy_timeout(self.journal),
-            ) as progress:
+            with (
+                resident_execution_retries(slot, self.journal.config.read_timeout_seconds),
+                TransferProgress(
+                    "model_pair_execution",
+                    total,
+                    unit="case_role_steps",
+                    planning_unit_seconds=(1, job_policy_timeout(self.journal)),
+                    idle_stall_seconds=job_policy_timeout(self.journal),
+                ) as progress,
+            ):
                 progress.advance(restored, restored=True)
                 # Each ordinary advance finishes at most one step. The extra
                 # iteration covers an already-complete retained job; this is a
@@ -263,14 +318,38 @@ class CohortExecutor(CohortExecutionAuthority):
                 raise RuntimeError("paired execution batch did not finish its retained steps")
 
     async def _completed(
-        self, assignment: CohortExecutionAssignment, slot: str
-    ) -> RecoverableExecutionEvidence | None:
+        self, assignment: CohortExecutionAssignment, slot: str, *, scope_state=False
+    ) -> (
+        RecoverableExecutionEvidence
+        | RecoverableSharedIncumbentEvidence
+        | ExecutionScopeState
+        | None
+    ):
         existing = await run_owned_thread(self.journal.journal.get, "assignment", slot)
         if existing is not None:
             if canonical_json_bytes(existing) != canonical_json_bytes(assignment):
                 raise ValueError("execution slot already contains another assignment")
-            return await run_owned_thread(self.journal.evidence, slot)
+            reader = self.journal.execution_scope_state if scope_state else self.journal.evidence
+            return await run_owned_thread(reader, slot)
         return None
+
+    async def _retain_current(self, assignment):
+        source, started = await self.current(assignment)
+        job = await self._journal_progress(
+            assignment, self.journal.retain, assignment, source, started.block
+        )
+        return job, source, started
+
+    async def _prepare_scope(self, assignment, slot):
+        job, _, started = await self._retain_current(assignment)
+        return await self._journal_progress(
+            job, self.journal.prepare_execution_scope, slot, job, started
+        )
+
+    async def _prepare_current(self, assignment, slot):
+        job, source, started = await self._retain_current(assignment)
+        shared = await self._journal_progress(job, self.journal.reuse_incumbent, slot, job, started)
+        return job, source, started, shared
 
     async def advance(
         self, assignment: CohortExecutionAssignment
@@ -287,13 +366,7 @@ class CohortExecutor(CohortExecutionAuthority):
             evidence = await self._completed(assignment, slot)
             if evidence is not None:
                 return evidence
-            source, started = await self.current(assignment)
-            job = await self._journal_progress(
-                assignment, self.journal.retain, assignment, source, started.block
-            )
-            shared = await self._journal_progress(
-                job, self.journal.reuse_incumbent, slot, job, started
-            )
+            job, source, started, shared = await self._prepare_current(assignment, slot)
             if shared is not None:
                 return shared
             with review_scope("execution_journal", job.round.cohort_sha256, reads=0):
@@ -329,7 +402,18 @@ class CohortExecutor(CohortExecutionAuthority):
                         stage="execution_sandbox",
                         cohort=job.round.cohort_sha256,
                     )
-                    await self._journal_progress(job, self.journal.observe, job, attempt, result)
+                    # Drain the owned persistence attempt before cancellation
+                    # releases the job lock; recovery reuses the exact result,
+                    # exhaustion preserves the existing failure path.
+                    await await_owned_task(
+                        asyncio.create_task(
+                            retry_resident_operation(
+                                lambda: self._journal_progress(
+                                    job, self.journal.observe, job, attempt, result
+                                )
+                            )
+                        )
+                    )
 
                 # Restoration and shared cache queues precede inference. Give
                 # them the configured read budget without consuming the signed
@@ -488,6 +572,8 @@ class CohortExecutionWorker:
                 advance = getattr(self.executor, "advance_batch", self.executor.advance)
                 result = await advance(assignment)
                 return slot, "complete" if result is not None else "progress", ""
+            except IncumbentSourcePending:
+                return slot, "deferred", "incumbent_source_pending"
             except (
                 OSError,
                 ValueError,

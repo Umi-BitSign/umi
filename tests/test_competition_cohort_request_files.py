@@ -1081,6 +1081,59 @@ async def test_inventory_restart_recovers_signed_intent_and_rejects_wrong_signer
         )
 
 
+async def test_inventory_review_releases_writer_and_keeps_frozen_originals(exporting, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from umi import competition_cohort_request_files as module
+    from umi.competition_execution import execution_boundary
+
+    h = exporting
+    _worker, owner, slot, _, job, terminal = unfinished_endpoint(h)
+    observation = execution_boundary(await h.provider.collect())
+    entered, release = threading.Event(), threading.Event()
+    review = module.review_partial_request
+    snapshots = []
+
+    def paused(key, objects, *args, **kwargs):
+        snapshots.append(PartialRequestManifest.model_validate_json(objects(key)))
+        entered.set()
+        assert release.wait(30), "test did not release inventory review"
+        return review(key, objects, *args, **kwargs)
+
+    with monkeypatch.context() as patch, ThreadPoolExecutor(max_workers=2) as pool:
+        patch.setattr(module, "review_partial_request", paused)
+        pending = pool.submit(h.files.collect_inventory, owner, slot, observation)
+        try:
+            assert entered.wait(10), "inventory did not reach semantic review"
+            # New case completion commits while review is paused, but may not
+            # be mixed into this inventory's already-collected original inputs.
+            pool.submit(retain_case, h, owner, job, terminal.cases[-1]).result(timeout=3)
+
+            def no_live_fallback(*args, **kwargs):
+                pytest.fail("inventory review fetched journal state after collection")
+
+            patch.setattr(module.JournalEndpointObjects, "__call__", no_live_fallback)
+        finally:
+            release.set()
+        body, assignment, manifest, collected = pending.result(timeout=10)
+    assert manifest == snapshots[0]
+    assert len(manifest.cases) == len(terminal.cases) - 1
+    assert body.manifest_sha256 == digest(manifest)
+    assert (
+        review(
+            body.manifest_sha256,
+            collected,
+            owner.policy,
+            assignment.certificate,
+            opened_at_block=0,
+            completed_by_block=observation.block,
+        )
+        == assignment
+    )
+    _, _, fresh, _ = h.files.collect_inventory(owner, slot, observation)
+    assert fresh.cases == terminal.cases
+
+
 async def test_inventory_elapsed_time_and_certified_closure_do_not_grow_signed_state(exporting):
     h = exporting
     worker, owner, slot, _, job, terminal = unfinished_endpoint(h)

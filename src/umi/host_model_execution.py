@@ -1,8 +1,11 @@
 """Shared CPU model capacity backed by existing root-bound memory leases."""
 
 import asyncio
+import json
+import logging
+import os
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
 from typing import Annotated, Literal
 
@@ -20,6 +23,72 @@ from .open_competition import digest
 from .protocol import Hex32, StrictProtocolModel
 
 _ACTIVE = ContextVar("host_model_execution_lease", default=None)
+_LOGGER = logging.getLogger("umi.competition.progress")
+
+
+def _report_admission(controller, *, lane, count, started, state):
+    observation = controller.last_model_admission
+    if observation is None:
+        return
+    # Reuse the actual grant/wait decision. Diagnostics perform no fresh
+    # inventory and cannot change admission or imply an inference finish time.
+    with suppress(Exception):
+        _LOGGER.info(
+            "%s",
+            json.dumps(
+                dict(
+                    schema="umi-model-admission-observation/1",
+                    status=state,
+                    state=state,
+                    pid=os.getpid(),
+                    lane=lane,
+                    requested_slots=count,
+                    observed_unix_ms=int(time.time() * 1000),
+                    elapsed_seconds=round(time.monotonic() - started, 3),
+                    eta_seconds=0 if state == "admitted" else None,
+                    eta_basis=(
+                        "capacity_granted"
+                        if state == "admitted"
+                        else "awaiting_external_capacity_change"
+                    ),
+                    eta_scope="model_capacity_admission_only",
+                    **observation,
+                ),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+
+
+class ModelInvocationCapacity:
+    """A runner may bind a container only during this explicit invocation."""
+
+    def __init__(self, controller, lease):
+        self._controller, self._lease = controller, lease
+        self._generation, self._pid = lease._generation, os.getpid()
+        self._active, self._binding = True, None
+
+    def bind_container(self, container_id, cgroup_path):
+        if (
+            not self._active
+            or self._pid != os.getpid()
+            or self._lease.closed
+            or self._generation is not self._lease._generation
+        ):
+            raise AdmissionBindingError("model invocation capacity is no longer owned")
+        bound = self._controller.bind_model_container(self._lease, container_id, cgroup_path)
+        if bound:
+            self._binding = self._lease._model_container
+        return bound
+
+    def clear_container(self):
+        if self._binding is not None and self._lease._model_container is self._binding:
+            self._lease.clear_model_container()
+        self._binding = None
+
+    def close(self):
+        self.clear_container()
+        self._active = False
 
 
 class ModelExecutionMemoryPolicy(StrictProtocolModel):
@@ -104,12 +173,27 @@ class ModelExecutionAdmission:
 
     @asynccontextmanager
     async def invocation(self, runtime, *, runtime_authorization=None):
-        if _ACTIVE.get() == self.controller.policy_sha256:
+        active = _ACTIVE.get()
+        if (
+            active is not None
+            and active[0].policy_sha256 == self.controller.policy_sha256
+            and active[2] is asyncio.current_task()
+            and not active[1].closed
+            and active[1]._creator_pid == os.getpid()
+        ):
             self.check_runtime(runtime, runtime_authorization=runtime_authorization)
-            yield
+            token = ModelInvocationCapacity(active[0], active[1])
+            try:
+                yield token
+            finally:
+                token.close()
         else:
-            async with self.hold(runtime, runtime_authorization=runtime_authorization):
-                yield
+            async with self.hold(runtime, runtime_authorization=runtime_authorization) as lease:
+                token = ModelInvocationCapacity(self.controller, lease)
+                try:
+                    yield token
+                finally:
+                    token.close()
 
     @asynccontextmanager
     async def hold(
@@ -118,20 +202,38 @@ class ModelExecutionAdmission:
         self.check_runtime(runtime, runtime_authorization=runtime_authorization)
         lane = "owner_export" if preparation else "transient"
         count = len(self.slots) if exclusive and not preparation else 1
+        started = time.monotonic()
         with TransferProgress("model_execution_capacity", count, unit="slots") as progress:
             last_wait = None
             while True:
                 lease = self.controller.try_acquire_group(lane, count)
                 if lease is not None:
+                    _report_admission(
+                        self.controller, lane=lane, count=count, started=started, state="admitted"
+                    )
                     break
                 now = time.monotonic()
                 if last_wait is None or now - last_wait >= 10:
-                    progress.emit("waiting", reason="host_model_execution_capacity")
+                    progress.emit(
+                        "waiting",
+                        reason=(
+                            "host_model_preparation_capacity"
+                            if preparation
+                            else "host_model_invocation_capacity"
+                        ),
+                    )
+                    _report_admission(
+                        self.controller, lane=lane, count=count, started=started, state="waiting"
+                    )
                     last_wait = now
                 await asyncio.sleep(0.5)
             progress.advance(count)
         try:
-            token = None if preparation else _ACTIVE.set(self.controller.policy_sha256)
+            token = (
+                None
+                if preparation
+                else _ACTIVE.set((self.controller, lease, asyncio.current_task()))
+            )
             yield lease
         finally:
             if token is not None:

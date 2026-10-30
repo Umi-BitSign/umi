@@ -219,6 +219,13 @@ async def test_backfill_does_not_wait_for_earlier_source_stream(direct, monkeypa
     reads = direct.multipart.read_calls
     owner = direct.owner
     owner.participation_ready = queue_ready_participation
+    notifications = []
+
+    def ready():
+        assert owner._continuation_selection is not None
+        notifications.append(owner._continuation_selection)
+
+    owner.continuation_ready = ready
     entered = asyncio.Event()
 
     async def blocked_verify(key, **kwargs):
@@ -236,6 +243,9 @@ async def test_backfill_does_not_wait_for_earlier_source_stream(direct, monkeypa
         assert (await worker.poll_once())["completed"] == 1
         delivery.retain.assert_awaited_once()
         assert direct.multipart.read_calls == reads
+        assert len(notifications) == 1
+        reservation = owner._reservation_by_digest(keys[-1])
+        assert not queue_ready_participation(owner, reservation)
     finally:
         polling.cancel()
         with pytest.raises(asyncio.CancelledError):

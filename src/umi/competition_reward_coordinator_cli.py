@@ -142,17 +142,18 @@ def main(argv=None):
     try:
         config = load_reward_coordinator_config(args.config)
         if args.action == "approve-successor":
-            print(
-                json.dumps(
-                    approve_successor(
-                        config,
-                        predecessor=args.predecessor,
-                        cohort=args.cohort,
-                        package=args.package,
-                        reason=args.reason,
+            with _logs():
+                print(
+                    json.dumps(
+                        approve_successor(
+                            config,
+                            predecessor=args.predecessor,
+                            cohort=args.cohort,
+                            package=args.package,
+                            reason=args.reason,
+                        )
                     )
                 )
-            )
             return
         if args.action == "check":
             print(

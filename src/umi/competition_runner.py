@@ -10,8 +10,10 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import math
 import os
+import stat
 import sys
 import tempfile
 import time
@@ -29,6 +31,8 @@ from .concurrency import kill_and_reap
 from .open_competition import CaseOutput, CompetitionPolicy, ModelBundle, digest
 from .private_files import ensure_private_directory
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+
+_LOG = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .competition_evaluation_runtime import AuthorizedEvaluationRuntime
@@ -148,6 +152,7 @@ def model_command(
     inputs: Path,
     entrypoint: str,
     maximum_inference_ms: int,
+    cidfile: Path | None = None,
 ) -> tuple[str, ...]:
     if type(maximum_inference_ms) is not int or not 1 <= maximum_inference_ms <= 3_600_000:
         raise ValueError("invalid inference deadline")
@@ -184,6 +189,7 @@ def model_command(
         name,
         "--pull=never",
         "--rm",
+        *(("--cidfile", _mount_path(cidfile)) if cidfile is not None else ()),
         # conmon enforces this even if the Python evaluator is killed. The
         # finer-grained scoring deadline still includes container startup.
         f"--timeout={math.ceil(maximum_inference_ms / 1000)}",
@@ -334,6 +340,84 @@ async def stop_retained_cpu_invocation(invocation_sha256: str) -> None:
         raise EvaluationInfrastructureError("retained evaluation container cleanup failed")
 
 
+def _read_container_id(path: Path) -> str | None:
+    """Read only the bounded CID file created by this invocation's Podman."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return None
+    try:
+        details = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(details.st_mode)
+            or details.st_uid != os.geteuid()
+            or details.st_nlink != 1
+            or stat.S_IMODE(details.st_mode) & 0o022
+            or details.st_size > 65
+        ):
+            raise ValueError("invocation container identity file differs")
+        raw = os.read(descriptor, 66)
+    finally:
+        os.close(descriptor)
+    if len(raw) < 64:
+        return None  # Podman may have created the file before its single write.
+    value = raw.decode("ascii").removesuffix("\n")
+    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise ValueError("invocation requires a complete container identity")
+    return value
+
+
+def _capacity_container_path(raw: bytes, container_id: str, name: str) -> str | None:
+    records = json.loads(raw)
+    if not isinstance(records, list) or len(records) != 1 or not isinstance(records[0], dict):
+        raise ValueError("container inspection must identify exactly one invocation")
+    record = records[0]
+    if record.get("Id") != container_id or record.get("Name") not in {name, "/" + name}:
+        raise ValueError("container inspection differs from its invocation")
+    state = record.get("State", {})
+    if state.get("Running") is not True or not state.get("CgroupPath"):
+        return None
+    value = state["CgroupPath"]
+    if (
+        not isinstance(value, str)
+        or not value.startswith("/")
+        or any(part in {".", ".."} for part in value.split("/"))
+    ):
+        raise ValueError("container inspection has an invalid kernel path")
+    path = Path(value)
+    if path.name == "container":
+        path = path.parent
+    if path.name != f"libpod-{container_id}.scope":
+        raise ValueError("container cgroup differs from its full identity")
+    if not path.is_relative_to("/sys/fs/cgroup"):
+        path = Path("/sys/fs/cgroup") / str(path).lstrip("/")
+    return str(path / "container")
+
+
+async def _bind_invocation_capacity(process, cidfile, name, native_capacity):
+    """Optional accounting evidence; uncertainty retains the full container charge."""
+    try:
+        container_id = cgroup = None
+        while process.returncode is None:
+            if container_id is None:
+                container_id = _read_container_id(cidfile)
+            if container_id is not None and cgroup is None:
+                code, raw = await _small_command(
+                    ("/usr/bin/podman", "container", "inspect", "--format=json", container_id),
+                    timeout=2,
+                )
+                if code:
+                    return
+                cgroup = _capacity_container_path(raw, container_id, name)
+            if cgroup is not None and native_capacity.bind_container(container_id, cgroup):
+                return
+            await asyncio.sleep(0.1)
+    except Exception as error:
+        # This optimization does not alter execution classification or deadlines.
+        # Do not log untrusted Podman output or treat PID similarity as ownership.
+        _LOG.info("model_capacity_binding conservative reason=%s", type(error).__name__)
+
+
 async def execute_offline_case(
     *,
     bundle: ModelBundle,
@@ -346,6 +430,7 @@ async def execute_offline_case(
     invocation_sha256: Hex32 | None = None,
     workspace: Path | None = None,
     runtime_authorization: AuthorizedEvaluationRuntime | None = None,
+    native_capacity=None,
 ) -> OfflineCaseExecution:
     """Run a verified model on one clip, with no reference text passed to it.
 
@@ -394,12 +479,17 @@ async def execute_offline_case(
         if invocation_sha256 is None
         else invocation_container_name(invocation_sha256)
     )
-    process = None
+    process = binding = None
     with tempfile.TemporaryDirectory(prefix="umi-evaluation-input-", dir=workspace) as scratch:
         inputs = Path(scratch)
         path = inputs / "video.mp4"
         path.write_bytes(video)
         path.chmod(0o400)
+        cidfile = (
+            inputs / "container.cid"
+            if native_capacity is not None and invocation_sha256 is not None
+            else None
+        )
         command = model_command(
             runtime,
             name=name,
@@ -407,6 +497,7 @@ async def execute_offline_case(
             inputs=inputs,
             entrypoint=entrypoint,
             maximum_inference_ms=policy.maximum_inference_ms,
+            **({"cidfile": cidfile} if cidfile is not None else {}),
         )
         started = time.monotonic()
         status, hypothesis = "miner_failure", ""
@@ -420,6 +511,10 @@ async def execute_offline_case(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
+            if cidfile is not None:
+                binding = asyncio.create_task(
+                    _bind_invocation_capacity(process, cidfile, name, native_capacity)
+                )
 
             async def collect():
                 nonlocal returncode, reason
@@ -460,14 +555,25 @@ async def execute_offline_case(
             # Killing the Podman client alone does not establish container exit.
             # Remove only this case container; never --all or a
             # validator container name. Failure stops evaluation as infrastructure.
-            try:
-                code, _ = await _drain_cleanup(
-                    _small_command(
+            async def cleanup():
+                if binding is not None:
+                    binding.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await binding
+                try:
+                    code, _ = await _small_command(
                         ("/usr/bin/podman", "rm", "--force", "--ignore", "--time=0", name),
                     )
-                )
-                if code:
-                    raise EvaluationInfrastructureError("evaluation container cleanup failed")
+                    if code:
+                        raise EvaluationInfrastructureError("evaluation container cleanup failed")
+                finally:
+                    if native_capacity is not None:
+                        # A failed rm loses the live binding, so any surviving
+                        # container is fully charged before this lease releases.
+                        native_capacity.clear_container()
+
+            try:
+                await _drain_cleanup(cleanup())
             finally:
                 if process is not None and process.returncode is None:
                     with contextlib.suppress(ProcessLookupError):

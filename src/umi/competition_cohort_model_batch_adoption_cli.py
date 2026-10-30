@@ -12,11 +12,9 @@ from pathlib import Path
 import httpx
 
 from .competition_cohort_history import CohortRecoveryHistory
-from .competition_cohort_model_batch import SignedModelBatchCertificationAdoption
-from .competition_cohort_model_batch_adoption import ModelBatchAdoptionReviewRequest
 from .competition_cohort_model_batch_adoption_operator import (
+    ActorPublication,
     ModelBatchAdoptionOperatorConfig,
-    ModelBatchAdoptionTarget,
     publish_for_actor,
     run_model_batch_adoption,
 )
@@ -26,14 +24,7 @@ from .competition_cohort_model_batch_adoption_series import (
 )
 from .competition_host_activation import _read_root_control_path
 from .open_competition import CompetitionPolicy
-from .protocol import StrictProtocolModel, canonical_json_bytes
-
-
-class ActorPublication(StrictProtocolModel):
-    target: ModelBatchAdoptionTarget
-    request: ModelBatchAdoptionReviewRequest
-    signed: SignedModelBatchCertificationAdoption | None = None
-    check_only: bool = False
+from .protocol import canonical_json_bytes
 
 
 def _root_model(path, kind, maximum_bytes):

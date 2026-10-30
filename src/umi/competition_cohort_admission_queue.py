@@ -110,6 +110,7 @@ class CohortAdmissionQueue:
 
     def attach_evidence(self, cohort: str, consent: str, evidence: bytes, metadata: bytes) -> None:
         archive = RegistrationArchive(evidence, metadata)
+        inserted = False
         with self._connection() as (db, store):
             _, record = self._record(db, store, cohort, consent)
             if (
@@ -129,6 +130,9 @@ class CohortAdmissionQueue:
                     db.execute(
                         "INSERT OR IGNORE INTO cohort_admission_artifacts VALUES (?,?)", (key, raw)
                     )
+                    inserted = inserted or old is None
+        if inserted:
+            self.intake.readiness_wakes.notify("admissions")
 
     def evidence(self, cohort: str, consent: str) -> tuple[bytes, bytes, bytes]:
         import json
@@ -266,4 +270,6 @@ class CohortAdmissionQueue:
                         "INSERT INTO cohort_admission_certificates VALUES (?,?)",
                         (consent, canonical_json_bytes(certified)),
                     )
-            return certified
+        if certified is not None:
+            self.intake.readiness_wakes.notify("models")
+        return certified

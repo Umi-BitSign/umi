@@ -515,7 +515,9 @@ class RequestCompletionFiles:
 
         A short native writer reservation prevents independently owned case
         workers from changing the inventory between its immutable record reads.
-        It ends before export, proof delivery or signing and changes no records.
+        It ends before semantic review, export, proof delivery or signing and
+        changes no records. Review uses only the collected immutable originals;
+        it cannot fetch additional journal state after releasing ownership.
         """
         collected = ReplayObjectCollector(JournalEndpointObjects(owner.journal), self.maximum_bytes)
         with owner.journal.transaction() as db:
@@ -535,14 +537,15 @@ class RequestCompletionFiles:
                         )
             manifest = collect_partial_request(owner, slot, collected, shared=shared or False)
             key = collected.retain(manifest)
-            review_partial_request(
-                key,
-                collected,
-                owner.policy,
-                assignment.certificate,
-                opened_at_block=0,
-                completed_by_block=observation.block,
-            )
+            originals = {sha: collected.values[sha] for sha in collected.values}
+        review_partial_request(
+            key,
+            originals.__getitem__,
+            owner.policy,
+            assignment.certificate,
+            opened_at_block=0,
+            completed_by_block=observation.block,
+        )
         return (
             RequestInventory(
                 schema="umi-cohort-request-inventory/1",

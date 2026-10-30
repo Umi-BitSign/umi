@@ -51,6 +51,49 @@ and completed work after startup; `systemctl start` alone is insufficient.
 
 ## Supervisor maintenance for an installed successor
 
+### Challenge execution lanes
+
+The host's model lane ceiling comes from the available CPU affinity and cgroup
+quotas divided by the signed per-model CPU allowance. A 32-CPU host with a
+six-CPU model profile permits five lanes before memory admission. The existing
+shared memory controller still admits each invocation separately; this ceiling
+does not reserve all those lanes in advance or promise that all can run at once.
+Keep each model's signed memory limit, the separate preparation lane, host
+reserve, background allowance and bounded disk working set intact.
+
+Prepare a prospective policy using the qualified host interpreter:
+
+```sh
+python -I -B -m umi.host_model_lane_cli --selection /etc/umi/model-admission.json --runtime /etc/umi/original-cpu-runtime.json --worker-pid "$EVALUATOR_PID" --output-policy /var/lib/umi-model-capacity/next-policy.json --qualification-sha256 "$QUALIFICATION_SHA256"
+```
+
+The selection file contains the current `model_execution_admission` object.
+The runtime must be the original signed profile bound by that policy; a later
+PID-only adoption keeps its CPU and memory allowances unchanged. The output
+policy must be in the existing capacity directory. The command checks the exact
+prior policy and slot identities, observes the selected worker's CPU affinity,
+and includes quotas/cpusets of the configured rootless container parents.
+An optional `--maximum-lanes N` retains a lower operator ceiling. Existing lock
+identities remain unchanged, additional empty slots are created idempotently,
+and the new policy reserves their complete memory envelope. It never changes a
+live service. Its JSON output supplies the exact policy hash and matching
+`benchmark.concurrency` for the supported configuration handoff.
+
+Drain **every reviewer sharing this capacity pool** and keep them under their
+existing ServiceHolds until each selects the same new policy and scheduler
+ceiling. Only then resume them. Old policy readers cannot see reservations in
+added slots; preserving old lock identities does not make mixed-policy execution
+safe. Verify the selected policy bytes in each service namespace and native
+readiness through the ordinary handoff. Preserve cohort journals, completed
+inferences and signed runtime inputs; no miner resubmission is needed.
+
+Subsequent source and cohort-adoption updates must preserve that selected policy
+and scheduler ceiling, including an explicit operator cap. Do not restore an
+older fixed two-lane policy. A later capacity change uses another immutable
+generation and the same grouped handoff. The rollout is complete only after the
+automatic updater preserves the new selection and native work uses it; creating
+the policy or passing source tests does not establish adoption.
+
 ### Cohort artifact certificate readers
 
 Batch artifact certification adds an authenticated membership proof to each
@@ -3210,8 +3253,11 @@ transport damage holds remain repair holds.
 
 Reviewer assignment reads reuse private parsed objects after static proof
 verification, with fresh retained-input and conflict checks on every read.
-The exact assignment is read in a short read-only snapshot; static verification
-runs after releasing the journal lock. Endpoint grant delivery, dispatch,
+Assignment and partial-export source readers copy bounded originals in a short
+snapshot, then release it before canonical validation, hashing and static proof
+checks. Select the updated source for both evaluator and settlement readers;
+configuration, interpreters, signed evidence and journals remain intact. Miner
+upload protocols are unchanged. Endpoint grant delivery, dispatch,
 response recovery and retirement use owned worker threads for retained-selection
 reads, so a slow proof cannot block the main event loop. Cancellation drains
 that read before releasing its existing operation lock. Paid-service history
@@ -3666,6 +3712,21 @@ Existing installed units need these settings retained during service upgrades.
 Writers retain their exclusive transaction and generation checks. The owner
 still signs each fresh response; cached historical proofs do not grant current
 execution authority.
+
+Resident model batches retry only transient owner-history network failures and
+SQLite BUSY/LOCKED while persisting an already-produced sandbox result. Each
+failed operation uses bounded backoff for at most two minutes, capped by its
+existing read allowance; this is a scheduling allowance, not a new inference
+deadline or permission to cancel an owned operation. Healthy inference consumes
+none of the retry allowance. Logs report retry counts, elapsed time and remaining
+allowance. Fresh signed history, finality, capacity and memory limits are unchanged.
+An exhausted operation returns to the ordinary pending queue and releases model
+residency. Completed checkpoints remain reusable. If result persistence exhausts
+its recovery allowance, an unpersisted result may require another sandbox
+invocation. Cancellation drains the owned persistence attempt before releasing
+job ownership; it does not guarantee persistence when recovery fails. These
+internal evaluator changes use the existing source-maintenance update path and
+do not change miner wire formats.
 
 Independent service-request review compares exact finalized block facts, policy
 pins, schedule and attempt context. Observer transcripts can differ for the same
