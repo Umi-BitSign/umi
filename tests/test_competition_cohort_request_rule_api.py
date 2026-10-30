@@ -47,6 +47,7 @@ from umi.grandpa_finality import FINNEY_GENESIS_HASH
 from umi.open_competition import digest, sign_object
 from umi.protocol import canonical_json_bytes
 
+from .logging_helpers import json_progress_payloads
 from .test_competition_cohort_coordinator import Harness
 from .test_competition_cohort_intake import capture_at
 from .test_competition_cohort_recovery import recovery as recovery
@@ -608,7 +609,6 @@ async def test_profile_covers_slow_history_finality_reservation_and_complete_vot
 ):
     """Every staged delay exceeds the legacy scalar; native proof/signature checks remain."""
     import asyncio
-    import json
     import logging
 
     from umi import competition_work_progress as progress
@@ -731,7 +731,11 @@ async def test_profile_covers_slow_history_finality_reservation_and_complete_vot
             assert await peer.certify(p) == vote
             assert stages == ["history", "owned_height", "history", "reservation", "sign"]
             assert h.store.status(h.cohort)[1] == p.transition
-    events = [json.loads(r.message) for r in caplog.records if r.name == "umi.competition.progress"]
+    events = json_progress_payloads(
+        caplog.records,
+        logger="umi.competition.progress",
+        schema=("umi-competition-work-progress/1", "umi-competition-phase/1"),
+    )
     expected = {
         "adoption_history_before",
         "adoption_history_replay",
@@ -910,6 +914,7 @@ async def test_real_lifecycle_node_seeds_and_publishes_with_selected_finality(
     host.service, host.policy, host.provider = h.host.service, h.policy, h
     host.config = SimpleNamespace(maximum_state_bytes=1024**3)
     host.root, host.nodes, host.stores, host.gate = tmp_path / "native-lifecycle", {}, {}, None
+    host.forecast_ledger = None
     with ExitStack() as host.resources:
         if selected_profile:
             with pytest.raises(OSError, match="owned height"):

@@ -107,7 +107,161 @@ def _boundary_bound() -> int:
     )
 
 
-def _case_output_bound(maximum_output_bytes: int) -> int:
+def _cpu_timing_bound() -> int:
+    """Full eight-CPU evidence, including both repeated contexts and probes.
+
+    StrictProtocolModel restricts every canonical integer to the safe JSON
+    domain, including cache clocks whose field annotation permits larger ints.
+    Cross-field timing/geometry checks can narrow these independent maxima.
+    """
+    cpu_ids = repeated_array_bound(_length(8191), 8)
+    context = object_bound(
+        {
+            **dict.fromkeys(
+                ("profile_sha256", "hardware_sha256", "cpu_class_sha256", "topology_sha256"),
+                _DIGEST_BYTES,
+            ),
+            "cpu_ids": cpu_ids,
+            **dict.fromkeys(
+                (
+                    "cpu_quota_usec",
+                    "cpu_period_usec",
+                    "memory_max_bytes",
+                    "cgroup_device",
+                    "cgroup_inode",
+                ),
+                _BLOCK_BYTES,
+            ),
+            "memory_swap_max_bytes": _length(0),
+            "clock_ticks_per_second": _length(1_000_000),
+        }
+    )
+    ticks = object_bound(
+        {"cpu_id": _length(8191), **dict.fromkeys(("total", "busy", "steal"), _BLOCK_BYTES)}
+    )
+    sample = object_bound(
+        {
+            **dict.fromkeys(
+                (
+                    "started_us",
+                    "finished_us",
+                    "cgroup_usage_usec",
+                    "cgroup_throttled_usec",
+                    "cgroup_throttled_periods",
+                ),
+                _BLOCK_BYTES,
+            ),
+            "context": context,
+            "cpu_ticks": repeated_array_bound(ticks, 8),
+            "populated": _length(False),
+        }
+    )
+    worker = object_bound(
+        {
+            "worker": _length(7),
+            "wall_us": _length(5_000_000),
+            "thread_cpu_us": _length(5_000_000),
+            "result_sha256": _DIGEST_BYTES,
+        }
+    )
+    probe = object_bound(
+        {
+            "schema": _length("umi-fixed-cpu-condition-probe/1"),
+            "rule": _length("parallel_sha256_4096x65536_load_balanced/1"),
+            "measurement_profile_sha256": _DIGEST_BYTES,
+            "invocation_sha256": _DIGEST_BYTES,
+            "boundary": _length("before"),
+            "cpu_ids": cpu_ids,
+            "started_us": _BLOCK_BYTES,
+            "finished_us": _BLOCK_BYTES,
+            "workers": repeated_array_bound(worker, 8),
+        }
+    )
+    observer = object_bound(
+        dict.fromkeys(("started_us", "finished_us", "ticks", "maximum_lateness_us"), _BLOCK_BYTES)
+    )
+    pressure = object_bound(
+        {
+            "scope_identity_sha256": _DIGEST_BYTES,
+            **dict.fromkeys(
+                (
+                    "started_us",
+                    "finished_us",
+                    "external_memory_full_us",
+                    "external_io_full_us",
+                    "host_memory_full_us",
+                    "host_io_full_us",
+                    "model_memory_full_us",
+                    "model_io_full_us",
+                    "model_memory_high",
+                    "model_memory_max",
+                    "model_oom",
+                    "model_oom_kill",
+                    "model_major_faults",
+                    "model_read_bytes",
+                    "host_swap_in_pages",
+                    "host_swap_out_pages",
+                ),
+                _BLOCK_BYTES,
+            ),
+        }
+    )
+    conditions = object_bound(
+        {
+            "schema": _length("umi-cpu-condition-evidence/1"),
+            "invocation_sha256": _DIGEST_BYTES,
+            "topology_sha256": _DIGEST_BYTES,
+            "pressure_rule": _length("disjoint_external_cgroup_siblings_full_pressure/1"),
+            "before_probe": probe,
+            "after_probe": probe,
+            "observer": observer,
+            "before_pressure": pressure,
+            "after_pressure": pressure,
+        }
+    )
+    cache = object_bound(
+        {
+            "schema": _length("umi-cpu-bundle-cache-evidence/1"),
+            "rule": _length("verified_bundle_pagecache_eviction/1"),
+            "model_sha256": _DIGEST_BYTES,
+            "invocation_sha256": _DIGEST_BYTES,
+            "file_count": _length(4096),
+            "total_bytes": _BLOCK_BYTES,
+            "total_pages": _BLOCK_BYTES,
+            "page_size": _length(65536),
+            "resident_pages": _length(0),
+            "started_monotonic_us": _BLOCK_BYTES,
+            "finished_monotonic_us": _BLOCK_BYTES,
+        }
+    )
+    return object_bound(
+        {
+            "schema": _length("umi-cpu-timing-evidence/1"),
+            "contract_sha256": _DIGEST_BYTES,
+            "context": context,
+            "before": sample,
+            "after": sample,
+            **dict.fromkeys(
+                (
+                    "started_monotonic_us",
+                    "model_started_monotonic_us",
+                    "finished_monotonic_us",
+                    "launch_gate_elapsed_us",
+                ),
+                _BLOCK_BYTES,
+            ),
+            "conditions": conditions,
+            "bundle_cache": cache,
+        }
+    )
+
+
+def _case_output_bound(maximum_output_bytes: int, *, timed: bool = False) -> int:
+    # Historical WorkPlan execution has no CPU-efficiency authority and cannot
+    # produce timing. Preserve its exact retained reservation derivations.
+    if type(timed) is not bool:
+        raise ValueError("timed output capacity must be explicit")
+    timing = {"cpu_timing": _cpu_timing_bound()} if timed else {}
     return max(
         object_bound(
             {
@@ -115,20 +269,23 @@ def _case_output_bound(maximum_output_bytes: int) -> int:
                 "status": _length(status),
                 "hypothesis": _text_bound(maximum_output_bytes) if status == "ok" else 2,
                 "elapsed_ms": _length(86_400_000),
+                **timing,
             }
         )
         for status in get_args(CaseOutput.model_fields["status"].annotation)
     )
 
 
-def _step_bound(maximum_output_bytes: int) -> int:
+def _step_bound(maximum_output_bytes: int, *, timed: bool = False) -> int:
     execution = object_bound(
         {
-            "schema": _length("umi-offline-case-execution/1"),
+            "schema": _length(
+                "umi-offline-case-execution/2" if timed else "umi-offline-case-execution/1"
+            ),
             "model_sha256": _DIGEST_BYTES,
             "runtime_sha256": _DIGEST_BYTES,
             "video_sha256": _DIGEST_BYTES,
-            "output": _case_output_bound(maximum_output_bytes),
+            "output": _case_output_bound(maximum_output_bytes, timed=timed),
             "stdout_hex": 2 + 2 * (maximum_output_bytes + 1),
             "reason": max(
                 _length(reason)

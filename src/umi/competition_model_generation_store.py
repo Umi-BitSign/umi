@@ -28,6 +28,7 @@ from .private_files import (
     read_private_model,
 )
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+from .sqlite_contention import is_sqlite_contention
 
 CHUNKED_MODEL_BYTE_ABI = "umi-chunked-model-backup-bytes/1"
 
@@ -113,7 +114,7 @@ class _GenerationIndex(RoundJournal):
                             raise ModelGenerationRepairRequired("recovered owner binding differs")
                     progress.advance(1, restored=True)
                 except sqlite3.OperationalError as error:
-                    if error.sqlite_errorcode in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                    if is_sqlite_contention(error):
                         progress.emit("retrying", reason="model_generation_live_writer")
                         raise ModelGenerationOwnerBusy(
                             "model generation owner has a live writer"

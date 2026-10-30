@@ -84,6 +84,50 @@ def test_batch_configuration_preserves_old_bytes_and_explicit_bounds(lifecycle, 
             )
 
 
+def test_cpu_efficiency_host_selection_is_authenticated_and_preserves_old_config(
+    lifecycle, tmp_path
+):
+    from umi.competition_cpu_efficiency_policy import (
+        CohortCpuEfficiencyAdoption,
+        SignedCohortCpuEfficiencyAdoption,
+    )
+
+    from .test_competition_cohort_recovery import signatures
+
+    h = lifecycle
+    original = host_config(h, tmp_path / "host")
+    raw = canonical_json_bytes(original)
+    assert b"cpu_efficiency_adoption" not in raw
+    assert canonical_json_bytes(ServiceAdmissionHostConfig.model_validate_json(raw)) == raw
+    authority = original.series.recovery.authority
+    body = CohortCpuEfficiencyAdoption(
+        schema="umi-cohort-cpu-efficiency-adoption/1",
+        policy_sha256=digest(h.intake.policy),
+        authority_sha256=digest(authority),
+        cohort_sha256s=authority.cohort_sha256s,
+        first_cohort_sequence=8,
+        runtime_sha256=h.intake.policy.evaluation_runtime_sha256,
+        issued_at_block=authority.issued_at_block,
+        reason="Select future CPU efficiency while retaining original cohorts",
+    )
+    signed = SignedCohortCpuEfficiencyAdoption(adoption=body, signatures=signatures(body))
+    config = original.model_copy(update={"cpu_efficiency_adoption": signed})
+    host = ServiceAdmissionHost(
+        config, h.intake, h.owner.promotion, h.provider.collect, h.provider.retained_archive
+    )
+    assert host.preparation.cpu_efficiency_adoption == signed
+    wrong = body.model_copy(update={"runtime_sha256": "ab" * 32})
+    wrong_signed = SignedCohortCpuEfficiencyAdoption(adoption=wrong, signatures=signatures(wrong))
+    with pytest.raises(ValueError, match="authority or runtime"):
+        ServiceAdmissionHost(
+            original.model_copy(update={"cpu_efficiency_adoption": wrong_signed}),
+            h.intake,
+            h.owner.promotion,
+            h.provider.collect,
+            h.provider.retained_archive,
+        )
+
+
 @pytest.mark.parametrize("overlap", ["queue", "inputs_child", "service_state"])
 def test_batch_adoptions_are_disjoint_from_state(lifecycle, config, tmp_path, overlap):
     selected = host_config(lifecycle, tmp_path / "host")

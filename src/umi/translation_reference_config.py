@@ -11,7 +11,10 @@ import bittensor as bt
 from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain_resources import CompetitionChainResources
-from .competition_cohort_reward_allocation import CohortRewardAllocation
+from .competition_cohort_reward_allocation import (
+    MAX_REWARD_ALLOCATION_BYTES,
+    CohortRewardAllocation,
+)
 from .competition_reward_adoption_consumer import open_reward_adoption_feed
 from .competition_reward_control import FinalizedRewardControlProvider
 from .competition_reward_coordinator_boot import load_reward_coordinator_config
@@ -270,7 +273,7 @@ def build_reference_service(config: ReferencePublisherConfig, *, progress=None):
                 raise ValueError("configured allocation producer directory must be protected")
             path, owner = source / "allocations" / (sha + ".json"), producer.st_uid
         try:
-            raw = read_input(path, 1024 * 1024, producer_uid=owner)
+            raw = read_input(path, MAX_REWARD_ALLOCATION_BYTES, producer_uid=owner)
         except FileNotFoundError as error:
             raise FileNotFoundError("current signed allocation has not been replicated") from error
         allocation = CohortRewardAllocation.model_validate_json(raw)

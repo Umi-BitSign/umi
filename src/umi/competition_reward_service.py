@@ -40,6 +40,7 @@ from .competition_reward_opportunity import VerifiedRewardOpportunity
 from .competition_reward_preparation import PreparedStandingReward, StandingRewardPreparation
 from .competition_reward_series_handoff import StandingRewardPredecessorOpportunity
 from .competition_reward_standing_handoff import hold_standing_reward_handoff
+from .competition_reward_transactions import MAX_STANDING_JOURNAL_BYTES
 from .competition_supervisor_runtime import SuccessorSupervisorRuntime
 from .concurrency import await_owned_task, run_owned_thread
 from .host_memory_runtime import memory_operation
@@ -57,7 +58,7 @@ def _stage(name):
 class StandingRewardServiceLimits(StrictProtocolModel):
     """Host capacities and individual-operation bounds, never cohort deadlines."""
 
-    maximum_journal_bytes: Annotated[int, Field(ge=1024, le=512 * 1024**3)]
+    maximum_journal_bytes: Annotated[int, Field(ge=1024, le=MAX_STANDING_JOURNAL_BYTES)]
     mortality_period: Annotated[int, Field(ge=4, le=4096)]
     maximum_history_blocks: Annotated[int, Field(ge=1, le=4096)] = 64
     history_verification: HistoryVerificationProfile | None = None

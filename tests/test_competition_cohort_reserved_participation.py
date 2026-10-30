@@ -640,7 +640,7 @@ async def test_worker_and_public_progress_preserve_typed_retry_cause_without_pri
         else sqlite3.OperationalError("private /path https://secret.invalid")
     )
     if not repair:
-        cause.sqlite_errorcode, cause.sqlite_errorname = sqlite3.SQLITE_BUSY, "SQLITE_BUSY"
+        cause.sqlite_errorcode, cause.sqlite_errorname = getattr(sqlite3, "SQLITE_BUSY", 5), "SQLITE_BUSY"
     error = ParticipationUnavailable("private wrapper text", stage="evidence_preservation")
     error.__cause__ = cause
     worker, _ = _worker(direct.owner, AsyncMock(side_effect=error))
@@ -655,7 +655,7 @@ async def test_worker_and_public_progress_preserve_typed_retry_cause_without_pri
         assert value["reason_code"] == "participation_evidence_unavailable"
         assert value["repair_required"] is repair
         if not repair:
-            assert value["sqlite_errorcode"] == sqlite3.SQLITE_BUSY
+            assert value["sqlite_errorcode"] == getattr(sqlite3, "SQLITE_BUSY", 5)
             assert value["sqlite_errorname"] == "SQLITE_BUSY"
         assert "secret.invalid" not in str(value)
         assert "private wrapper" not in str(value)

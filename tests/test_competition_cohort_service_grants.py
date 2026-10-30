@@ -6,7 +6,6 @@ request bodies or response envelopes.
 """
 
 import hashlib
-import json
 import logging
 import time
 from dataclasses import replace
@@ -68,6 +67,7 @@ from umi.protocol import canonical_json_bytes, request_digest
 from umi.window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS
 
 from . import test_competition_cohort_miner as miner_fixtures
+from .logging_helpers import json_progress_payloads
 from .test_competition_cohort_disposition import order as signed_order
 from .test_competition_cohort_endpoint import endpoint_scenario
 from .test_competition_cohort_miner import base_policy as base_policy
@@ -2410,12 +2410,11 @@ async def test_native_reward_allocation_replays_lost_commit_without_new_head(
             )
             == result
         )
-    events = [
-        json.loads(r.message)
-        for r in caplog.records
-        if r.name == "umi.competition.progress"
-        and json.loads(r.message).get("schema") == "umi-competition-work-progress/1"
-    ]
+    events = json_progress_payloads(
+        caplog.records,
+        logger="umi.competition.progress",
+        schema="umi-competition-work-progress/1",
+    )
     for stage in (
         "reward_package_serialization",
         "reward_package_inventory",

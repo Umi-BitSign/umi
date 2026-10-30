@@ -261,7 +261,8 @@ def _category_capacity_choices(
         dataset: min(
             maximum_per_dataset - dataset_counts[dataset],
             whole_suite_cap - total_dataset_counts[dataset]
-            if whole_suite_cap is not None else maximum_per_dataset,
+            if whole_suite_cap is not None
+            else maximum_per_dataset,
         )
         for dataset in offered
     }
@@ -290,7 +291,8 @@ def _category_capacity_choices(
                 contains = bool(mask & (1 << i))
                 demand = demands[mask] - int(contains and deficits[category] > 0)
                 capacity = (
-                    capacities[mask] - min(limit, amounts[dataset][mask])
+                    capacities[mask]
+                    - min(limit, amounts[dataset][mask])
                     + min(limit - 1, amounts[dataset][mask] - int(contains))
                 )
                 if demand > capacity:
@@ -415,8 +417,13 @@ def select_future_suite(
                     for key, minimum in category_minimums.items()
                 }
                 category_choices = _category_capacity_choices(
-                    [c for c, _, _ in eligible], dataset_keys, dataset_counts,
-                    total_dataset_counts, deficits, maximum_per_dataset, cap,
+                    [c for c, _, _ in eligible],
+                    dataset_keys,
+                    dataset_counts,
+                    total_dataset_counts,
+                    deficits,
+                    maximum_per_dataset,
+                    cap,
                     wanted - index - 1,
                 )
                 if sum(deficits.values()) == wanted - index:
@@ -444,7 +451,8 @@ def select_future_suite(
                 # Keep the original `available` ranking above. Resource checks
                 # use the broad pool, before filters restricting only this pick.
                 eligible = [
-                    item for item in eligible
+                    item
+                    for item in eligible
                     if (dataset_keys[item[0].case.case_id], item[0].fingerspelling_category)
                     in category_choices
                 ]

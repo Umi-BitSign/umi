@@ -21,12 +21,19 @@ from .competition_cohort_review_http import (
     PhaseReviewHTTPClient,
     phase_review_routes,
 )
+from .competition_cpu_efficiency_adoption import (
+    MAX_CPU_ADOPTION_BYTES,
+    CpuEfficiencyReviewRequest,
+    CpuEfficiencyVote,
+    check_cpu_efficiency_vote,
+)
 from .concurrency import wait_for_owned
 from .protocol import canonical_json_bytes
 
 VOTE_PATH = "/internal/cohorts/model-artifacts/votes"
 BATCH_VOTE_PATH = "/internal/cohorts/model-artifacts/batch-votes"
 BATCH_ADOPTION_VOTE_PATH = "/internal/cohorts/model-artifacts/batch-adoption-votes"
+CPU_ADOPTION_VOTE_PATH = "/internal/cohorts/model-artifacts/cpu-efficiency-votes"
 MAX_BATCH_REQUEST_BYTES = 64 * 1024**2
 MAX_REQUEST_BYTES = 5 * 1024**2
 MAX_VOTE_BYTES = 16 * 1024
@@ -53,6 +60,17 @@ class _BatchAdoptionVoteResponder(_VoteResponder):
         return canonical_json_bytes(await self.reviewer.attest_batch_adoption(request))
 
 
+class _CpuAdoptionVoteResponder(_VoteResponder):
+    def __init__(self, reviewer, timeout_seconds):
+        review_export_limits(MAX_CPU_ADOPTION_BYTES, timeout_seconds)
+        self.reviewer = reviewer
+        self.maximum_bytes = MAX_CPU_ADOPTION_BYTES
+        self.timeout_seconds = timeout_seconds
+
+    async def respond(self, request):
+        return canonical_json_bytes(await self.reviewer.attest_cpu_efficiency(request))
+
+
 def model_review_routes(reviewer, *, token, timeout_seconds=2400):
     router = phase_review_routes(
         _VoteResponder(reviewer, timeout_seconds),
@@ -77,6 +95,15 @@ def model_review_routes(reviewer, *, token, timeout_seconds=2400):
             path=BATCH_ADOPTION_VOTE_PATH,
             request_model=ModelBatchAdoptionReviewRequest,
             maximum_request_bytes=16 * 1024,
+        )
+    )
+    router.include_router(
+        phase_review_routes(
+            _CpuAdoptionVoteResponder(reviewer, timeout_seconds),
+            token=token,
+            path=CPU_ADOPTION_VOTE_PATH,
+            request_model=CpuEfficiencyReviewRequest,
+            maximum_request_bytes=MAX_CPU_ADOPTION_BYTES,
         )
     )
     return router
@@ -113,6 +140,30 @@ class ModelReviewPeer:
             maximum_request_bytes=16 * 1024,
             timeout_seconds=timeout_seconds,
         )
+
+        self.cpu_adoption_transport = PhaseReviewHTTPClient[CpuEfficiencyReviewRequest](
+            client,
+            origin,
+            token=token,
+            path=CPU_ADOPTION_VOTE_PATH,
+            maximum_bytes=MAX_CPU_ADOPTION_BYTES,
+            maximum_request_bytes=MAX_CPU_ADOPTION_BYTES,
+            timeout_seconds=timeout_seconds,
+        )
+
+    async def attest_cpu_efficiency(self, request):
+        if not any(
+            b.cohort_sha256 == request.anchor_cohort_sha256
+            and b.authority_sha256 == request.adoption.authority_sha256
+            for b in self.cohorts
+        ):
+            raise ValueError("CPU adoption is outside configured cohort authority")
+        response = await wait_for_owned(self.cpu_adoption_transport(request), timeout=self.timeout)
+        vote = CpuEfficiencyVote.model_validate_json(response)
+        if canonical_json_bytes(vote) != response:
+            raise ValueError("CPU adoption vote is not canonical")
+        check_cpu_efficiency_vote(vote, request, self.policy, signer=self.signer)
+        return vote
 
     async def attest(self, request):
         a = request.acceptance

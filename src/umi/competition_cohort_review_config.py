@@ -204,6 +204,11 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                             if self.model_signing.batch_certification_adoptions_directory
                             else ()
                         ),
+                        *(
+                            (self.model_signing.cpu_efficiency_adoptions_directory,)
+                            if self.model_signing.cpu_efficiency_adoptions_directory
+                            else ()
+                        ),
                     )
                     if self.model_signing
                     else ()

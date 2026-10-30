@@ -48,6 +48,7 @@ from umi.protocol import canonical_json_bytes
 
 from . import test_competition_cohort_service_grants as grant_fixtures
 from . import test_open_competition as competition_tests
+from .logging_helpers import json_progress_payloads
 from .test_competition_cohort_consumers import tip
 from .test_competition_cohort_quality import certificates_for
 from .test_competition_cohort_roster import close
@@ -5498,12 +5499,11 @@ async def test_native_settlement_controller_resumes_original_votes_after_peer_ou
     assert result.package.benchmark == h.c.native.package.benchmark
     assert result.package.service == h.c.native.package.service
     assert h.c.b["service_case"].p.model.calls == 1
-    events = [
-        json.loads(r.message)
-        for r in caplog.records
-        if r.name == "umi.competition.progress"
-        and json.loads(r.message).get("schema") == "umi-competition-work-progress/1"
-    ]
+    events = json_progress_payloads(
+        caplog.records,
+        logger="umi.competition.progress",
+        schema="umi-competition-work-progress/1",
+    )
     for phase in ("evidence", "review", "certification"):
         for suffix in ("native_review", "peer_progress_vote", "peer_decision_vote"):
             completed = [
@@ -6397,11 +6397,11 @@ def test_settlement_serialization_scope_preserves_native_checks_and_package_byte
         assert reuse._ACTIVE.get() is None
     assert results[0] == results[1]
     assert results[0][-1] > 0 and results[0][-2]
-    events = [
-        json.loads(record.message)
-        for record in caplog.records
-        if record.name == "umi.competition.progress"
-    ]
+    events = json_progress_payloads(
+        caplog.records,
+        logger="umi.competition.progress",
+        schema="umi-competition-work-progress/1",
+    )
     names = {event.get("operation_name") for event in events}
     assert {"settlement_prepare", "settlement_replay"} <= names
     assert all(event["certification_authority"] is False for event in events)

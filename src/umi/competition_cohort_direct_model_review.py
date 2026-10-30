@@ -629,6 +629,7 @@ class DirectModelSettlementVerifier:
 
             def provider(_):
                 return certification_history
+
         if provider is None and selected is not None:
             return selected
         return LegacyModelSettlementStorage(sources, cohort, certification_history=provider)

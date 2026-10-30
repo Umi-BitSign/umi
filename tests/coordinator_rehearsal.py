@@ -30,6 +30,25 @@ def fixture_validator_hotkey(instance):
     return dev_wallet("//CoordinatorRehearsalValidator" + instance).hotkey.ss58_address
 
 
+def preflight_failure_journal(started):
+    """Retain bounded child diagnostics from this wallet-free fixture attempt."""
+    try:
+        logs = _command(
+            "/usr/bin/journalctl",
+            "--unit=umi-successor-preflight-*.service",
+            f"--since=@{started:.6f}",
+            "--no-pager",
+            "--output=cat",
+            "-n",
+            "60",
+            check=False,
+            timeout=10,
+        )
+        return "\npreflight child journal:\n" + logs.stdout[-65536:].decode(errors="replace")
+    except BaseException as error:
+        return "\npreflight journal unavailable: " + type(error).__name__
+
+
 # Matches the deployed coordinator's namespace and sandbox. The fixture has no
 # legacy executable or migration approval, so this text cannot start a writer.
 LEGACY_FRAGMENT = """[Unit]

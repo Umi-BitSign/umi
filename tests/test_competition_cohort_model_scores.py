@@ -85,6 +85,7 @@ def certified(model_case, request):
         "umi-cohort-model-award/2": 3,
         "umi-cohort-model-award/3": 4,
         "umi-cohort-model-award/4": 5,
+        "umi-cohort-model-award/5": 6,
     }[selected.schema_]
     allocation = CohortRewardAllocation(
         schema="umi-cohort-reward-allocation/" + str(version),
@@ -202,6 +203,10 @@ def test_historical_public_score_bytes_omit_prospective_grace_fields():
     raw = canonical_json_bytes(original)
     assert b'"reward_parameters"' not in raw
     assert b'"baseline_threshold"' not in raw
+    assert b'"cpu_efficiency_adoption_sha256"' not in raw
+    assert b'"efficiency_weight_applied"' not in raw
+    assert b'"efficiency_multiplier_ppm"' not in raw
+    assert b'"normalized_cpu_slowdown"' not in raw
     assert canonical_json_bytes(module.PublicModelScores.model_validate_json(raw)) == raw
 
 

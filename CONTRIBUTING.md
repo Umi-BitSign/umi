@@ -184,6 +184,15 @@ SQLite triggers for this purpose. Startup audits compare counters with full
 history; an installed but damaged index must not be silently rebuilt. Preserve
 read-only access to older evidence formats when adding a private writer schema.
 
+Classify SQLite contention and storage exhaustion with `umi.sqlite_contention`.
+Python 3.10 does not expose SQLite exception codes or the corresponding module
+constants; the shared classifier uses only exact native messages there. Newer
+Python versions use numeric codes, including extended BUSY/LOCKED codes. Preserve
+the original exception as the cause when translating errors, keep private paths
+out of diagnostics, and propagate other storage failures instead of retrying them.
+Consumer regression tests should exercise real SQLite locks and retry after their
+release on the oldest supported interpreter.
+
 ## Remote test workspace cleanup
 
 Use a task-scoped temporary root for remote tests, with separate checkout and

@@ -1,0 +1,9 @@
+[Unit]
+Description=UMI evaluator-only CPU migration domain
+
+[Slice]
+# Render from the observed online CPU set, not a fixed core count.
+AllowedCPUs=@ALL_CPUS@
+AllowedMemoryNodes=@NUMA_NODES@
+CPUAccounting=yes
+MemoryAccounting=yes

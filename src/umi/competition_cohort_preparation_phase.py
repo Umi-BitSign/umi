@@ -23,6 +23,7 @@ from .competition_cohort_intake import history_tip
 from .competition_cohort_preparation import PreparedCohortRound
 from .competition_cohort_preparation_owner import CohortPreparation
 from .competition_cohort_recovery import CohortRecoveryState, CohortRecoveryTransition
+from .competition_cpu_efficiency_policy import require_cpu_efficiency_for_new_round
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .concurrency import run_owned_thread
 from .host_memory_runtime import memory_operation
@@ -90,6 +91,15 @@ class NativePreparationProgressSource:
     ) -> CohortPhaseProgress:
         cohort = state.cohort_sha256
         prepared = self.owner.prepare(cohort, capture, expected_tip_sha256=state.tip_sha256)
+        # Legacy bytes remain replayable, but an untimed retained C8+ round may
+        # not receive a new preparation certificate under today's producer rule.
+        # Ongoing request execution and historical export replay do not use this
+        # new-observation path.
+        require_cpu_efficiency_for_new_round(
+            sequence=prepared.roster.round.sequence,
+            eligible_tracks=prepared.roster.round.eligible_tracks,
+            adoption=prepared.roster.round.cpu_efficiency_adoption,
+        )
         evidence = PreparationProgressEvidence(
             schema="umi-preparation-progress-evidence/1",
             prepared_sha256=digest(prepared),

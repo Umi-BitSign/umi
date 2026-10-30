@@ -79,6 +79,11 @@ class CohortAdmissionWorkerConfig(StrictProtocolModel):
                     self.preparation.promotion_directory,
                     self.preparation.output_directory,
                     *(
+                        (self.preparation.cpu_efficiency_adoptions_directory,)
+                        if self.preparation.cpu_efficiency_adoptions_directory
+                        else ()
+                    ),
+                    *(
                         (self.preparation.objects_directory,)
                         if self.preparation.objects_directory
                         else ()
@@ -274,6 +279,8 @@ async def run_admission_worker(
                     maximum_bytes=selected.maximum_bytes,
                     maximum_promotion_bytes=selected.maximum_promotion_bytes,
                     runtime_adoption=selected.runtime_adoption,
+                    cpu_efficiency_adoption=selected.cpu_efficiency_adoption,
+                    cpu_efficiency_adoptions_directory=selected.cpu_efficiency_adoptions_directory,
                 ),
                 provider,
                 Path(selected.output_directory),

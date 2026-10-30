@@ -169,6 +169,43 @@ projection and live chain rewards are separate; this endpoint does not assess
 reward activation. Publication happens automatically after a certified native
 allocation is available. A 404 means that the score artifact has not been published.
 
+For C8 and later, the selected signed CPU-efficiency contract adds a bounded
+adjustment to model reward weight. Quality still determines eligibility, duplicate
+exclusion, bands and displayed rank. For each case, compare the candidate's cold
+CPU model execution time with the frozen reference on the same evaluator and
+comparable resources. Average those ratios using the suite's task weights, round
+each evaluator's normalized result upward to the nearest `1e-9`, then average
+across its selected evaluators. If that slowdown
+is `D`, the reward multiplier is `clamp(D^(-0.1), 0.85, 1.15)`, rounded down to
+one part per million. Apply it to the quality-derived weight, then normalize the
+eligible model pool. The ±15% bound applies before that final normalization; it
+is not a promised ±15% change to a miner's final share.
+
+Timing includes fresh model/Python startup, loading, preprocessing, inference and
+postprocessing through validated output. Upload, restoration, queueing, container
+provisioning and host admission are excluded from the speed comparison. The
+original operational timeout remains in force and still includes container
+startup. This measures CPU efficiency, not GPU performance. A failed candidate
+case is charged its deadline and prevents a speed bonus for that model; a failed
+reference case contributes a neutral speed ratio without changing either quality
+score. Missing or incomparable timing requires explicit repair rather than a
+neutral reward. Reference promotion still compares measured quality only.
+
+The evaluator starts each timed invocation with the declared model bundle's
+Linux page cache evicted and verified empty under exclusive same-model
+ownership. This prevents a reused baseline from receiving an accidental warm
+model-cache advantage. It does not promise cold SSD/controller caches or shared
+runtime libraries. Preparation and cache conditioning are outside measured
+model time; the inference deadline and memory budget remain unchanged.
+
+Timed results use `umi-public-cohort-model-results/4`. Each scored row includes
+`normalized_cpu_slowdown` as an exact fraction and `efficiency_multiplier_ppm`
+(`1000000` means neutral). `cpu_efficiency_adoption_sha256` identifies the selected
+measurement contract. Check `efficiency_weight_applied`: `false` means the result
+contains certified timing but its displayed allocation has not applied it;
+`true` means the selected allocation includes the adjustment. These fields do not
+claim live chain payments. C6 and C7 keep their original scoring and reward rules.
+
 The certified cohort's public model catalog and renewable download metadata are
 published automatically as well. Read
 `GET /v1/competition/cohorts/<cohort_sha256>/models`, then use each model's

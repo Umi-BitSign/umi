@@ -67,7 +67,25 @@ async def test_original_adopted_history_closes_and_retries_publication(
         authenticated_request_tail_rule(original_history, h.b["policy"])
         == "original_request_12h_with_completed_miner/1"
     )
-    h.window()
+    # Observation and publication share successful semantic checkpoints. Put
+    # the interruption at the actual first check, before observation completes.
+    window_end = h.block + h.duration
+    remember = VerificationReuse.remember
+    checkpoints = []
+
+    def interrupt_after_checkpoint(owner, *args):
+        remember(owner, *args)
+        checkpoints.append(args[0])
+        raise OSError("first pass interrupted after durable semantic checkpoint")
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(VerificationReuse, "remember", interrupt_after_checkpoint)
+        with pytest.raises(OSError, match="durable semantic checkpoint"):
+            h.window()
+    assert len(checkpoints) == 1
+    h.sample()
+    while h.block < window_end:
+        h.sample(min(h.block + 300, window_end))
     handoff = tmp_path / "adopted-handoff" / (h.cohort + ".json")
     proofs = []
     failed = False
@@ -150,23 +168,10 @@ async def test_original_adopted_history_closes_and_retries_publication(
         )
 
     with request_controller(h, tmp_path, publication) as control:
-        remember = VerificationReuse.remember
-        checkpoints = []
-
-        def interrupt_after_checkpoint(owner, *args):
-            remember(owner, *args)
-            checkpoints.append(args[0])
-            raise OSError("first pass interrupted after durable semantic checkpoint")
-
-        with monkeypatch.context() as interrupted:
-            interrupted.setattr(VerificationReuse, "remember", interrupt_after_checkpoint)
-            with pytest.raises(OSError, match="durable semantic checkpoint"):
-                await control.reopen().tick()
-        assert len(checkpoints) == 1
+        assert control.publisher.verification_reuse is h.source.verification_reuse
         assert not handoff.exists()
-        control.publisher = publication(control.decision)
         with pytest.raises(OSError, match="publication interrupted"):
-            await control.publisher(h.intake.history(h.cohort))
+            await control.reopen().tick()
         assert control.store.status(h.cohort)[0].phase == "reference_reveal"
         assert not handoff.exists()
         h.source = h.reopen()

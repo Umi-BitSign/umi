@@ -15,10 +15,12 @@ from umi.protocol import StrictProtocolModel, canonical_json_bytes
 class Activation(StrictProtocolModel):
     package_sha256: str
     allocation_sha256: str
+    reward_adoption_sha256: str | None = None
 
 
 class Decision(StrictProtocolModel):
     activation: Activation
+    admission_adoption_sha256: str | None = None
 
 
 class Signed(StrictProtocolModel):
@@ -53,7 +55,7 @@ def test_prefix_drops_old_graph_before_loading_next(monkeypatch, operation, chan
         loaded.append(key)
         return result
 
-    files = SimpleNamespace(package=package, decision=decisions.__getitem__)
+    files = SimpleNamespace(verified_package=package, decision=decisions.__getitem__)
     if operation == "readback":
         owner = SimpleNamespace(readback=files, publisher=SimpleNamespace(files=files))
         run = partial(coordinator_module.StandingRewardCoordinator._readback, owner, prefix)

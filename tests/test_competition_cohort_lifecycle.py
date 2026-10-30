@@ -769,7 +769,7 @@ async def test_lifecycle_recovers_partial_preparation_vote_and_publication(lifec
         h.cohort, expected_tip_sha256=history_tip(h.intake.history(h.cohort)), current_block=h.block
     )
     before = Counter(h.calls)
-    original = module.publish_private_model
+    original = module.PreparedRoundFiles.publish
     lost = []
 
     def publish(*args, **kwargs):
@@ -778,7 +778,7 @@ async def test_lifecycle_recovers_partial_preparation_vote_and_publication(lifec
             lost.append(True)
             raise OSError("publication acknowledgement lost")
 
-    monkeypatch.setattr(module, "publish_private_model", publish)
+    monkeypatch.setattr(module.PreparedRoundFiles, "publish", publish)
     h.block += 100000
     h.fail.clear()
     with pytest.raises(OSError, match="acknowledgement lost"):

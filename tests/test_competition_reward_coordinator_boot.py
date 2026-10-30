@@ -439,7 +439,7 @@ def test_real_module_entrypoint_keeps_configuration_check_separate_from_run():
     )
     assert (
         result.returncode == 0
-        and "{check,run,repair-history,repair-credit}" in result.stdout
+        and "{check,run,repair-history,repair-credit,approve-successor}" in result.stdout
         and "--config" in result.stdout
         and "--through-block" in result.stdout
     )

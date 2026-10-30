@@ -51,6 +51,7 @@ from umi.competition_cohort_participation import (
 )
 from umi.competition_cohort_phase_vote_http import phase_vote_routes
 from umi.competition_cohort_progress_signer import CohortProgressSigner, CohortProgressSignerConfig
+from umi.competition_cohort_recovery import cohort_tracks
 from umi.competition_cohort_request_closure import PendingRequestClosure, build_request_closure
 from umi.competition_cohort_request_files import RequestCompletionFiles
 from umi.competition_cohort_request_readiness import LiveRequestPhaseObserver, RequestReadiness
@@ -453,7 +454,7 @@ def configure_model_reviews(o, root, client, signatures):
 
 
 async def certify_requests(
-    o, app, root, monkeypatch, signatures, admission_probe=None, *, model_only=False
+    o, app, root, monkeypatch, signatures, admission_probe=None, *, no_endpoint_participant=False
 ):
     """Use native request observation, review and handoff with synthetic readiness.
 
@@ -463,12 +464,27 @@ async def certify_requests(
     h = o.h
     cohort_index = tuple(digest(p) for p in o.config.series.cohorts).index(h.cohort)
     assert (await o.service.poll_once())["catalogs_installed"] == cohort_index + 1
-    if model_only:
+    if no_endpoint_participant:
+        # Host capabilities can span mixed and model-only cohorts. Read the
+        # current signed cohort/adoption rather than the host-wide union.
+        history = h.intake.history(h.cohort)
+        adoption = next(
+            (
+                item.transition.model_delivery_adoption
+                for item in reversed(history.transitions)
+                if item.transition.model_delivery_adoption is not None
+            ),
+            None,
+        )
+        model_only = "endpoint" not in cohort_tracks(
+            history.plan, o.config.lifecycle.sources.eligible_tracks, adoption=adoption
+        )
         for catalog in h.catalogs:
             if catalog.catalog.cohort_sha256 == h.cohort:
                 readiness = await o.service.api.readiness(digest(catalog.catalog), "ab" * 16)
-                assert readiness["reason_code"] == "model_only"
-                assert readiness["new_claims_closed"] and not readiness["ready"]
+                assert readiness["reason_code"] == ("model_only" if model_only else "accepting")
+                assert readiness["ready"] is not model_only
+                assert readiness.get("new_claims_closed", False) is model_only
     node = await app.state.lifecycle.node(h.cohort)
     await node._driver("requests")
     source = app.state.lifecycle.requests[h.cohort]
@@ -726,14 +742,15 @@ async def run_pipeline(
         else:
             direct.configure_model_reviews(o, client, signatures)
 
-        # Independent artifact acceptance is required even for a baseline copy.
+        # The priority owner attempts the latest submission before its two
+        # superseded generations. Independent acceptance is still required.
         o.outages.add("dave.example")
-        assert (await o.service.models.poll_once())["entries_pending"] == 3
+        assert (await o.service.models.poll_once())["entries_pending"] == 1
         with pytest.raises(PendingModelArtifacts):
             o.service.models.owner.retained(
                 h.cohort, digest(submitted.signed_submission.submission)
             )
-        assert len(signatures) == 3
+        assert len(signatures) == 1 and set(signatures.values()) == {1}
         o.outages.clear()
         async with o.open() as app:
             assert app.state.lifecycle.provider is o.service.finality
@@ -749,13 +766,70 @@ async def run_pipeline(
         original_votes = dict(signatures)
         o.outages.clear()
         o.outages.add("charlie.example")
-        assert (await o.service.models.poll_once())["entries_exported"] == 3 * (cohort_index + 1)
+        # After an outage the fair scheduler may visit a background cohort
+        # before retrying this latest entry. Verify actual successful exports
+        # and the exact retained certificate, rather than one-poll placement.
+        exports, recovery_reports = [], []
+        native_export = o.service.models.owner.export
+        target = (h.cohort, digest(submitted.signed_submission.submission))
+
+        def record_export(cohort, submission, destination):
+            result = native_export(cohort, submission, destination)
+            exports.append((cohort, submission))
+            return result
+
+        with monkeypatch.context() as recovery:
+            recovery.setattr(o.service.models.owner, "export", record_export)
+            for _ in range(2 * len(h.intake.config.cohorts) + 1):
+                recovery_reports.append(await o.service.models.poll_once())
+                if target in exports:
+                    break
+            else:
+                pytest.fail(f"latest certificate did not recover: {recovery_reports}")
+        assert sum(r["entries_exported"] for r in recovery_reports) == len(exports)
         assert all(signatures[k] == count for k, count in original_votes.items())
-        accepted_artifact = o.service.models.owner.retained(
-            h.cohort, digest(submitted.signed_submission.submission)
-        )
+        accepted_artifact = o.service.models.owner.retained(*target)
         assert len(accepted_artifact.certificate.signatures) == 2
+        assert (
+            o.service.models.output / "model-reward-acceptances" / target[0] / (target[1] + ".json")
+        ).read_bytes() == canonical_json_bytes(accepted_artifact.certificate)
         o.outages.clear()
+        # Export counts cover one rotating page, not the complete history.
+        # Recover only missing originals, then verify every exact certificate.
+        expected_exports = {
+            (binding.cohort_sha256, digest(submission))
+            for binding in h.intake.config.cohorts
+            for _, submission in o.service.models.owner.entries(binding.cohort_sha256, limit=256)
+        }
+        assert len(expected_exports) == 3 * (cohort_index + 1)
+        acceptance_directory = o.service.models.output / "model-reward-acceptances"
+        completed_exports = {
+            (path.parent.name, path.stem) for path in acceptance_directory.glob("*/*.json")
+        }
+        assert completed_exports <= expected_exports
+        exports.clear()
+        recovery_reports.clear()
+        with monkeypatch.context() as recovery:
+            recovery.setattr(o.service.models.owner, "export", record_export)
+            for _ in range(2 * len(h.intake.config.cohorts) + 1):
+                if completed_exports == expected_exports:
+                    break
+                recovery_reports.append(await o.service.models.poll_once())
+                completed_exports.update(exports)
+        assert completed_exports == expected_exports, {
+            "missing": sorted(expected_exports - completed_exports),
+            "unexpected": sorted(completed_exports - expected_exports),
+            "reports": recovery_reports,
+        }
+        assert sum(r["entries_exported"] for r in recovery_reports) == len(exports)
+        for cohort, submission in sorted(expected_exports):
+            artifact = o.service.models.owner.retained(cohort, submission)
+            assert len(artifact.certificate.signatures) == 2
+            assert (
+                acceptance_directory / cohort / (submission + ".json")
+            ).read_bytes() == canonical_json_bytes(artifact.certificate)
+        assert all(signatures[k] == count for k, count in original_votes.items())
+        assert set(signatures.values()) == {1}
 
         def evaluator(name):
             async def sign(body):
@@ -997,7 +1071,7 @@ async def run_pipeline(
                 monkeypatch,
                 signatures,
                 admission_probe,
-                model_only=not mixed,
+                no_endpoint_participant=not mixed,
             )
             assert max(signatures.values()) == 1
             settled = await run_settlement(

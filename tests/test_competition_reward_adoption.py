@@ -241,6 +241,74 @@ def test_signed_baseline_grace_is_prospective_and_authenticated(series_case):
     assert canonical_json_bytes(original) == original_bytes
 
 
+@pytest.mark.parametrize("sequence", [6, 7, 8, 9, 10])
+def test_cpu_efficiency_reward_adoption_is_signed_and_prospective(series_case, sequence):
+    c = series_case
+    _, original = adoption_case(c, revisions=1)
+    original_bytes = canonical_json_bytes(original)
+    cohort = next(plan for plan in c.series.cohorts if plan.sequence == sequence)
+    body = original.adoptions[0].adoption.model_copy(
+        update={"cohort_sha256": digest(cohort), "parameters": cohort_reward_parameters(8)}
+    )
+    adopted = SignedRewardModelAdoption(adoption=body, signatures=signatures(body))
+    selection = RewardAdoptionSelection(schema=original.schema_, adoptions=(adopted,))
+    if sequence < 8:
+        with pytest.raises(ValueError, match=r"C7|C8"):
+            verify_adoption_selection(selection, c.series, c.control.policy)
+    else:
+        assert verify_adoption_selection(selection, c.series, c.control.policy) == selection
+        assert (
+            verify_reward_adoption(
+                selection,
+                digest(body),
+                series=c.series,
+                policy=c.control.policy,
+                current_block=200,
+            )
+            == body
+        )
+        # Dropping timing after signature collection must not select the older
+        # economics, even though the underlying quality formula is unchanged.
+        altered = adopted.model_copy(
+            update={"adoption": body.model_copy(update={"parameters": cohort_reward_parameters(7)})}
+        )
+        with pytest.raises(ValueError):
+            verify_adoption_selection(
+                selection.model_copy(update={"adoptions": (altered,)}), c.series, c.control.policy
+            )
+    assert canonical_json_bytes(original) == original_bytes
+
+
+def test_cpu_efficiency_preserves_operator_early_release_path(series_case):
+    c = series_case
+    _, source = adoption_case(c, revisions=1)
+    cohort = next(plan for plan in c.series.cohorts if plan.sequence == 8)
+    release = RewardEarlyRelease(
+        schema="umi-reward-early-release/1",
+        predecessor_decision_sha256="10" * 32,
+        predecessor_activation_sha256="11" * 32,
+        successor_cohort_sha256=digest(cohort),
+        successor_package_sha256="12" * 32,
+        manifest_sha256=c.series.manifest_sha256,
+        reason="Operator authorized the CPU efficiency result release",
+    )
+    body = source.adoptions[0].adoption.model_copy(
+        update={
+            "schema_": "umi-standing-model-reward-adoption/5",
+            "cohort_sha256": digest(cohort),
+            "package_sha256": release.successor_package_sha256,
+            "parameters": cohort_reward_parameters(8),
+            "early_release": release,
+        }
+    )
+    body = RewardModelAdoption.model_validate_json(canonical_json_bytes(body))
+    selected = SignedRewardModelAdoption(adoption=body, signatures=signatures(body))
+    lineage = RewardAdoptionSelection(schema=source.schema_, adoptions=(selected,))
+    assert verify_adoption_selection(lineage, c.series, c.control.policy) == lineage
+    assert lineage.adoptions[0].adoption.activation_age is None
+    assert lineage.adoptions[0].adoption.early_release == release
+
+
 def test_signed_initial_selection_is_idempotent_and_refuses_replacement(series_case):
     c = series_case
     _, source = adoption_case(c, revisions=1)

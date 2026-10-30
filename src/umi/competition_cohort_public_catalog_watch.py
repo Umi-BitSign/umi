@@ -428,7 +428,12 @@ class NativePublicCatalogWatcher:
                             for row in scores.items
                         }
                         if (
-                            scores.schema_ != "umi-public-cohort-model-results/3"
+                            scores.schema_
+                            not in {
+                                "umi-public-cohort-model-results/3",
+                                "umi-public-cohort-model-results/4",
+                            }
+                            or scores.certification != "quorum_certified_reward_adoption"
                             or scores.cohort_sha256 != cohort
                             or scores.policy_sha256 != catalog.policy_sha256
                             or scores.original_source_metadata_sha256

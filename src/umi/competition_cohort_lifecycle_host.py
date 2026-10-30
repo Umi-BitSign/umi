@@ -55,6 +55,10 @@ from .competition_cohort_suite_adoption_candidate import (
     EvaluationSuiteAdoptionCandidates,
     validate_suite_adoption_candidates,
 )
+from .competition_cpu_efficiency_policy import (
+    authorize_cpu_efficiency,
+    require_cpu_efficiency_for_new_round,
+)
 from .competition_evaluation_runtime import authorize_evaluation_runtime
 from .competition_execution import execution_boundary
 from .competition_forecast import ForecastAttempt, ForecastCapacityRequired, ForecastLedger
@@ -332,6 +336,15 @@ class LifecycleHost:
 
     async def _operator_request_start_selection(self, cohort, current_block):
         owner = self.service.preparation
+        plan = next(p for p in self.service.config.series.cohorts if digest(p) == cohort)
+        efficiency = await run_owned_thread(
+            owner.selected_cpu_efficiency, plan, self.service.config.series.recovery.authority
+        )
+        require_cpu_efficiency_for_new_round(
+            sequence=plan.sequence,
+            eligible_tracks=plan.eligible_tracks or self.service.intake.tracks,
+            adoption=efficiency,
+        )
         promotion = await run_owned_thread(
             partial(
                 owner.promotion.reviewed_promotion_head,
@@ -339,7 +352,6 @@ class LifecycleHost:
                 maximum_bytes=owner.maximum_promotion_bytes,
             )
         )
-        plan = next(p for p in self.service.config.series.cohorts if digest(p) == cohort)
         selected = (
             self.service.config.runtime_adoption
             if self.service.config.runtime_adoption is not None
@@ -353,7 +365,7 @@ class LifecycleHost:
             plan=plan,
             current_block=current_block,
         )
-        return {
+        result = {
             "baseline_model_sha256": promotion.model_sha256,
             "evaluation_runtime_sha256": (
                 self.policy.evaluation_runtime_sha256
@@ -362,6 +374,17 @@ class LifecycleHost:
             ),
             "runtime_adoption_sha256": None if authorized is None else authorized.adoption_sha256,
         }
+        if efficiency is not None and plan.sequence >= efficiency.adoption.first_cohort_sequence:
+            selected_efficiency = authorize_cpu_efficiency(
+                efficiency,
+                policy=self.policy,
+                authority=self.service.config.series.recovery.authority,
+                plan=plan,
+                runtime_sha256=result["evaluation_runtime_sha256"],
+                current_block=current_block,
+            )
+            result["cpu_efficiency_adoption_sha256"] = selected_efficiency.adoption_sha256
+        return result
 
     def _intake_observer(self):
         authorize_memory(None, None, "intake")

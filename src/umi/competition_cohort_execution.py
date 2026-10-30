@@ -24,6 +24,7 @@ from .competition_cohort_participation import (
     AttestedCohortParticipantAdmission,
     SignedCohortParticipationConsent,
 )
+from .competition_cpu_efficiency_policy import prepared_cpu_efficiency_authorization
 from .competition_evaluation_runtime import prepared_runtime_authorization
 from .competition_evidence import EvaluatorRunRecord
 from .competition_execution import ExecutionBoundary, ExecutionCase, ExecutionStep
@@ -188,6 +189,7 @@ def replay_shared_incumbent_steps(
     previous = reuse_observed_at
     candidate = []
     authorization = prepared_runtime_authorization(job.round, policy)
+    efficiency_authorization = prepared_cpu_efficiency_authorization(job.round, policy)
     for index, case in enumerate(job.cases):
         own, borrowed = steps[2 * index : 2 * index + 2]
         if borrowed != source.steps[2 * index + 1]:
@@ -200,7 +202,13 @@ def replay_shared_incumbent_steps(
             or own.execution.runtime_sha256 != digest(job.runtime)
         ):
             raise ValueError("shared execution changed its candidate assignment")
-        validate_case_execution(own.execution, policy, runtime_authorization=authorization)
+        validate_case_execution(
+            own.execution,
+            policy,
+            runtime_authorization=authorization,
+            cpu_efficiency_authorization=efficiency_authorization,
+            execution_runtime=job.runtime,
+        )
         for boundary in (own.started, own.finished):
             _ordered(boundary, previous, started_after=started_after, finished_by=finished_by)
             previous = boundary
@@ -254,6 +262,7 @@ def replay_execution_steps(
     """
     width = 2 if job.mode == "paired_model" else 1
     runtime_authorization = prepared_runtime_authorization(job.round, policy)
+    efficiency_authorization = prepared_cpu_efficiency_authorization(job.round, policy)
     previous = None
     outputs: dict[str, list[CaseOutput]] = {"candidate": [], "incumbent": []}
     for index, raw in zip(range(width * len(job.cases)), steps, strict=True):
@@ -274,7 +283,13 @@ def replay_execution_steps(
             raise ValueError("recoverable execution step assignment/model binding differs")
         if step.execution.runtime_sha256 != digest(job.runtime):
             raise ValueError("recoverable execution step runtime differs from its job")
-        validate_case_execution(step.execution, policy, runtime_authorization=runtime_authorization)
+        validate_case_execution(
+            step.execution,
+            policy,
+            runtime_authorization=runtime_authorization,
+            cpu_efficiency_authorization=efficiency_authorization,
+            execution_runtime=job.runtime,
+        )
         for boundary in (step.started, step.finished):
             _ordered(
                 boundary,

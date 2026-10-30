@@ -52,6 +52,36 @@ independent signed score correction, identified by
 `score_correction_statement_sha256`. These fields still make no claim about a
 finalized live weight row.
 
+Cohorts with a selected CPU-efficiency measurement contract use
+`umi-public-cohort-model-results/4` for both original native certification and
+later signed reward adoption. The existing `certification` and original-source
+bindings distinguish these cases. Version 4 adds:
+
+| Field | Meaning |
+| --- | --- |
+| `cpu_efficiency_adoption_sha256` | Exact signed measurement-contract body bound by the prepared round and certified timing summaries |
+| `efficiency_weight_applied` | Whether the selected allocation actually uses the CPU reward rule; measured timing alone does not imply this |
+| Per-row `normalized_cpu_slowdown` | Positive reduced `numerator`/`denominator` strings and a decimal display, averaged across evaluator-normalized measurements; greater than 1 means slower than the reference |
+| Per-row `efficiency_multiplier_ppm` | Certified adjustment from 850000 through 1150000; 1000000 is neutral |
+
+Both per-row fields are present for every scored model, including below-baseline
+and duplicate models, and absent for unscored models. They do not create reward
+eligibility. Quality values, quality ranks and incumbent promotion stay unchanged.
+The exact public slowdown fraction averages retained evaluator ratios, each
+conservatively rounded upward to `1e-9` before the multiplier is calculated.
+The multiplier adjusts the quality-derived model weight before pool normalization;
+it is not an absolute payout percentage. `efficiency_weight_applied` matches the
+presence of `reward_parameters.cpu_efficiency_rule`. The CPU rule compares cold
+model execution on comparable evaluator resources; it is not a GPU benchmark.
+The [model guide](../miners/model.md) describes its timing boundary and failures.
+
+The publisher reads compact certified timing conclusions, never raw per-case
+traces, model payloads or private suite sources. Ordinary reward adoption cannot
+replace those retained measurements or their contract. Delivery and catalog
+updates reuse completed source/model checks; restart and cache restoration do
+not repeat execution. Historical `/1`–`/3` documents omit these fields and keep
+their original bytes. No result schema establishes live reward activation.
+
 Execution counts are confirmed delivered export floors, so live execution can be
 ahead. A completed model requires all of its selected evaluators' terminal exports.
 Projected execution totals assume the undelivered orders match delivered profiles.

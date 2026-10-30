@@ -57,6 +57,7 @@ from .private_files import MAX_CONFIGURED_PRIVATE_BYTES, acquire_private_mutex
 from .private_files import MAX_PRIVATE_BYTES as MAX_BYTES
 from .private_files import ensure_private_directory as _private
 from .protocol import canonical_json_bytes, is_canonical_json, sha256_hex
+from .sqlite_contention import is_sqlite_contention
 
 # Bound reservation bodies and allowances before transferring them to Python.
 # Accounting validates key types and byte lengths separately. A rejected body
@@ -419,10 +420,7 @@ class RoundJournal:
                     _advance_reservation_validation(self, db, _OBLIGATION_COLUMNS)
                     self._check_capacity_totals(db)
             except sqlite3.OperationalError as error:
-                if getattr(error, "sqlite_errorcode", None) not in (
-                    sqlite3.SQLITE_BUSY,
-                    sqlite3.SQLITE_LOCKED,
-                ):
+                if not is_sqlite_contention(error):
                     raise
         finally:
             self._transaction_lock.release()
@@ -1320,6 +1318,7 @@ class RoundJournal:
             seen = {}
             pending = []
             capacity_error = None
+            capacity_diagnostic = None
             count = used = 0
             kinds = None
             for offset, (kind, key, value) in enumerate(records):
@@ -1360,6 +1359,7 @@ class RoundJournal:
                         continue
                     if obligation is not None and len(raw) > obligation[0]:
                         capacity_error = "round record exceeds reserved allowance"
+                        capacity_diagnostic = None
                 if held or conflicts or capacity_error is not None:
                     continue
                 if kinds is None:
@@ -1378,6 +1378,25 @@ class RoundJournal:
                     or count + extra_count > self.maximum_records
                 ):
                     capacity_error = "round journal capacity exhausted"
+                if capacity_error is not None:
+                    # These counters are already owned by this transaction and
+                    # include preceding staged records. Retain no keys or bodies,
+                    # and do not query the journal again to produce diagnostics.
+                    capacity_diagnostic = {
+                        "used_bytes": used,
+                        "extra_bytes": extra_bytes,
+                        "maximum_bytes": self.maximum_bytes,
+                        "record_count": count,
+                        "extra_count": extra_count,
+                        "maximum_records": self.maximum_records,
+                        "kind_count": kinds.get(kind, 0),
+                        "maximum_rounds": self.maximum_rounds,
+                        "byte_limit_exceeded": used + extra_bytes > self.maximum_bytes,
+                        "record_limit_exceeded": count + extra_count > self.maximum_records,
+                        "kind_limit_exceeded": (
+                            capacity_error == "round journal record capacity exhausted"
+                        ),
+                    }
                 else:
                     pending.append((kind, key, raw))
                     count += extra_count
@@ -1389,6 +1408,13 @@ class RoundJournal:
                 )
             elif not held:
                 if capacity_error is not None:
+                    # Conflict/hold precedence and the original ValueError stay
+                    # unchanged. Logging failure cannot alter the native refusal.
+                    if capacity_diagnostic is not None:
+                        with suppress(Exception):
+                            logger.warning(
+                                "round_journal_capacity_exhausted %s", capacity_diagnostic
+                            )
                     raise ValueError(capacity_error)
                 for kind, key, raw in pending:
                     db.execute("INSERT INTO records VALUES (?,?,?)", (kind, key, raw))

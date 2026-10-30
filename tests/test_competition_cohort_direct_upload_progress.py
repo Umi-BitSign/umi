@@ -105,7 +105,9 @@ async def test_blocked_first_read_publishes_denominator_and_native_work_to_cache
 
     monkeypatch.setattr(direct.owner.journal, "keys", keys_once)
     monkeypatch.setattr(direct.multipart, "read_range", blocked)
-    monkeypatch.setattr(api, "CohortAdmissionQueue", lambda _: None)
+    # Progress GETs must not use a queue; None would request a real default queue.
+    queue = object()
+    monkeypatch.setattr(api, "CohortAdmissionQueue", lambda _: queue)
     manager = DirectModelUploadOwners({cohort: direct.owner}, priority_cohorts=(cohort,))
     task = asyncio.create_task(manager.poll_once(now_unix_ms=NOW))
     try:

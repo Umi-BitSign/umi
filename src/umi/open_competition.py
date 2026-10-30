@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 from pydantic import AfterValidator, Field, field_validator, model_serializer, model_validator
 from typing_extensions import Self
 
+from .competition_cpu_timing import CpuTimingEvidence
 from .competition_dependence import (
     DependenceCaseProfile,
     DependenceReport,
@@ -687,11 +688,21 @@ class CaseOutput(StrictProtocolModel):
     status: Literal["ok", "miner_failure", "infrastructure_failure"]
     hypothesis: Annotated[str, Field(max_length=4096)]
     elapsed_ms: Annotated[int, Field(ge=0, le=86_400_000)]
+    cpu_timing: CpuTimingEvidence | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_output(self, handler):
+        value = handler(self)
+        if self.cpu_timing is None:
+            value.pop("cpu_timing", None)
+        return value
 
     @model_validator(mode="after")
     def failures_have_no_answer(self) -> Self:
         if self.status != "ok" and self.hypothesis:
             raise ValueError("failure output must not carry a hypothesis")
+        if self.cpu_timing is not None and self.cpu_timing.elapsed_ms != self.elapsed_ms:
+            raise ValueError("CPU timing differs from the retained execution duration")
         return self
 
 

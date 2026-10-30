@@ -7,6 +7,20 @@ import pytest
 
 from umi import competition_evaluator_budget as budget
 from umi import competition_work_plans as plans
+from umi.competition_cpu_cache import CpuBundleCacheEvidence
+from umi.competition_cpu_conditions import (
+    CpuConditionEvidence,
+    FixedCpuProbe,
+    ObserverLag,
+    PressureSnapshot,
+    ProbeWorker,
+)
+from umi.competition_cpu_timing import (
+    CpuTicks,
+    CpuTimingContext,
+    CpuTimingEvidence,
+    CpuTimingSample,
+)
 from umi.competition_endpoint_execution import (
     EndpointDispatchEvidence,
     EndpointPairedEvidence,
@@ -29,6 +43,7 @@ from umi.competition_execution import (
     ExecutionBoundary,
     ExecutionStep,
     ModelExecutionEvidence,
+    PendingExecutionStep,
     execution_key,
 )
 from umi.competition_native import OfflineMpsRuntime
@@ -52,6 +67,7 @@ from umi.open_competition import (
 )
 from umi.protocol import canonical_json_bytes
 
+from .test_competition_cpu_timing import conditions, sample
 from .test_competition_evaluator import make_driver
 from .test_competition_evaluator_capacity import limit, used
 from .test_competition_execution import chain_config as chain_config
@@ -724,6 +740,9 @@ def test_structural_formulas_cover_current_model_field_sets(work, track, monkeyp
 
     monkeypatch.setattr(budget, "object_bound", record_sizes)
     prepared(work, track)
+    # Historical WorkPlan execution has no timing authority. Exercise its
+    # original serialized shape and the explicit prospective shape separately.
+    budget._step_bound(work.policy.maximum_output_bytes, timed=True)
     models = [
         CaseOutput,
         OfflineCaseExecution,
@@ -745,6 +764,16 @@ def test_structural_formulas_cover_current_model_field_sets(work, track, monkeyp
         VoidEvidenceObservation,
         Signature,
         SignedEvaluationOrder,
+        CpuTimingEvidence,
+        CpuTimingContext,
+        CpuTimingSample,
+        CpuTicks,
+        CpuBundleCacheEvidence,
+        CpuConditionEvidence,
+        FixedCpuProbe,
+        ProbeWorker,
+        ObserverLag,
+        PressureSnapshot,
     ]
     if track == "endpoint":
         models.extend(
@@ -760,3 +789,148 @@ def test_structural_formulas_cover_current_model_field_sets(work, track, monkeyp
     for model in models:
         expected = frozenset(field.alias or name for name, field in model.model_fields.items())
         assert expected in fields, model.__name__
+
+
+def largest_timing_shape():
+    """Schema-valid maxima for serialization, not a host qualification claim."""
+    safe = 2**53 - 1
+    started = safe - 100_000_000_000
+    finished = started + 86_400_000_000
+    ctx = CpuTimingContext(
+        profile_sha256="a" * 64,
+        hardware_sha256="b" * 64,
+        cpu_class_sha256="c" * 64,
+        topology_sha256="d" * 64,
+        cpu_ids=tuple(range(8184, 8192)),
+        cpu_quota_usec=(safe // 8) * 8,
+        cpu_period_usec=safe // 8,
+        memory_max_bytes=safe,
+        memory_swap_max_bytes=0,
+        cgroup_device=safe,
+        cgroup_inode=safe,
+        clock_ticks_per_second=1_000_000,
+    )
+    before = sample(ctx, now=started, ticks=safe, busy=safe // 2, steal=safe // 2)
+    before = before.model_copy(
+        update=dict(
+            cgroup_usage_usec=safe, cgroup_throttled_usec=safe, cgroup_throttled_periods=safe
+        )
+    )
+    after = before.model_copy(update=dict(started_us=finished, finished_us=finished))
+    observed = conditions(ctx, started=started, finished=finished)
+    for field in ("before_probe", "after_probe"):
+        probe = getattr(observed, field)
+        probe = probe.model_copy(
+            update={
+                "workers": tuple(
+                    worker.model_copy(update=dict(wall_us=5_000_000, thread_cpu_us=5_000_000))
+                    for worker in probe.workers
+                )
+            }
+        )
+        observed = observed.model_copy(update={field: probe})
+    for field in ("before_pressure", "after_pressure"):
+        pressure = getattr(observed, field)
+        pressure = pressure.model_copy(
+            update={
+                name: safe
+                for name in PressureSnapshot.model_fields
+                if name not in {"started_us", "finished_us", "scope_identity_sha256"}
+            }
+        )
+        observed = observed.model_copy(update={field: pressure})
+    observed = observed.model_copy(
+        update={
+            "observer": observed.observer.model_copy(
+                update=dict(ticks=safe, maximum_lateness_us=safe)
+            )
+        }
+    )
+    cache = CpuBundleCacheEvidence(
+        schema="umi-cpu-bundle-cache-evidence/1",
+        model_sha256="a" * 64,
+        invocation_sha256=observed.invocation_sha256,
+        file_count=4096,
+        total_bytes=safe,
+        total_pages=safe // 4096 + 4096,
+        page_size=4096,
+        started_monotonic_us=started - 1,
+        finished_monotonic_us=started,
+    )
+    evidence = CpuTimingEvidence(
+        schema="umi-cpu-timing-evidence/1",
+        contract_sha256="e" * 64,
+        context=ctx,
+        before=before,
+        after=after,
+        started_monotonic_us=started,
+        model_started_monotonic_us=finished - 1,
+        finished_monotonic_us=finished,
+        launch_gate_elapsed_us=finished - started - 1,
+        conditions=observed,
+        bundle_cache=cache,
+    )
+    # Revalidate every copied nested field, including canonical integer limits.
+    return CpuTimingEvidence.model_validate_json(canonical_json_bytes(evidence))
+
+
+@pytest.mark.parametrize("status", ["ok", "miner_failure", "infrastructure_failure"])
+def test_timed_output_and_native_records_fit_cohort_reservation(status):
+    from umi.competition_cohort_endpoint_archive import MAX_ARCHIVE_OBJECT_BYTES
+    from umi.competition_cohort_execution_journal import _STEP_RECORD_BYTES
+
+    timing = largest_timing_shape()
+    output = CaseOutput(
+        case_id="a" * 64,
+        status=status,
+        hypothesis="\x00" * 4096 if status == "ok" else "",
+        elapsed_ms=86_400_000,
+        cpu_timing=timing,
+    )
+    execution = OfflineCaseExecution(
+        schema="umi-offline-case-execution/2",
+        model_sha256="b" * 64,
+        runtime_sha256="c" * 64,
+        video_sha256="d" * 64,
+        output=output,
+        stdout_hex="00" * 4097,
+        reason="process_failed",
+        returncode=-65536,
+    )
+    pending = PendingExecutionStep(role="incumbent", started=boundary(), execution=execution)
+    step = ExecutionStep(
+        role=pending.role, started=pending.started, execution=pending.execution, finished=boundary()
+    )
+    assert len(timing.context.cpu_ids) == len(timing.before.cpu_ticks) == 8
+    assert len(timing.conditions.before_probe.workers) == 8
+    assert budget.json_size(timing) <= budget._cpu_timing_bound()
+    assert budget.json_size(output) <= budget._case_output_bound(4096, timed=True)
+    assert budget.json_size(pending) < budget.json_size(step)
+    assert budget.json_size(step) <= budget._step_bound(4096, timed=True) <= _STEP_RECORD_BYTES
+    assert _STEP_RECORD_BYTES <= MAX_ARCHIVE_OBJECT_BYTES
+    assert ExecutionStep.model_validate_json(canonical_json_bytes(step)) == step
+
+
+def test_untimed_bounds_and_serialization_preserve_original_bytes():
+    original = dict(case_id="a" * 64, status="ok", hypothesis="\x00" * 4096, elapsed_ms=86_400_000)
+    output = CaseOutput(**original)
+    assert canonical_json_bytes(output) == canonical_json_bytes(original)
+    assert budget._case_output_bound(4096) == budget._case_output_bound(4096, timed=False)
+    assert budget._case_output_bound(4096) == len(canonical_json_bytes(original))
+    execution = OfflineCaseExecution(
+        schema="umi-offline-case-execution/1",
+        model_sha256="b" * 64,
+        runtime_sha256="c" * 64,
+        video_sha256="d" * 64,
+        output=output,
+        stdout_hex="00" * 4097,
+        reason="process_failed",
+        returncode=-65536,
+    )
+    step = ExecutionStep(
+        role="incumbent", started=boundary(), finished=boundary(), execution=execution
+    )
+    assert (
+        budget._step_bound(4096) == budget._step_bound(4096, timed=False) == budget.json_size(step)
+    )
+    assert b'"cpu_timing"' not in canonical_json_bytes(step)

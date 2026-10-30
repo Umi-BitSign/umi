@@ -44,7 +44,12 @@ def test_new_cohort_defaults_are_exact_and_prospective():
     assert old.band_decay_bps == old.within_band_decay_bps == 7500
     for sequence in (7, 8, 10, 1000):
         selected = cohort_reward_parameters(sequence)
-        assert selected.schema_ == "umi-geometric-reward-parameters/3"
+        assert selected.schema_ == (
+            "umi-geometric-reward-parameters/3"
+            if sequence == 7
+            else "umi-geometric-reward-parameters/4"
+        )
+        assert (selected.cpu_efficiency_rule is not None) == (sequence >= 8)
         assert selected.band_width_bps == 250
         assert selected.band_decay_bps == selected.within_band_decay_bps == 8500
         assert selected.baseline_grace_bps == 100

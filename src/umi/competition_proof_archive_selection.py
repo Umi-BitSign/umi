@@ -19,7 +19,16 @@ def selected_proof_archive(
     with TransferProgress(
         "proof_archive_transport_selection", 1, unit="archives", planning_unit_seconds=(0.01, 60)
     ) as progress:
-        store = None if remote is None else RemoteProofStore(directory / ".remote-state", remote)
+        receipt_source = (
+            {}
+            if remote is None or remote.receipt_source_directory is None
+            else {"receipt_source_directory": Path(remote.receipt_source_directory)}
+        )
+        store = (
+            None
+            if remote is None
+            else RemoteProofStore(directory / ".remote-state", remote, **receipt_source)
+        )
         archive = RewardProofArchive(
             directory,
             remote=store,

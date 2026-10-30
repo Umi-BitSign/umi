@@ -18,6 +18,7 @@ from umi.translation_reference_gateway import (
     R2ReferenceGatewayClient,
 )
 
+from .test_competition_cpu_efficiency_capacity import large_cpu_allocation as large_cpu_allocation
 from .test_translation_reference_channel import (
     base_policy as base_policy,
 )
@@ -140,6 +141,25 @@ async def test_executable_owner_wires_isolated_native_resources_and_lazy_signer(
     with pytest.raises(ValueError):
         service.allocations(digest(item.c.native.reward))
     await service.provider.aclose()
+
+
+async def test_reference_reader_accepts_cpu_allocation_above_old_file_limit(
+    installed, large_cpu_allocation
+):
+    item, allocation = installed, large_cpu_allocation
+    raw = canonical_json_bytes(allocation)
+    assert len(raw) > 1024**2
+    item.allocation.write_bytes(raw)
+    config = item.config.model_copy(
+        update={
+            "allocations": {digest(allocation): str(item.allocation)},
+        }
+    )
+    service = wiring.build_reference_service(config)
+    try:
+        assert service.allocations(digest(allocation)) == allocation
+    finally:
+        await service.provider.aclose()
 
 
 async def test_reference_publisher_carries_declared_cache_predecessor(installed):

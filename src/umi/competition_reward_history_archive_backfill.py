@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import time
+from contextlib import ExitStack
 from datetime import datetime, timezone
 
 from .competition_evidence_codec import MAX_EVIDENCE_BYTES, MAX_RECIPE_BYTES, inspect_recipe
@@ -51,6 +52,57 @@ def _fences():
         "'archive migration metadata is immutable; explicit repair required'); END"
         for action in ("UPDATE", "DELETE")
     }
+
+
+def unlink_completed_archive_file(
+    archive,
+    original,
+    remote,
+    plan,
+    *,
+    intent,
+    remember_intent,
+    finish,
+    independent_bookkeeping=False,
+    validate_target=None,
+):
+    """Release one exact local generation under the ordinary reader exclusion.
+
+    The owner reserves its completion bookkeeping before calling. Keep the
+    exclusive lease until durable completion. An independent retirement owner
+    also retains the receipt/damage snapshot across unlink. The older producer
+    path must close that snapshot before writing its own receipt database.
+    Interruption after unlink is recovered from the retained intent.
+    """
+    with archive.read_release_lease(exclusive=True), ExitStack() as snapshots:
+        if validate_target is not None:
+            validate_target()
+        if independent_bookkeeping:
+            snapshots.enter_context(remote.reference_snapshot())(plan["reference"])
+        else:
+            remote.validate_reference(plan["reference"])
+        path = archive.root / plan["path"]
+        try:
+            path.lstat()
+            present = True
+        except FileNotFoundError:
+            present = False
+        if present:
+            if [str(v) for v in original._object_stamp(path)] != plan["stamp"]:
+                raise HistoryCheckpointRepairRequired("archive unlink source changed")
+            if not intent:
+                remember_intent()
+            path.unlink()
+        elif not intent:
+            raise HistoryCheckpointRepairRequired(
+                "archive source disappeared without unlink intent"
+            )
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        finish()
 
 
 class HistoryArchiveBackfill:
@@ -378,28 +430,12 @@ class HistoryArchiveBackfill:
                 or plan["path"] != relative
             ):
                 raise HistoryCheckpointRepairRequired("archive local release plan damaged")
-            self.remote.validate_reference(plan["reference"])
             try:
-                with self.archive.read_release_lease(exclusive=True):
-                    path = self.archive.root / relative
-                    intent = self.journal.get(_INTENT, key)
-                    if intent is not None and intent != plan:
-                        raise HistoryCheckpointRepairRequired("archive unlink intent changed")
-                    if path.exists():
-                        if [str(v) for v in self.original._object_stamp(path)] != plan["stamp"]:
-                            raise HistoryCheckpointRepairRequired("archive unlink source changed")
-                        if intent is None:
-                            self.journal.put(_INTENT, key, plan)
-                        path.unlink()
-                    elif intent is None:
-                        raise HistoryCheckpointRepairRequired(
-                            "archive source disappeared without unlink intent"
-                        )
-                    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-                    try:
-                        os.fsync(fd)
-                    finally:
-                        os.close(fd)
+                intent = self.journal.get(_INTENT, key)
+                if intent is not None and intent != plan:
+                    raise HistoryCheckpointRepairRequired("archive unlink intent changed")
+
+                def finish(plan=plan, key=key):
                     head, state = self._state()
                     value = dict(
                         state,
@@ -412,6 +448,16 @@ class HistoryArchiveBackfill:
                         head, value, ((_DONE, key, dict(intent_sha256=digest(plan))),), done=key
                     )
                     self.released_attempt += 1
+
+                unlink_completed_archive_file(
+                    self.archive,
+                    self.original,
+                    self.remote,
+                    plan,
+                    intent=intent is not None,
+                    remember_intent=lambda key=key, plan=plan: self.journal.put(_INTENT, key, plan),
+                    finish=finish,
+                )
             except PrivateStateBusyError:
                 return "waiting_for_active_archive_reader"
         return "pending" if len(pending) == maximum else "idle"

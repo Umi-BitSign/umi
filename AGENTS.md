@@ -19,6 +19,23 @@
   Select the prospective defaults through signed authority/adoption and carry
   them through replay, public results and supported miner/validator updates.
 
+- C8+ CPU speed rewards apply quality eligibility and duplicate rules first, then
+  an adjustment capped at -15% to +15% to eligible geometric weights before
+  normalization. Preserve raw quality, quality rank and baseline promotion. A
+  failed, empty or timed-out case cannot create a speed bonus; speed cannot make
+  a below-quality-gate model eligible. Normalize matched cases against the
+  baseline on each evaluator using signed task weights and equivalent resources.
+  Pin execution to exclusive slots with equivalent core classes, NUMA placement,
+  SMT conditions and CPU/memory limits. Performance and efficiency cores must
+  not confer a placement advantage; matching model names alone is insufficient.
+  Check shared ancestor budgets and contention as well as container limits.
+  Visible virtual CPU topology is not proof of physical host exclusivity.
+  Qualify actual CPU allocation, cache conditions and host contention before
+  prospective activation; a fresh process does not establish equal OS cache
+  warmth. Retain trusted timing in the existing execution/certification pass,
+  reject unusable measurements explicitly, and preserve historical C6/C7 bytes.
+  User approval of this policy does not lift the separate C8 challenge hold.
+
 - Carry each change through affected miner and validator implementations,
   published release selections and supported automatic update paths. Verify
   actual published/installed behavior before claiming rollout, including older

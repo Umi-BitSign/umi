@@ -40,6 +40,13 @@ from .competition_cohort_service_closure import (
 )
 from .competition_cohort_service_seal import ServiceWorkSeal
 from .competition_cohort_service_work import SignedServiceWorkCatalog
+from .competition_cpu_efficiency_evidence import (
+    CpuEfficiencyRun,
+    CpuEfficiencySummary,
+    combine_cpu_efficiency_runs,
+    summarize_evaluator_efficiency,
+)
+from .competition_cpu_efficiency_policy import round_cpu_efficiency_authorization
 from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_exact_quality import ExactQuality
 from .open_competition import (
@@ -51,6 +58,7 @@ from .open_competition import (
     Track,
     aggregate_quality,
     digest,
+    identity,
     quality_from_hypotheses,
     validate_suite_profile,
 )
@@ -79,12 +87,22 @@ class ClosedEvaluatorQuality(StrictProtocolModel):
     reason: Literal["infrastructure_failure", "incumbent_failure"] | None
     candidate: QualityTotals | None
     incumbent: QualityTotals | None
+    cpu_efficiency: CpuEfficiencyRun | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_run(self, handler):
+        value = handler(self)
+        if self.cpu_efficiency is None:
+            value.pop("cpu_efficiency", None)
+        return value
 
 
 class ClosedParticipantQuality(StrictProtocolModel):
-    schema_: Literal["umi-cohort-closed-quality/1", "umi-cohort-closed-quality/2"] = Field(
-        alias="schema"
-    )
+    schema_: Literal[
+        "umi-cohort-closed-quality/1",
+        "umi-cohort-closed-quality/2",
+        "umi-cohort-closed-quality/3",
+    ] = Field(alias="schema")
     quality_rule: Literal["paired_baseline_metric/1"] | None = None
     policy_sha256: Hex32
     round_sha256: Hex32
@@ -98,6 +116,7 @@ class ClosedParticipantQuality(StrictProtocolModel):
     reason: QualityReason | None
     candidate: QualityTotals | None
     incumbent: QualityTotals | None
+    cpu_efficiency: CpuEfficiencySummary | None = None
     service_credit_authorized: Literal[False] = False
     promotion_authorized: Literal[False] = False
     chain_submission_authorized: Literal[False] = False
@@ -107,15 +126,35 @@ class ClosedParticipantQuality(StrictProtocolModel):
         value = handler(self)
         if self.quality_rule is None:
             value.pop("quality_rule", None)
+        if self.cpu_efficiency is None:
+            value.pop("cpu_efficiency", None)
         return value
 
     @model_validator(mode="after")
     def selected_metric(self):
-        if self.schema_ == "umi-cohort-closed-quality/2":
+        if self.schema_ in {"umi-cohort-closed-quality/2", "umi-cohort-closed-quality/3"}:
             if self.quality_rule != "paired_baseline_metric/1" or self.track != "model":
                 raise ValueError("paired baseline metric requires a model quality result")
         elif self.quality_rule is not None:
             raise ValueError("legacy quality cannot adopt another metric")
+        timed = self.schema_ == "umi-cohort-closed-quality/3"
+        if timed != (self.cpu_efficiency is not None) or any(
+            timed != (run.cpu_efficiency is not None) for run in self.runs
+        ):
+            raise ValueError("CPU efficiency requires complete versioned quality evidence")
+        if timed and (
+            any(
+                run.cpu_efficiency.evaluator_identity != identity(run.evaluator_hotkey)
+                or run.cpu_efficiency.terminal_sha256 != run.terminal_sha256
+                for run in self.runs
+            )
+            or self.cpu_efficiency
+            != combine_cpu_efficiency_runs(
+                self.cpu_efficiency.contract_sha256,
+                tuple(run.cpu_efficiency for run in self.runs),
+            )
+        ):
+            raise ValueError("CPU efficiency differs from the selected evaluator terminals")
         return self
 
 
@@ -277,6 +316,9 @@ class ClosedQualityReview:
         self.objects, self.pulses = objects, pulses
         self.expected_tip_sha256, self.current_block = expected_tip_sha256, current_block
         self._outcomes: dict[str, ClosedParticipantQuality] = {}
+        self.cpu_efficiency_authorization = round_cpu_efficiency_authorization(
+            self.roster.round, self.policy, self.history
+        )
 
     def outcome(self, submission_sha256: str) -> ClosedParticipantQuality:
         if submission_sha256 in self._outcomes:
@@ -317,6 +359,19 @@ class ClosedQualityReview:
                 started_after=self.opened_at,
                 finished_by=self.closed_at,
             )
+            efficiency = None
+            if self.cpu_efficiency_authorization is not None:
+                if not paired_metric or terminal.endpoint_archive_sha256 is not None:
+                    raise ValueError("CPU efficiency requires native paired model execution")
+                efficiency = summarize_evaluator_efficiency(
+                    outputs,
+                    self.suite.cases,
+                    dict(self.policy.stratum_weights),
+                    contract_sha256=digest(self.roster.round.cpu_efficiency_adoption.adoption),
+                    evaluator_identity=identity(ref.evaluator_hotkey),
+                    terminal_sha256=ref.terminal_sha256,
+                    maximum_inference_ms=self.policy.maximum_inference_ms,
+                )
             incumbent = tuple(measured_observation(o, self.policy) for o in outputs["incumbent"])
             if terminal.endpoint_archive_sha256 is None:
                 basis = "measured_model_execution"
@@ -354,6 +409,7 @@ class ClosedQualityReview:
                     candidate_observations_sha256=observations_sha256(candidate),
                     incumbent_observations_sha256=observations_sha256(incumbent),
                     candidate_basis=basis,
+                    cpu_efficiency=efficiency,
                     reason=reason,
                     candidate=quality_totals(
                         candidate, self.suite, self.policy, paired_baseline_metric=paired_metric
@@ -393,7 +449,9 @@ class ClosedQualityReview:
         ):
             reason = "observation_disagreement"
         result = ClosedParticipantQuality(
-            schema="umi-cohort-closed-quality/2"
+            schema="umi-cohort-closed-quality/3"
+            if self.cpu_efficiency_authorization is not None
+            else "umi-cohort-closed-quality/2"
             if paired_metric
             else "umi-cohort-closed-quality/1",
             quality_rule="paired_baseline_metric/1" if paired_metric else None,
@@ -409,6 +467,14 @@ class ClosedQualityReview:
             reason=reason,
             candidate=first.candidate if reason is None else None,
             incumbent=first.incumbent if reason is None else None,
+            cpu_efficiency=(
+                combine_cpu_efficiency_runs(
+                    digest(self.roster.round.cpu_efficiency_adoption.adoption),
+                    tuple(run.cpu_efficiency for run in runs),
+                )
+                if self.cpu_efficiency_authorization is not None
+                else None
+            ),
         )
         self._outcomes[submission_sha256] = result
         return result

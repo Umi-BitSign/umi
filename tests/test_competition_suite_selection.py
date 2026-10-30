@@ -520,16 +520,18 @@ def category_bottleneck(c):
         )
     )
     inventory = c.inventory.model_copy(update={"cases": (*values, *c.inventory.cases[3:])})
-    counts = c.counts.model_copy(update={
-        "fingerspelling": 4,
-        "minimum_fingerspelling_datasets": 2,
-        "minimum_fingerspelling_signers": 4,
-        "maximum_fingerspelling_dataset_share_bps": 7500,
-        "maximum_cases_per_dataset": 2,
-        "fingerspelling_category_minimums": FingerspellingCategoryMinimums(
-            sentence=1, name=1, address=1, number=1
-        ),
-    })
+    counts = c.counts.model_copy(
+        update={
+            "fingerspelling": 4,
+            "minimum_fingerspelling_datasets": 2,
+            "minimum_fingerspelling_signers": 4,
+            "maximum_fingerspelling_dataset_share_bps": 7500,
+            "maximum_cases_per_dataset": 2,
+            "fingerspelling_category_minimums": FingerspellingCategoryMinimums(
+                sentence=1, name=1, address=1, number=1
+            ),
+        }
+    )
     return inventory, counts
 
 
@@ -544,19 +546,26 @@ def test_category_reservation_preserves_the_only_address_and_number_source(case,
     assert report["selected_dataset_totals"]["primaryfs"] == 2
     assert report["selected_dataset_totals"]["secondaryfs"] == 2
     assert report["selected_fingerspelling_categories"] == {
-        "address": 1, "name": 1, "number": 1, "sentence": 1,
+        "address": 1,
+        "name": 1,
+        "number": 1,
+        "sentence": 1,
     }
     reversed_inventory = inventory.model_copy(update={"cases": tuple(reversed(inventory.cases))})
-    assert select_future_suite(
-        reversed_inventory, case.exclusions, counts, case.policy, selection_key=key
-    )[0] == suite
+    assert (
+        select_future_suite(
+            reversed_inventory, case.exclusions, counts, case.policy, selection_key=key
+        )[0]
+        == suite
+    )
 
 
 def test_category_reservation_counts_canonical_corpora_not_versions(case):
     inventory, counts = category_bottleneck(case)
     values = tuple(
         row.model_copy(update={"dataset": "  \uff30RIMARYfs  ", "dataset_version": "other-split"})
-        if row.case.case_id == f"{202:064x}" else row
+        if row.case.case_id == f"{202:064x}"
+        else row
         for row in inventory.cases
     )
     suite, report = select(
@@ -580,15 +589,22 @@ def test_category_capacity_does_not_rescue_an_excluded_required_case(case, overl
         "near_reference": {"references": ("The garden gate is open today",)},
     }
     with pytest.raises(ValueError, match=r"dataset quota|disjoint diversity"):
-        select(case, inventory=inventory, counts=counts,
-               exclusions=case.exclusions.model_copy(update=updates[overlap]))
+        select(
+            case,
+            inventory=inventory,
+            counts=counts,
+            exclusions=case.exclusions.model_copy(update=updates[overlap]),
+        )
 
 
 def test_category_reservation_also_honors_task_share_without_global_cap(case):
     inventory, counts = category_bottleneck(case)
-    counts = counts.model_copy(update={
-        "maximum_cases_per_dataset": None, "maximum_fingerspelling_dataset_share_bps": 5000,
-    })
+    counts = counts.model_copy(
+        update={
+            "maximum_cases_per_dataset": None,
+            "maximum_fingerspelling_dataset_share_bps": 5000,
+        }
+    )
     suite, _ = select(case, inventory=inventory, counts=counts)
     assert {c.case_id for c in suite.cases if c.stratum == "fingerspelling"} == {
         f"{i:064x}" for i in (202, 203, 210, 211)
@@ -623,8 +639,9 @@ def test_capacity_filter_uses_corpus_category_counts_without_per_choice_rescans(
 
     categories = ("sentence", "name", "address", "number")
     rows = Once(
-        candidate(i, str(i), task="fingerspelling", dataset="Corpus" + str(i % 16), signer=i)
-        .model_copy(update={"fingerspelling_category": categories[i % 4]})
+        candidate(
+            i, str(i), task="fingerspelling", dataset="Corpus" + str(i % 16), signer=i
+        ).model_copy(update={"fingerspelling_category": categories[i % 4]})
         for i in range(1000, 2024)
     )
     rows.iterations = 0
@@ -632,8 +649,14 @@ def test_capacity_filter_uses_corpus_category_counts_without_per_choice_rescans(
         row.case.case_id: canonical_dataset_identity(row.dataset) for row in list.__iter__(rows)
     }
     allowed = _category_capacity_choices(
-        rows, keys, Counter(), Counter(),
-        {"sentence": 1, "name": 1, "address": 1, "number": 1}, 2, 2, 3,
+        rows,
+        keys,
+        Counter(),
+        Counter(),
+        {"sentence": 1, "name": 1, "address": 1, "number": 1},
+        2,
+        2,
+        3,
     )
     assert len(allowed) == 16 and rows.iterations == 1
 

@@ -125,6 +125,64 @@ endpoint-profile bindings, then use the supported installer rerun. Batch
 certification by itself requires no upload-only client release. Preserve source
 selection and restoration dependencies until every reader using them has moved.
 
+### CPU-efficiency readers
+
+C8+ CPU-efficiency adoption is a prospective reader-first transition. Preserve
+existing C6/C7 signed inputs, timing evidence and reward behavior. Do not attach
+the contract to an already prepared round or infer timing from historical
+`elapsed_ms`. The [settlement specification](../operators/settlement.md#prospective-cpu-efficiency-rewards)
+defines the signed contract, model-execution boundary and bounded adjustment.
+
+| Consumer | Required compatible formats and update path |
+| --- | --- |
+| Preparation owner, exporter, independent preparation reviewers and request-start owner | Prepared round `/3`, signed CPU-efficiency adoption `/1` and operator request-start `/2`. Select the qualified immutable source through existing host/source maintenance before selecting a contract. |
+| Evaluator and any native execution worker overlays | Trusted cold-model timing gate, exclusive cpuset partition with scheduler balancing, comparable CPU/resource profile and versioned timing/cache evidence. Publish compatible host and overlay selections together; no model runs before the measured gate. |
+| Quality reviewers, settlement preparation, coordinator, writer and full native replay | Retained compact timing summaries, model award `/5` and allocation `/6`. Use the actual selected source for each reader and preserve completed original proof/quality evidence. |
+| Public score producer, adoption reader, delivery, API and catalog watcher | Public model results `/4`, explicit measurement-contract digest and `efficiency_weight_applied`. The delivery service must permit an adopted result while retaining exact original timing and roster. Catalog updates reuse completed release checks. |
+| Upload-only model client and model inference entrypoint | No upload, consent or model-call protocol change. Existing model-bound licensing remains intact. Full offline evidence readers need the compatible source. |
+| Reference-following validator | Existing approved signed row/policy path remains sufficient; it does not parse raw timing. Publish and verify adoption of the eventual approved row through the usual channel. |
+
+Install the exclusive bundle-cache reader and retirement hooks with every
+selected evaluator/overlay. Drain legacy untracked readers before C8 timing;
+a newly created Python process alone does not establish cache comparability.
+Retain external invocation markers across restart so cleanup can reconcile
+exact orphan containers. Timed receipts require model/invocation-bound empty
+bundle-page-cache evidence; missing observations stop timing qualification.
+
+Ship the native `umi.host_cpu_partition` restorer and `umi.host_cpu_probe` helper
+with the selected signed host. Follow the
+[partition provisioning and qualification instructions](../operators/settlement.md#cpu-partition-provisioning-and-qualification)
+after C7 drains, preserving the existing reviewers and memory-slot identities.
+The plan selects an exclusive `root` partition, normal scheduler balancing and
+explicit cgroupfs Podman execution; it does not change global Podman defaults.
+Retain the historical systemd reader for untimed execution and orphan recovery.
+Qualify actual rootless migration, bounded probe cancellation, cache ownership,
+restart cleanup and the intended concurrent lane/load profile before selection.
+Restoration completion alone records neither qualification nor contract selection.
+
+The corrected timing host additionally qualifies explicit core-class equivalence
+and shared-ancestor CPU budgets. Select the matching restorer and evaluator
+together, then qualify the new topology and measurement-profile identities.
+Do not reuse an older host qualification to approve these new enforcement rules.
+Existing signed timing evidence still decodes and replays unchanged; these are
+prospective execution checks. Upload-only clients need no protocol change.
+
+The common supervisor channel does not replace installed Python hosts. Use each
+host's supported signed maintenance/source selection and any explicit overlay
+authority. That same selected-config update must carry the private
+`cpu_efficiency_adoptions_directory` for owner/preparation and model reviewers.
+The existing adoption series timer then signs and delivers one retained CPU
+contract per authority through the authenticated model-review peers. Verify the
+exact reviewer selections before the owner selection; dynamic delivery changes
+only first new C8+ preparation, never a retained C7 round. The standalone model client has no background source updater; when a
+full-reader update is needed, publish the qualified `runtime.revision` through
+`deploy/miner-upgrade/current.json` and use its supported installer rerun. An
+upload-only miner needs no resubmission for this timing policy. Verify the actual
+selected host/overlay, published release selection and retained restart behavior
+before claiming rollout. Keep challenge start held until its operator approval
+names the exact prepared contract. No source merge or automatic image poll by
+itself grants that approval.
+
 ### Automatic translation reference releases
 
 The fixed `umi-translation-validator/1` worker uses the supervisor's existing
@@ -1218,6 +1276,26 @@ signer/executor startup. A
 `standing_service_retry` includes the failed `stage` and exception type without
 exception text or credentials. A stage entry records attempted work; use the
 retained journal and finalized chain update to confirm completion.
+
+The standing writer's `service.maximum_journal_bytes` and its actual journal
+constructor both accept 1 KiB through 512 GiB. This is a logical retention
+allowance, not a physical disk reservation; ordinary round journals retain their
+16 GiB ceiling. A supported host update can first select the corrected source
+with the existing boot, then adopt a separately qualified larger writer allowance
+without changing the original journal directory, binding or signed records.
+Retain the selected boot through subsequent automatic host updates. Capacity
+changes still require the normal disk and memory admission and authenticated
+host-selection path; do not patch an installed signed tree or reset the journal.
+This host-local change needs no new miner protocol or approved-row follower format.
+
+An actual batch capacity refusal emits `round_journal_capacity_exhausted` with
+numeric byte, record and per-kind counters and flags identifying the exhausted
+limit. Counters include preceding staged entries in the same batch; that whole
+batch is rolled back. The log reuses the transaction's existing counters without
+additional database or proof reads and contains no record keys or payloads.
+Conflicts keep precedence over capacity, and the original `ValueError` remains
+unchanged. Logical counters do not establish SQLite physical growth or justify
+reducing operating reserves.
 
 Legacy handoff reports separate `legacy_handoff_packages` and
 `legacy_handoff_expiry` work inventories, elapsed time and stage ETAs. Retained
@@ -2582,8 +2660,55 @@ the new manifest. Added `project.scripts` declarations are supported when all
 existing commands and every other parsed project field remain unchanged. They
 are recorded as `uninstalled_added_project_scripts`: the supervisor host installs
 only its two lifecycle launchers; new miner/operator commands use the ordinary
-package installation. Changes to existing commands or other project metadata
-require a separate migration and refuse before creating a build tree.
+package installation. The direct-dependency promotion below is the other
+supported project metadata change. Other changes require a separate migration
+and refuse before creating a build tree.
+
+A Python-only archive maintenance change can use this dependency clone while
+retaining the configured finality, substrate-proof and runtime-metadata binaries
+unchanged. The builder does not invoke Cargo or a native compiler. It still
+creates a new immutable source revision and unsigned host manifest; existing
+signed host bytes must never be patched in place. Preserve the actual artifact
+paths and digests, qualify the changed reader/configuration boundary, and use
+the normal signed maintenance selection. Recompilation is needed only when the
+native dependencies or their supported interface actually change.
+
+Imported proof-object retirement requires the selected directory's actual
+readers to adopt both the original-receipt R2 fallback and shared release lease
+before the owner unlinks anything. Inventory configuration and source bindings,
+including spawned workers and recovery commands; a matching directory name or
+new checkout is not adoption. The standing writer, coordinator and independent
+reviewer may use distinct import roots, so upgrade each affected root's readers
+without changing unrelated selections. Reference/publication and delivery
+services that only parse a coordinator config for compact outputs need a new
+parser if that particular config gains fields, even when they never read proof
+objects. Keep their existing compatible config when no change is needed.
+Ordinary model upload/inference clients have no wire change; a miner or validator
+performing full offline replay must use the compatible archive reader. Carry
+the selected source through its supported maintenance/release pointer for future
+cohorts, and verify installed behavior before enabling release. See
+[R2 proof archives](../operators/settlement.md#optional-r2-proof-archives) for
+retirement, recovery and frozen-copier requirements. This storage transition has
+no cohort-closure prerequisite.
+
+A new unconditional direct requirement can name an already installed transitive
+dependency without reinstalling it. The builder authenticates the previous
+`pyproject.toml`, lock and installed distribution `METADATA` against the signed
+host. The locked and installed versions must satisfy the new requirement, and
+the dependency must be reachable through unconditional original lock edges.
+Only the corresponding project-root dependency and `requires-dist` declarations
+may change: package membership, versions, source/artifact identities, dependency
+edges, optional requirements, existing markers and other lock semantics remain
+exact. New extras, markers, direct URLs, ambiguous versions and simultaneous
+wheel changes refuse. This can accompany an otherwise supported added command.
+
+The supported host imports project source through its signed `umi.pth` and has
+no project distribution metadata of its own. A present project `.dist-info` or
+`.egg-info` requires a separate metadata migration; the builder will not leave
+its `Requires-Dist` inconsistent with the new project. The build receipt lists
+`direct_dependency_promotions` and their authenticated installed metadata. The
+ordinary signed clone verifies dependency payloads once; promotion planning
+reads only bounded metadata and performs no package resolution or installation.
 
 For a locked pure-Python dependency version update, supply one explicit
 `--dependency-wheel /ABSOLUTE/package-version-py3-none-any.whl` per changed

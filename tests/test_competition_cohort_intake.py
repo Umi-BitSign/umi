@@ -740,17 +740,34 @@ def test_registration_pins_do_not_wait_for_intake_writer_gate(intake, scenario):
 
 
 def test_registration_pins_report_real_sqlite_contention(intake, scenario):
-    import sqlite3
-
     from umi.private_files import PrivateStateBusyError
 
     intake.retain(request_for(scenario), capture_at(210))
     db = sqlite3.connect(intake.directory / "intake.sqlite3", isolation_level=None)
     try:
         db.execute("BEGIN EXCLUSIVE")
-        with pytest.raises(PrivateStateBusyError):
+        with pytest.raises(PrivateStateBusyError) as busy:
             intake.retained_registration_blocks()
+        assert isinstance(busy.value.__cause__, sqlite3.OperationalError)
+        assert busy.value.operation == "cohort_intake_snapshot"
+        assert busy.value.resource_sha256 == digest(str(intake.directory))
+        assert busy.value.errno == getattr(busy.value.__cause__, "sqlite_errorcode", None)
+        assert str(intake.directory) not in str(busy.value)
     finally:
         db.rollback()
         db.close()
     assert intake.retained_registration_blocks() == frozenset({210})
+
+
+def test_history_snapshot_preserves_noncontention_sqlite_error(intake):
+    original = None
+    with (
+        pytest.raises(sqlite3.OperationalError) as failure,
+        intake._history_connection(wait=False) as (db, _),
+    ):
+        try:
+            db.execute("SELECT * FROM missing_private_table")
+        except sqlite3.OperationalError as error:
+            original = error
+            raise
+    assert failure.value is original

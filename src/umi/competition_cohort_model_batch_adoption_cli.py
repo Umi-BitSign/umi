@@ -35,9 +35,14 @@ def _root_model(path, kind, maximum_bytes):
     return value
 
 
-async def _run(path, *, series=False):
-    kind = ModelBatchAdoptionSeriesConfig if series else ModelBatchAdoptionOperatorConfig
-    config = _root_model(path, kind, 256 * 1024)
+async def _run(path, *, series=False, cpu_efficiency=False):
+    if cpu_efficiency:
+        from .competition_cpu_efficiency_operator import CpuEfficiencyOperatorConfig
+
+        kind = CpuEfficiencyOperatorConfig
+    else:
+        kind = ModelBatchAdoptionSeriesConfig if series else ModelBatchAdoptionOperatorConfig
+    config = _root_model(path, kind, (512 if cpu_efficiency else 256) * 1024)
     policy = _root_model(config.policy_file, CompetitionPolicy, 8 * 1024**2)
     async with httpx.AsyncClient(
         follow_redirects=False,
@@ -47,12 +52,18 @@ async def _run(path, *, series=False):
         if series:
             return await run_model_batch_adoption_series(config, policy, client=client)
         history = _root_model(config.history_file, CohortRecoveryHistory, 32 * 1024**2)
+        if cpu_efficiency:
+            from .competition_cpu_efficiency_operator import run_cpu_efficiency_adoption
+
+            return await run_cpu_efficiency_adoption(config, policy, history, client=client)
         return await run_model_batch_adoption(config, policy, history, client=client)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("run", "run-series", "publish"))
+    parser.add_argument(
+        "action", choices=("run", "run-series", "publish", "run-cpu", "publish-cpu")
+    )
     parser.add_argument("--config", type=Path)
     args = parser.parse_args(argv)
     handler = logging.StreamHandler()
@@ -62,22 +73,36 @@ def main(argv=None):
     logger.setLevel(logging.INFO)
     logger.propagate = False
     try:
-        if args.action == "publish":
+        if args.action in {"publish", "publish-cpu"}:
             if args.config is not None:
                 raise ValueError("actor publication takes only its bounded canonical stdin request")
-            raw = sys.stdin.buffer.read(128 * 1024 + 1)
-            if len(raw) > 128 * 1024:
+            maximum_bytes = 512 * 1024 if args.action == "publish-cpu" else 128 * 1024
+            raw = sys.stdin.buffer.read(maximum_bytes + 1)
+            if len(raw) > maximum_bytes:
                 raise ValueError("actor publication exceeds its request bound")
-            body = ActorPublication.model_validate_json(raw)
+            if args.action == "publish-cpu":
+                from .competition_cpu_efficiency_operator import (
+                    CpuEfficiencyActorPublication,
+                    publish_cpu_for_actor,
+                )
+
+                kind, publish = CpuEfficiencyActorPublication, publish_cpu_for_actor
+            else:
+                kind, publish = ActorPublication, publish_for_actor
+            body = kind.model_validate_json(raw)
             if canonical_json_bytes(body) != raw:
                 raise ValueError("actor publication requires canonical bytes")
-            result = publish_for_actor(
-                body.target, body.request, body.signed, check_only=body.check_only
-            )
+            result = publish(body.target, body.request, body.signed, check_only=body.check_only)
         else:
             if args.config is None:
                 raise ValueError("batch adoption run requires its operator configuration")
-            result = asyncio.run(_run(args.config, series=args.action == "run-series"))
+            result = asyncio.run(
+                _run(
+                    args.config,
+                    series=args.action == "run-series",
+                    cpu_efficiency=args.action == "run-cpu",
+                )
+            )
         print(json.dumps(result))
         return 0
     except Exception as error:

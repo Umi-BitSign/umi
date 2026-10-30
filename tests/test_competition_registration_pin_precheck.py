@@ -12,7 +12,9 @@ from umi.competition_registration_pins import (
     RegistrationPinRepairRequired,
     RegistrationPins,
 )
+from umi.competition_round_journal import RoundJournal
 from umi.open_competition import digest
+from umi.private_files import PrivateStateBusyError
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_cohort_service_queue import (
@@ -74,6 +76,69 @@ def metadata():
         keys.append((key, result, source))
     yield SimpleNamespace(db=db, pins=pins, slots=slots, keys=keys)
     db.close()
+
+
+@pytest.mark.parametrize("operation", ["snapshot", "writer"])
+def test_native_pin_contention_keeps_cause_and_retries(tmp_path, operation):
+    journal = RoundJournal(tmp_path / "journal", {}, maximum_rounds=32)
+    pins = RegistrationPins(journal, {})
+    with pins.snapshot() as db:
+        value = pins.make(db, [], {}, {})
+
+    def use():
+        if operation == "snapshot":
+            with pins.snapshot() as db:
+                db.execute("SELECT * FROM records").fetchall()
+        else:
+            pins.remember("fixture", value, lambda _: None)
+
+    holder = sqlite3.connect(journal.path, isolation_level=None)
+    try:
+        holder.execute("BEGIN EXCLUSIVE")
+        with pytest.raises(PrivateStateBusyError) as busy:
+            use()
+        assert isinstance(busy.value.__cause__, sqlite3.OperationalError)
+        assert busy.value.operation == "registration_pin_" + operation
+        assert busy.value.resource_sha256 == digest(str(journal.path))
+        assert busy.value.errno == getattr(busy.value.__cause__, "sqlite_errorcode", None)
+        assert str(journal.path) not in str(busy.value)
+    finally:
+        holder.rollback()
+        holder.close()
+    use()
+
+
+@pytest.mark.parametrize("operation", ["snapshot", "writer"])
+def test_native_pin_storage_error_is_not_contention(tmp_path, operation):
+    journal = RoundJournal(tmp_path / "journal", {}, maximum_rounds=32)
+    pins = RegistrationPins(journal, {})
+    with pins.snapshot() as db:
+        value = pins.make(db, [], {}, {})
+    original = []
+
+    def fail(db):
+        try:
+            db.execute("SELECT * FROM missing_private_table")
+        except sqlite3.OperationalError as error:
+            original.append(error)
+            raise
+
+    expected = (
+        sqlite3.OperationalError if operation == "snapshot" else RegistrationPinRepairRequired
+    )
+    with pytest.raises(expected) as failure:
+        if operation == "snapshot":
+            with pins.snapshot() as db:
+                fail(db)
+        else:
+            pins.remember("fixture", value, fail)
+    if operation == "snapshot":
+        assert failure.value is original[0]
+    else:
+        assert failure.value.__cause__ is original[0]
+        assert "missing_private_table" not in str(failure.value)
+        assert str(journal.path) not in str(failure.value)
+        pins.remember("fixture", value, lambda _: None)
 
 
 def test_metadata_presence_is_only_negative_readiness_not_a_verified_pin_set(metadata):

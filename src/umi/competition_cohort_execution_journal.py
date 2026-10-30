@@ -45,6 +45,7 @@ from .competition_cohort_orders import (
     recoverable_order_job,
 )
 from .competition_cohort_recovery import verify_recovery_quorum
+from .competition_cpu_efficiency_policy import prepared_cpu_efficiency_authorization
 from .competition_execution import ExecutionBoundary, ExecutionStep, PendingExecutionStep
 from .competition_round_journal import RecordReservation, RoundJournal
 from .competition_runner import OfflineCaseExecution, validate_case_execution
@@ -1045,12 +1046,19 @@ class CohortExecutionJournal:
             or result.output.case_id != case.case_id
         ):
             raise ValueError("invocation result differs from its assigned model or case")
+        timing = result.output.cpu_timing
+        if timing is not None and timing.conditions.invocation_sha256 != digest(attempt):
+            raise ValueError("CPU timing invocation differs from its retained attempt")
         from .competition_evaluation_runtime import prepared_runtime_authorization
 
         validate_case_execution(
             result,
             self.policy,
             runtime_authorization=prepared_runtime_authorization(job.round, self.policy),
+            cpu_efficiency_authorization=prepared_cpu_efficiency_authorization(
+                job.round, self.policy
+            ),
+            execution_runtime=job.runtime,
         )
         return result
 

@@ -1,5 +1,6 @@
 """Original byte generations survive restart without disguising remote damage."""
 
+import select
 import shutil
 import sqlite3
 import subprocess
@@ -12,6 +13,7 @@ import pytest
 from umi.competition_chunked_model_backup import BYTE_ABI, ChunkedModelBackupReader
 from umi.competition_model_byte_store import ModelByteStoreConfig, qualify_shared_byte_stores
 from umi.competition_model_generation_store import (
+    ModelGenerationOwnerBusy,
     ModelGenerationRepairRequired,
     ModelGenerationStoreConfig,
     grow_generation_owner,
@@ -329,6 +331,55 @@ async def test_live_writer_does_not_make_a_committed_owner_look_damaged(backup, 
         release.set()
         thread.join(10)
     assert not errors and not thread.is_alive()
+
+
+@pytest.mark.parametrize("fault", ["locked", "schema"])
+async def test_native_owner_recovery_distinguishes_contention_from_damage(backup, tmp_path, fault):
+    instance = owned(backup, tmp_path)
+    snapshot = await instance.verify()
+    path = instance._generations().journal.path
+    script = """
+import sqlite3,sys
+db=sqlite3.connect(sys.argv[1],isolation_level=None)
+if sys.argv[2] == "schema":
+    db.execute("ALTER TABLE binding RENAME COLUMN body TO private_body")
+db.execute("BEGIN EXCLUSIVE" if sys.argv[2] == "locked" else "BEGIN IMMEDIATE")
+db.execute("INSERT INTO records VALUES ('fixture','pending',?)", (b'{}',))
+print("ready", flush=True)
+sys.stdin.readline()
+db.rollback()
+db.close()
+"""
+    writer = subprocess.Popen(
+        [sys.executable, "-I", "-B", "-c", script, str(path), fault],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert select.select([writer.stdout], [], [], 10)[0]
+        assert writer.stdout.readline().strip() == "ready"
+        backup.remote.heads.clear()
+        backup.remote.reads.clear()
+        expected = ModelGenerationOwnerBusy if fault == "locked" else ModelGenerationRepairRequired
+        with pytest.raises(expected) as failure:
+            owned(backup, tmp_path, initialize=False)._generations()
+        assert isinstance(failure.value.__cause__, sqlite3.OperationalError)
+        assert str(path) not in str(failure.value)
+        assert "private_body" not in str(failure.value)
+        assert backup.remote.heads == backup.remote.reads == []
+    finally:
+        try:
+            writer.communicate("release\n", timeout=10)
+        except subprocess.TimeoutExpired:
+            writer.kill()
+            writer.communicate(timeout=5)
+    assert writer.returncode == 0
+    if fault == "locked":
+        recovered = owned(backup, tmp_path, initialize=False)
+        assert await recovered.verify(completed_only=True) == snapshot
+        assert backup.remote.heads == backup.remote.reads == []
 
 
 def fill_owner(owner):

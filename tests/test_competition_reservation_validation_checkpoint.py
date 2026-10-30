@@ -136,6 +136,35 @@ def test_older_writer_additions_readonly_and_rollback(tmp_path, monkeypatch):
     assert seen == []
 
 
+def test_drain_preserves_noncontention_sqlite_error_and_pending_work(tmp_path, monkeypatch):
+    from umi import competition_round_journal as module
+
+    journal = RoundJournal(tmp_path / "journal", {}, maximum_rounds=32)
+    journal.reserve_records("batch", (RecordReservation("vote", "initial", 64),))
+    with old_writer(journal) as db:
+        insert(db, -1, "pending")
+    advance = module._advance_reservation_validation
+    original = []
+
+    def fail(journal, db, columns):
+        try:
+            db.execute("SELECT * FROM missing_private_table")
+        except sqlite3.OperationalError as error:
+            original.append(error)
+            raise
+
+    monkeypatch.setattr(module, "_advance_reservation_validation", fail)
+    with pytest.raises(sqlite3.OperationalError) as failure:
+        journal.reservation("batch")
+    assert failure.value is original[0]
+    with sqlite3.connect(journal.path) as db:
+        assert db.execute(f"SELECT COUNT(*) FROM {checkpoint.PENDING}").fetchone() == (1,)
+    monkeypatch.setattr(module, "_advance_reservation_validation", advance)
+    assert journal.reservation("batch") is not None
+    with sqlite3.connect(journal.path) as db:
+        assert db.execute(f"SELECT COUNT(*) FROM {checkpoint.PENDING}").fetchone() == (0,)
+
+
 @pytest.mark.parametrize(
     "damage", ["missing_state", "missing_pending", "missing_marker", "epoch", "abi"]
 )
@@ -318,8 +347,11 @@ def test_checkpoint_count_integrity_does_not_shorten_service_review_envelope(
 def test_checkpoint_still_refuses_invalid_count_integrity(tmp_path, count):
     journal = RoundJournal(tmp_path / "journal", {})
     journal.reserve_records("batch", ())
-    with journal.read_transaction() as db, pytest.raises(
-        checkpoint.ReservationValidationRepairRequired,
-        match="checkpoint or validation dependency changed",
+    with (
+        journal.read_transaction() as db,
+        pytest.raises(
+            checkpoint.ReservationValidationRepairRequired,
+            match="checkpoint or validation dependency changed",
+        ),
     ):
         checkpoint.check(journal, AggregateCountSnapshot(db, count))

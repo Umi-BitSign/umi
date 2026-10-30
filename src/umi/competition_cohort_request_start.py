@@ -52,15 +52,33 @@ class CohortCutoverObservation(StrictProtocolModel):
 class OperatorRequestStart(StrictProtocolModel):
     """Explicit local start decision; never backdates cutover or phase evidence."""
 
-    schema_: Literal["umi-cohort-operator-request-start/1"] = Field(alias="schema")
+    schema_: Literal[
+        "umi-cohort-operator-request-start/1", "umi-cohort-operator-request-start/2"
+    ] = Field(alias="schema")
     cohort_sha256: Hex32
     authorized_history_tip_sha256: Hex32
     suite_sha256: Hex32
     baseline_model_sha256: Hex32
     evaluation_runtime_sha256: Hex32
     runtime_adoption_sha256: Hex32 | None
+    cpu_efficiency_adoption_sha256: Hex32 | None = None
     not_before_unix_ms: Timestamp
     source_sha256: Hex32
+
+    @model_serializer(mode="wrap")
+    def preserve_original_start(self, handler):
+        value = handler(self)
+        if value.get("cpu_efficiency_adoption_sha256") is None:
+            value.pop("cpu_efficiency_adoption_sha256", None)
+        return value
+
+    @model_validator(mode="after")
+    def versioned_efficiency_selection(self):
+        if (self.schema_ == "umi-cohort-operator-request-start/2") != (
+            self.cpu_efficiency_adoption_sha256 is not None
+        ):
+            raise ValueError("CPU efficiency request start requires its versioned binding")
+        return self
 
 
 class RequestStartConfig(StrictProtocolModel):
@@ -291,6 +309,8 @@ class SeriesRequestStart:
                 "runtime_adoption_sha256",
             )
         }
+        if selected.cpu_efficiency_adoption_sha256 is not None:
+            expected["cpu_efficiency_adoption_sha256"] = selected.cpu_efficiency_adoption_sha256
         if actual != expected:
             raise ValueError("operator request start baseline or runtime selection changed")
         old = await run_owned_thread(

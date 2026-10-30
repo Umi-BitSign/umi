@@ -53,6 +53,7 @@ class HistoryProgress:
         self.remote_export_selected = False
         self.local_release = None
         self.archive_delivery = None
+        self.imported_object_retirement = None
         self.frontier_reuse = None
         self.preparation = None
         self.restoration = None
@@ -484,6 +485,7 @@ class HistoryProgress:
                 else "remote_delivery_receipts_not_available_to_history_owner",
                 "local_release": self.local_release,
                 "archive_delivery": self.archive_delivery,
+                "imported_object_retirement": self.imported_object_retirement,
                 "frontier_reuse": self.frontier_reuse,
                 "applied_blocks": done,
                 "restored_completed": self.restored_completed,

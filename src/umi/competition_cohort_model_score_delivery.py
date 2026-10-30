@@ -113,19 +113,37 @@ def _binding(scores):
         scores.cohort_sha256,
         scores.round_sha256,
         scores.policy_sha256,
+        scores.cpu_efficiency_adoption_sha256,
         tuple(sorted((r.submission_sha256, r.model_sha256, r.hotkey, r.uid) for r in scores.items)),
+        tuple(
+            sorted(
+                (
+                    row.submission_sha256,
+                    row.efficiency_multiplier_ppm,
+                    None
+                    if row.normalized_cpu_slowdown is None
+                    else (
+                        row.normalized_cpu_slowdown.numerator,
+                        row.normalized_cpu_slowdown.denominator,
+                    ),
+                )
+                for row in scores.items
+            )
+        ),
     )
 
 
 def _replacement(old, new):
     if _binding(old) != _binding(new):
-        raise ValueError("score replacement changes certified cohort roster or policy")
+        raise ValueError("score replacement changes certified cohort roster, policy or timing")
     if old == new:
         return
     original = old.original_allocation_sha256 or old.allocation_sha256
     source = old.original_source_metadata_sha256 or old.source_metadata_sha256
     if (
-        new.schema_ != "umi-public-cohort-model-results/3"
+        new.schema_
+        not in {"umi-public-cohort-model-results/3", "umi-public-cohort-model-results/4"}
+        or new.certification != "quorum_certified_reward_adoption"
         or new.original_allocation_sha256 != original
         or new.original_source_metadata_sha256 != source
         or new.reward_adoption_sha256 == old.reward_adoption_sha256
