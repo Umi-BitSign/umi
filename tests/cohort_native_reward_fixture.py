@@ -357,6 +357,8 @@ async def run_activation(
         readback.retain_decision(certified)
         assert (await converge(coordinator)).status == "delivery_pending"
         readback.retain_package(package)
+        if reward_adoption is not None:
+            readback.retain_adoption(files.adoption(digest(reward_adoption)))
         current_control_finality(history, end)
         assert (await converge(coordinator)).status == "series_control_published"
         assert coordinator.publisher.journal.pending() is None
