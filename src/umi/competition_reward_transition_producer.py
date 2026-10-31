@@ -1,7 +1,8 @@
 """Recurring operator-or-timeout adoption using the existing reward owners.
 
-Package discovery precedes the economics gate. A native-reviewed original is
-retained before signing, so a restart resumes the same issuance and quorum.
+Package discovery precedes the economics gate. The exact prepared original is
+retained before expensive review, so interruption preserves issuance and receipt
+reuse. Only completed native review can authorize its signatures or publication.
 Explicit lifecycle/settlement holds always take precedence over either trigger.
 """
 
@@ -246,6 +247,12 @@ class StandingRewardTransitionProducer:
                 "missing delivery remains pending"
             ),
         ) as progress:
+            # This retains the prepared input, not a review or signing authority.
+            # A failed/restarted first review must keep its exact issuance so
+            # completed native receipts remain valid on the next attempt.
+            if self._original != saved:
+                await run_owned_thread(self.originals.put, "transition_original", slot, saved)
+                self._original = saved
             review = self._reviewed
             if review is None or review.intent.proposal != proposal:
                 if observation is None:
@@ -264,12 +271,14 @@ class StandingRewardTransitionProducer:
                     current_observation=current,
                     live_endpoint=live,
                 )
-                await run_owned_thread(self.originals.put, "transition_original", slot, saved)
-                self._original, self._reviewed = saved, review
-            else:
-                # Original package semantics remain reusable; current authority
-                # must still match before any new signatures or publication.
-                self.reviewer._control(current, predecessor, current=True)
+                self._reviewed = review
+                if review.current_observation is not None:
+                    current = review.current_observation
+            # Original package semantics remain reusable; the current signing
+            # fence still checks the returned or already collected observation.
+            current = await self.reviewer.current_control(
+                current, predecessor, not_before_block=proposal.issued_at_block
+            )
             progress.advance()
             if await run_owned_thread(self.controls.held, cohort):
                 return RewardTransitionProgress("progression_held", current)
@@ -311,9 +320,11 @@ class StandingRewardTransitionProducer:
                 progress.emit("waiting")
                 return RewardTransitionProgress("adoption_quorum_pending", current)
             progress.advance()
-            # The current observation must still be within its native validity
-            # interval after signing/delivery. Expiry retries the same intent.
-            self.reviewer._control(current, predecessor, current=True)
+            # Signing/delivery can outlive current proof too. Refresh only that
+            # fence, preserving the pinned intent and rejecting changed control.
+            current = await self.reviewer.current_control(
+                current, predecessor, not_before_block=proposal.issued_at_block
+            )
             if await run_owned_thread(self.controls.held, cohort):
                 return RewardTransitionProgress("progression_held", current)
             await self.signer.publish(slot, self.feed)

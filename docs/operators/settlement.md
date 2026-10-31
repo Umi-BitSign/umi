@@ -125,10 +125,23 @@ Keep private review envelopes within the installed transport and parser bounds:
 an adoption request can contain up to 32 MiB of original proof and 16 MiB of
 metadata, hex encoded, plus the bounded signed intent. It carries no wallet keys.
 
-The recurring producer discovers completed packages before the economics gate,
-reviews each package through the existing native verification owner, and retains
-its exact original issuance before requesting signatures. Both roles reuse their
-durable votes after restart. To request immediate release of an exact completed
+The recurring producer discovers completed packages before the economics gate
+and retains its exact prepared original before expensive native review. That
+checkpoint fixes issuance and evidence for interruption/restart; it grants no
+signing or publication authority. Both roles reuse their durable votes after
+restart. If review outlives the current proof's validity, the owner collects a
+new authenticated current observation after the completed work. It keeps the
+pinned proposal and semantic receipts, requires the same predecessor and a block
+at least as recent as issuance, and preserves all progression holds. The producer
+reuses that observation through signing and refreshes it again only if it expires
+before publication. Invalid or foreign observations remain errors.
+
+Deploy this behavior to both the coordinator and independent reward reviewers
+through their supported source handoff. Signed package/adoption formats, miner
+clients, verification receipt ABI and current-proof age limits remain compatible;
+source qualification alone does not establish installed selection.
+
+To request immediate release of an exact completed
 successor, without restarting the coordinator, run:
 
 ```sh

@@ -1,6 +1,7 @@
 """Native batch ownership, durable recovery and bounded async lifetimes."""
 
 import asyncio
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -264,57 +265,81 @@ async def test_preparation_reuses_inputs_and_serial_intents_after_reservation_dr
     assert len(prepared_calls) == 2
 
 
-async def test_parallel_model_publications_do_not_contend_on_their_own_export_locks(
-    batch_owner, monkeypatch
+@pytest.mark.parametrize("stage", ["inputs", "exports"])
+async def test_parallel_model_preparation_serializes_only_shared_publication(
+    batch_owner, monkeypatch, stage
 ):
     from umi import competition_cohort_model_batch_worker as module
 
     r = batch_owner
     native = module.run_owned_thread
-    published = 0
-    active_exports = 0
-    exports = []
-    publications_ready = asyncio.Event()
-    export_started = asyncio.Event()
-    release_export = asyncio.Event()
+    ready_count = 0
+    active_commits = 0
+    commits = []
+    all_ready = asyncio.Event()
+    commit_started = asyncio.Event()
+    release_commit = asyncio.Event()
+
+    async def ready():
+        nonlocal ready_count
+        ready_count += 1
+        if ready_count == len(r.subs):
+            all_ready.set()
+        await all_ready.wait()
+
+    async def prepare_review(cohort, submission):
+        assert cohort == r.cohort and submission in r.subs
+        await ready()
+        return r.inputs
+
+    input_path = r.worker.inputs / "model-reviews" / (r.inputs.model_sha256 + ".json")
+    if stage == "inputs":
+        input_path.unlink()
+        r.worker.prepare_review = prepare_review
 
     async def owned(function, *args, **kwargs):
-        nonlocal published, active_exports
-        if function == r.owner.publish:
+        nonlocal active_commits
+        if stage == "exports" and function == r.owner.publish:
             result = await native(function, *args, **kwargs)
-            published += 1
-            if published == len(r.subs):
-                publications_ready.set()
-            # Both independent publications are ready before either export;
-            # force the directory-lock race without depending on disk speed.
-            await publications_ready.wait()
+            await ready()
             return result
-        if function == r.owner.export:
-            if active_exports:
-                raise OSError("the sibling export still owns the private directory lock")
-            active_exports += 1
-            exports.append(args[1])
-            export_started.set()
+        selected_commit = (
+            function == r.owner.export
+            if stage == "exports"
+            else isinstance(function, partial)
+            and function.func is module.publish_private_model
+            and function.args[0] == input_path
+        )
+        if selected_commit:
+            if active_commits:
+                raise OSError("the sibling publication still owns the private directory lock")
+            active_commits += 1
+            commits.append(args[1] if stage == "exports" else function.args[0])
+            commit_started.set()
             try:
-                await release_export.wait()
+                await release_commit.wait()
                 return await native(function, *args, **kwargs)
             finally:
-                active_exports -= 1
+                active_commits -= 1
         return await native(function, *args, **kwargs)
 
     monkeypatch.setattr(module, "run_owned_thread", owned)
     task = asyncio.create_task(r.create().poll_cohort(r.cohort, r.adoption))
     try:
-        await asyncio.wait_for(export_started.wait(), 60)
+        await asyncio.wait_for(commit_started.wait(), 60)
         await asyncio.sleep(0)  # Give the other ready publication its scheduling turn.
-        assert published == len(r.subs) == len(r.state.promoted)
-        assert active_exports == len(exports) == 1
+        # Both expensive preparations/promotions finish before the first small
+        # publication is released; only shared-directory commits are serialized.
+        assert ready_count == len(r.subs)
+        assert len(r.state.promoted) == (len(r.subs) if stage == "exports" else 0)
+        assert active_commits == len(commits) == 1
     finally:
-        publications_ready.set()
-        release_export.set()
+        all_ready.set()
+        release_commit.set()
         report = await task
     assert report["status"] == "completed"
-    assert sorted(exports) == sorted(digest(sub) for sub in r.subs)
+    expected = [digest(sub) for sub in r.subs] if stage == "exports" else [input_path] * len(r.subs)
+    assert sorted(commits) == sorted(expected)
 
 
 async def test_replacement_before_finalization_reuses_unchanged_intent_and_selects_latest(
