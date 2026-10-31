@@ -2866,6 +2866,53 @@ settlement; ordinary object identity and authority checks still apply. Retained
 older acceptances without this publication remain supported by the final
 settlement path.
 
+The frozen reference is a separate execution dependency. Before native award or
+reward replay, settlement, reward reviewers and the validator writer prepare the
+exact model named by the retained round. An applied certified baseline receipt
+selects the original source cohort, submission and acceptance; the current
+promotion head or an older transport inventory cannot substitute another model.
+The original `model-reward-preparation` request and acceptance must therefore
+remain replicated for a reference inherited from an earlier cohort. Applying a
+baseline also exports its original quorum certificate under
+`model-reward-references/<target-cohort>/<model>.json`; an idempotent repeat
+exports it for an existing applied baseline without another observation or
+payload check. The `model-evidence` profile distributes all three original
+documents to each settlement, reward-review and validator-writer promotion
+directory. Reward-only stores without a promotion head verify that certificate
+against the already frozen round solely to locate bytes; they do not append or
+invent promotion history. Existing verified local archives need no new metadata
+export. Original NC declarations and signed consent stay unchanged.
+
+For automatic restoration, select `reference_preservation_directory` in the
+existing `direct_model_review` configuration. It is a narrowly writable alias of
+the **same device and inode** as `promotion_directory/model-reward-artifacts`,
+not another model archive. Keep ordinary readers' canonical bind read-only and
+give only the selected preservation owner a writable alias in its service
+namespace. The existing bounded boot-disk cache is required. Native R2
+materialization prepares only that reference, and native preservation publishes
+the canonical bundle and receipt. Admission budgets both temporary copies,
+filesystem rounding, inode headroom and the configured free-space reserve;
+per-write checks preserve the reserve as other services grow. Completed local
+receipts are reused after restart. Only the exact temporary transfer slot is
+removed after canonical publication, including recovery from an interrupted
+cleanup; the durable R2 verification records remain outside that slot.
+
+Shared archive leases protect the reference during native replay and recurring
+use. Existing archive entries are never owned by this worker. Once every
+selected process sharing the archive has adopted this lease path, the owner may
+select `reference_working_set_reclamation: true`; changing references, releasing
+settlement inputs and normal shutdown then reclaim worker-created bytes after
+the last reader releases them. The recurring writable settlement owner also
+retires a released generation after its last read-only peer exits. The retained
+ownership record must match the
+exact directory generation. This setting defaults to false for compatibility
+with older readers; cleanup reports `archive_consumer_lease_rollout_not_selected`
+while canonical bytes remain retained. Do not enable it on a mixed deployment.
+Verify the actual writable alias, read-only reader behavior, published updater
+selection and installed consumers before claiming automatic restoration or
+reclamation is deployed. Miner submission formats and signed award/reward
+packages remain unchanged.
+
 Completed request evidence continues to be exported independently while these
 checks run. Final cohort quality decisions, allocation and signatures still
 require the original certified request closure and reference release. Background

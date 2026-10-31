@@ -23,6 +23,7 @@ from .competition_runtime_port import baseline_record_digest
 from .competition_runtime_port_history import _require_no_retained_round_activity
 from .competition_transport_verification import TransferProgress
 from .open_competition import digest, identity, model_content_digest
+from .private_files import publish_private_model
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
 if TYPE_CHECKING:
@@ -216,7 +217,29 @@ def cohort_baseline_application_status(
         return "pending"
 
 
-def apply_cohort_baseline(
+def export_cohort_baseline_reference(store, certificate):
+    """Replicate the original applied certificate for byte restoration only."""
+    record = cohort_baseline_record(certificate.review)
+    with store._connection() as connection:
+        original = read_cohort_baseline_receipt(store, connection, record).certificate
+    review = original.review
+    publish_private_model(
+        store.directory
+        / "model-reward-references"
+        / review.target_cohort_sha256
+        / (review.candidate.model_sha256 + ".json"),
+        original,
+        maximum_bytes=_MAX_BYTES,
+    )
+
+
+def apply_cohort_baseline(store, certificate, *, observed_block):
+    record = _apply_cohort_baseline(store, certificate, observed_block=observed_block)
+    export_cohort_baseline_reference(store, certificate)
+    return record
+
+
+def _apply_cohort_baseline(
     store: CompetitionStore,
     certificate: CertifiedCohortBaselineReview,
     *,

@@ -231,20 +231,48 @@ class StandingRewardDecisionReviewer:
             package = await run_owned_thread(
                 p.files.verified_package, body.activation.package_sha256
             )
-            if p.model_artifacts is not None and package.allocation.model_award is not None:
-                completed = {
-                    a.acceptance.submission_sha256
-                    for a in package.allocation.model_award.acceptances
-                }
-                participants = tuple(
-                    participant
-                    for participant in package.inputs.roster.participants
-                    if participant.record.request.signed_submission.submission.track == "model"
-                    and digest(participant.record.request.signed_submission.submission) in completed
+        if (
+            p.model_artifacts is not None
+            and package is not None
+            and package.allocation.model_award is not None
+            and package.allocation.model_award.acceptances
+        ):
+            async with p.model_artifacts.frozen_reference_scope(package.inputs.roster.round):
+                return await self._review_selected_package(
+                    package,
+                    body,
+                    prefix,
+                    control,
+                    history,
+                    opportunity,
+                    revision_clearance,
+                    live_lock,
                 )
-                await p.model_artifacts.ensure_all(
-                    participants, package.allocation.model_award.acceptances
-                )
+        return await self._review_selected_package(
+            package, body, prefix, control, history, opportunity, revision_clearance, live_lock
+        )
+
+    async def _review_selected_package(
+        self, package, body, prefix, control, history, opportunity, revision_clearance, live_lock
+    ):
+        p = self
+        if (
+            package is not None
+            and p.model_artifacts is not None
+            and package.allocation.model_award is not None
+        ):
+            completed = {
+                a.acceptance.submission_sha256 for a in package.allocation.model_award.acceptances
+            }
+            participants = tuple(
+                participant
+                for participant in package.inputs.roster.participants
+                if participant.record.request.signed_submission.submission.track == "model"
+                and digest(participant.record.request.signed_submission.submission) in completed
+            )
+            await p.model_artifacts.ensure_all(
+                participants, package.allocation.model_award.acceptances
+            )
         return await run_owned_thread(
             partial(
                 review_reward_decision,

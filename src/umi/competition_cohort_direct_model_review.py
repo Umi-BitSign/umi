@@ -89,12 +89,18 @@ class DirectModelReviewSourceConfig(StrictProtocolModel):
     ]
     materialization_concurrency: Literal[1] = 1
     materialization_boot_disk_cache: BootDiskModelCacheConfig | None = None
+    reference_working_set_reclamation: bool = False
+    reference_preservation_directory: Directory | None = None
 
     @model_serializer(mode="wrap")
     def preserve_legacy(self, handler):
         value = handler(self)
         if self.materialization_boot_disk_cache is None:
             value.pop("materialization_boot_disk_cache", None)
+        if not self.reference_working_set_reclamation:
+            value.pop("reference_working_set_reclamation", None)
+        if self.reference_preservation_directory is None:
+            value.pop("reference_preservation_directory", None)
         if self.verification_directory is None:
             value.pop("verification_directory", None)
         if "verification_concurrency" not in self.model_fields_set:
@@ -585,6 +591,8 @@ class DirectModelSettlementVerifier:
         legacy_storage: LegacyModelSettlementStorage | None = None,
         legacy_readers: LegacyModelStorageReaders | None = None,
         certification_history=None,
+        promotion=None,
+        maximum_promotion_bytes=16 * 1024**2,
     ) -> None:
         self.artifacts = artifacts
         if legacy_storage is not None and legacy_readers is not None:
@@ -607,6 +615,7 @@ class DirectModelSettlementVerifier:
                 "legacy settlement storage differs from its selected policy, namespace or cache"
             )
         self.serial = asyncio.Lock()
+        self.references = None
         private_path(str(self.archive))
         ensure_private_directory(self.receipts)
         if (
@@ -615,6 +624,36 @@ class DirectModelSettlementVerifier:
             or self.receipts in self.archive.parents
         ):
             raise ValueError("direct settlement receipts and legacy archive must be disjoint")
+        if promotion is not None:
+            from .competition_cohort_reference_preparation import SettlementReferencePreparation
+
+            self.references = SettlementReferencePreparation(
+                artifacts,
+                self.archive,
+                promotion,
+                legacy=sources,
+                maximum_bytes=maximum_promotion_bytes,
+            )
+
+    async def ensure_frozen_reference(self, prepared):
+        if self.references is not None:
+            await self.references.ensure(prepared)
+
+    @asynccontextmanager
+    async def frozen_reference_scope(self, prepared):
+        if self.references is None or prepared is None:
+            yield
+        else:
+            async with self.references.scope(prepared):
+                yield
+
+    def release_frozen_reference(self):
+        if self.references is not None:
+            self.references.close()
+
+    async def reclaim_released_references(self):
+        if self.references is not None:
+            await self.references.reclaim_released()
 
     def legacy_for(self, cohort, *, certification_history=None):
         """Choose by the original certificate cohort; other cohorts keep native storage."""

@@ -171,17 +171,33 @@ def preserve_bundle(
         os.close(lease)
 
 
-def _preserve_locked(bundle, source, archive, policy, *, check_write=None, on_bytes_written=None):
-    key = digest(bundle)
-    final = archive / key
-    # This exact, per-manifest scratch directory is exclusively owned by the
-    # lock above. A killed copy can be retried without accumulating orphan data.
+def _clear_preservation_stage(archive, key):
     stage = archive / (".pending-" + key)
     if stage.exists() or stage.is_symlink():
         info = stage.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise ValueError("unsafe interrupted artifact directory")
         shutil.rmtree(stage)
+    return stage
+
+
+def reclaim_interrupted_preservation(bundle, archive, policy):
+    """Release only this native writer's incomplete stage before space admission."""
+    validate_bundle_policy(bundle, policy)
+    with _directory(archive):
+        lease = lock_private_file(archive / (".preserve-" + digest(bundle) + ".lock"))
+        try:
+            _clear_preservation_stage(archive, digest(bundle))
+        finally:
+            os.close(lease)
+
+
+def _preserve_locked(bundle, source, archive, policy, *, check_write=None, on_bytes_written=None):
+    key = digest(bundle)
+    final = archive / key
+    # This exact, per-manifest scratch directory is exclusively owned by the
+    # lock above. A killed copy can be retried without accumulating orphan data.
+    stage = _clear_preservation_stage(archive, key)
     if final.exists() or final.is_symlink():
         _verify_preserved_locked(bundle, archive, policy)
         return final
@@ -240,6 +256,19 @@ def verify_preserved_bundle(
     archive: Path,
     policy: CompetitionPolicy,
 ) -> str:
+    # A worker-created reference may also be a local/legacy candidate. Its
+    # byte-reading verifier shares the exact archive lease with reference
+    # replayers, including through a read-only canonical bind.
+    reference_lock = archive / ".reference-working-set" / (digest(bundle) + ".lock")
+    lease = lock_private_file(reference_lock, shared=True) if reference_lock.exists() else None
+    try:
+        return _verify_preserved_reader(bundle, archive, policy)
+    finally:
+        if lease is not None:
+            os.close(lease)
+
+
+def _verify_preserved_reader(bundle, archive, policy):
     validate_bundle_policy(bundle, policy)
     # Readers of already verified content do not contend with one another.
     expected = _preserved_verification_record(bundle, archive)

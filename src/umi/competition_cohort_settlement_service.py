@@ -25,7 +25,7 @@ from .competition_cohort_history import verify_cohort_history
 from .competition_cohort_intake import history_tip
 from .competition_cohort_model_award import read_model_acceptances
 from .competition_cohort_order_signer import CohortOrderHistory
-from .competition_cohort_recovery import RecoverableCohortPlan
+from .competition_cohort_recovery import ModelRewardCohortAuthority, RecoverableCohortPlan
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_cohort_request_closure import CohortRequestClosure
 from .competition_cohort_request_inventory import request_inventory_observations
@@ -346,6 +346,8 @@ class CohortSettlementService:
         retransmit already retained votes. It must never sample or sign a new
         phase using those ports after releasing its native input inventory.
         """
+        if self.model_artifacts is not None:
+            self.model_artifacts.release_frozen_reference()
         if self.phases is not None:
             # Coordinator peer closures point back to their exchange/phases.
             # Break that cycle explicitly rather than waiting for cyclic GC.
@@ -640,6 +642,10 @@ class CohortSettlementService:
             if participant.record.request.signed_submission.submission.track == "model"
             and digest(participant.record.request.signed_submission.submission) in completed
         )
+        if participants and isinstance(
+            review.history.authority.authority, ModelRewardCohortAuthority
+        ):
+            await self.model_artifacts.ensure_frozen_reference(review.roster.round)
         for participant, certificate in zip(participants, certificates, strict=True):
             await self.model_artifacts.ensure(
                 participant, certificate, certification_history=review.history

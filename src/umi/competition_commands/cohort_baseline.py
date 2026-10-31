@@ -8,6 +8,7 @@ from functools import partial
 from pathlib import Path
 
 from ..competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
+from ..competition_cohort_baseline_history import export_cohort_baseline_reference
 from ..competition_cohort_baseline_review import (
     CertifiedCohortBaselineReview,
     cohort_baseline_record,
@@ -212,6 +213,7 @@ def activate(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
             "current_finalized_window_checked": False,
         }
     if status == "completed":
+        export_cohort_baseline_reference(reader, certificate)
         return result
 
     async def run():

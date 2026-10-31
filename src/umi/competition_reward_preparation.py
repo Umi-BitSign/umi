@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Literal
@@ -211,7 +212,7 @@ class StandingRewardPreparation:
         history: OwnedRewardControlHistory,
         source: DecisionSource,
     ) -> PreparedStandingReward:
-        async with self._lock:
+        async with self._lock, self._reference_scope(package):
             await self._ensure_model_artifacts(package)
             return await run_owned_thread(partial(self._prepare, package, control, history, source))
 
@@ -241,7 +242,7 @@ class StandingRewardPreparation:
         This may be the preceding cohort during a successor's drain. It does not
         project a row, credit an interval or grant authority to submit today.
         """
-        async with self._lock:
+        async with self._lock, self._reference_scope(package):
             await self._ensure_model_artifacts(package)
             return await run_owned_thread(
                 partial(self._prepare_historical, package, control, history, source)
@@ -269,7 +270,7 @@ class StandingRewardPreparation:
         package from complete native history without selecting it for weights.
         Projection still requires fresh control and the current activation.
         """
-        async with self._lock:
+        async with self._lock, self._reference_scope(package):
             await self._ensure_model_artifacts(package)
             return await run_owned_thread(
                 partial(self._prepare_initial, package, control, history, source)
@@ -492,6 +493,15 @@ class StandingRewardPreparation:
             for allocation in allocations:
                 self.allocation_sink(allocation)
                 progress.advance(1)
+
+    def _reference_scope(self, package):
+        if (
+            self.model_artifacts is None
+            or package.allocation.model_award is None
+            or not package.allocation.model_award.acceptances
+        ):
+            return nullcontext()
+        return self.model_artifacts.frozen_reference_scope(package.inputs.roster.round)
 
     async def _ensure_model_artifacts(self, package: CohortRewardPackage) -> None:
         award = package.allocation.model_award

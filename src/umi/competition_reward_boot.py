@@ -484,6 +484,8 @@ async def _run_owned_standing_inputs(host, config, stop, *, runtime=None, credit
             direct_artifacts,
             store.directory / "model-reward-artifacts",
             root / "direct-model-reward-receipts",
+            promotion=store,
+            maximum_promotion_bytes=config.maximum_promotion_bytes,
             legacy_readers=selected_legacy_model_readers(
                 legacy_sources,
                 multipart=direct_artifacts.multipart,
@@ -530,6 +532,8 @@ async def _run_owned_standing_inputs(host, config, stop, *, runtime=None, credit
         runtime_selection=select_boot_runtime(config),
     )
     async with AsyncExitStack() as constructing:
+        if model_artifacts is not None:
+            constructing.callback(model_artifacts.release_frozen_reference)
         select_history_forecasts(
             history, root=root, config=config, resources=constructing, role="reward_writer"
         )

@@ -173,6 +173,15 @@ class NativeRewardTransitionReviewer:
     @memory_operation
     async def _package(self, package, proposal):
         p = self.reviewer
+        award = package.allocation.model_award
+        prepared = None if award is None or not award.acceptances else package.inputs.roster.round
+        if p.model_artifacts is None:
+            return await self._package_scoped(package, proposal)
+        async with p.model_artifacts.frozen_reference_scope(prepared):
+            return await self._package_scoped(package, proposal)
+
+    async def _package_scoped(self, package, proposal):
+        p = self.reviewer
         if p.model_artifacts is not None and package.allocation.model_award is not None:
             completed = {
                 item.acceptance.submission_sha256

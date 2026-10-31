@@ -48,6 +48,7 @@ from .test_open_competition import policy as policy
                 "model-acceptance-proposals/a/b.json",
                 "model-reward-acceptances/a/b.json",
                 "model-reward-preparation/a/b.json",
+                "model-reward-references/a/b.json",
             ],
         ),
         ("documents", ["a.json", "a-reference.json"]),

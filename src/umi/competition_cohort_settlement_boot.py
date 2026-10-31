@@ -269,10 +269,13 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
                     root / digest(plan) / "direct-model-settlement-receipts",
                     legacy_readers=legacy_readers,
                     certification_history=certification_history,
+                    promotion=promotion,
+                    maximum_promotion_bytes=config.maximum_promotion_bytes,
                 )
             )
             if model_artifacts is not None:
                 direct_by_cohort[digest(plan)] = model_artifacts
+                resources.callback(model_artifacts.release_frozen_reference)
             nodes.append(
                 CohortSettlementService(
                     config,
