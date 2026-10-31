@@ -182,15 +182,20 @@ def test_duplicate_rows_keep_current_conflict_and_exact_byte_fences(delivery, ch
     h = delivery
     keys = duplicates(h)
     h.owner.poll_once()
-    # A nonrepresentative row must still be checked on every pass.
-    key = keys[-1]
+    # A nonrepresentative row must still be checked on every pass. Signatures
+    # vary, so the original request can sort last; replacing that row with the
+    # original request would leave its bytes unchanged.
+    original_key = digest(h.request)
+    key = next(key for key in reversed(keys) if key not in {keys[0], original_key})
     with h.owner.journal.transaction() as db:
         if change == "hold":
             db.execute("INSERT INTO holds VALUES (?)", (key,))
         else:
             raw = h.owner.journal.get_raw("upload", key, db=db)
             if change == "replace":
-                raw = canonical_json_bytes(h.request)
+                replacement = canonical_json_bytes(h.request)
+                assert raw != replacement
+                raw = replacement
             else:
                 raw += b" "
             db.execute("UPDATE records SET body=? WHERE kind='upload' AND id=?", (raw, key))
