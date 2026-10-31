@@ -112,7 +112,7 @@ def test_successor_ownership_excludes_predecessor_and_releases_all_locks(config_
 @pytest.mark.parametrize("failure", [None, "metadata", "start", "repair"])
 @pytest.mark.parametrize("selection", ["current", "predecessor"])
 async def test_repair_uses_original_bindings_no_keys_and_closes_provider(
-    config_case, monkeypatch, caplog, failure, selection
+    config_case, monkeypatch, caplog, failure, selection, http_log_redaction
 ):
     config = config_case.config if selection == "current" else with_predecessor(config_case.config)
     history_profile = HistoryVerificationProfile(schema="umi-history-verification-profile/1")
@@ -227,8 +227,11 @@ async def test_repair_uses_original_bindings_no_keys_and_closes_provider(
     assert all(provider.closed for provider in providers)
     with owned_reward_state(config):
         pass
+    prefix = "reward_history_repair "
     events = [
-        json.loads(record.args[0]) for record in caplog.records if record.name == repair.__name__
+        json.loads(record.getMessage().removeprefix(prefix))
+        for record in caplog.records
+        if record.name == repair.__name__ and record.getMessage().startswith(prefix)
     ]
     assert events[0]["planning_eta_seconds"] == [5, 120]
     assert "planning_assumption" in events[0]["eta_basis"]

@@ -33,6 +33,10 @@ _ISSUER = object()
 _MAX_EVIDENCE_BYTES = 32 * 1024**2
 
 
+class RewardControlExpired(ValueError):
+    """An authentic owned observation needs a new current-chain observation."""
+
+
 @dataclass(frozen=True, slots=True)
 class OwnedRewardControlObservation:
     """Process-local proof result; serialized evidence cannot recreate it."""
@@ -99,11 +103,15 @@ def validate_owned_reward_control(
         or observation.runtime.snapshot != observation.snapshot
         or account_id32(observation.control_hotkey) != account_id32(expected_control_hotkey)
         or observation.chain_config_sha256 != expected_chain_config_sha256
-        or not observation.captured_monotonic_ns
-        <= time.monotonic_ns()
-        <= observation.expires_monotonic_ns
     ):
         raise ValueError("reward control was not issued by the selected current proof adapter")
+    now = time.monotonic_ns()
+    if now < observation.captured_monotonic_ns:
+        raise ValueError("reward control was not issued by the selected current proof adapter")
+    if now > observation.expires_monotonic_ns:
+        raise RewardControlExpired(
+            "reward control observation expired; fresh current proof required"
+        )
 
 
 def _control_value(value: object, block: int) -> tuple[str | None, int | None]:

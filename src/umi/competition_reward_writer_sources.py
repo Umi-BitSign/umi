@@ -105,7 +105,7 @@ def review_source_only_original(reader, journals, *, through_block):
         raise ValueError("source preservation differs from original history")
     before = _stamp(journals)
     with reader.journal.read_transaction() as db:
-        reader.checkpoints.check_schema(db)
+        folded_tables, folded_records = reader.folded_frontier.unpopulated_layout(db)
         empty_tables = {
             "holds",
             "highwater",
@@ -114,14 +114,18 @@ def review_source_only_original(reader, journals, *, through_block):
             "round_settlement_index",
             "history_checkpoint_index",
         }
-        allowed = empty_tables | {
-            "binding",
-            "records",
-            "history_checkpoint_state",
-            "history_source_identity",
-            "round_record_capacity",
-            "round_record_capacity_kinds",
-        }
+        allowed = (
+            empty_tables
+            | folded_tables
+            | {
+                "binding",
+                "records",
+                "history_checkpoint_state",
+                "history_source_identity",
+                "round_record_capacity",
+                "round_record_capacity_kinds",
+            }
+        )
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if tables != allowed or db.execute("PRAGMA user_version").fetchone()[0] != 0:
             raise HistoryCheckpointRepairRequired(
@@ -137,7 +141,11 @@ def review_source_only_original(reader, journals, *, through_block):
             if db.execute("SELECT 1 FROM " + table + " LIMIT 1").fetchone():
                 raise HistoryCheckpointRepairRequired("source-only original has retained outcomes")
         counts = tuple(db.execute("SELECT kind,COUNT(*) FROM records GROUP BY kind"))
-        if set(k for k, _ in counts) - {*SOURCE_KINDS, "control_history_checkpoint_owner"}:
+        if set(k for k, _ in counts) - {
+            *SOURCE_KINDS,
+            "control_history_checkpoint_owner",
+            *(kind for kind, _ in folded_records),
+        }:
             raise HistoryCheckpointRepairRequired(
                 "source-only original has results or unknown records"
             )

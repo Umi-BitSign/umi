@@ -155,7 +155,17 @@ class DocumentationNavigationTests(unittest.TestCase):
         self.assertEqual(publisher_launch, exchange_launch)
 
     def test_small_front_door_without_dated_runbooks(self):
-        self.assertLessEqual(len(list((ROOT / "docs").glob("*.md"))), 8)
+        # Immutable signed terms remain at their published paths for consent
+        # verification. Additional versions are evidence, not extra setup guides.
+        retained_terms = {
+            "MODEL_CONTRIBUTION_TERMS.md",
+            "MODEL_CONTRIBUTION_TERMS_V2.md",
+            "MODEL_CONTRIBUTION_TERMS_V3.md",
+            "MODEL_CONTRIBUTION_TERMS_V4.md",
+            "MODEL_CONTRIBUTION_TERMS_NC_V1.md",
+        }
+        guides = [p for p in (ROOT / "docs").glob("*.md") if p.name not in retained_terms]
+        self.assertLessEqual(len(guides), 4)
         self.assertEqual(
             [
                 p.name

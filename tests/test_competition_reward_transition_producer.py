@@ -244,7 +244,10 @@ async def producer_case(live_case, tmp_path, monkeypatch):
                 chain_config_sha256=digest(h.control.config),
             )
             return native.ReviewedRewardAdoption(
-                intent, _issuer=native._ISSUER, _binding=digest(intent)
+                intent,
+                _issuer=native._ISSUER,
+                _binding=digest(intent),
+                current_observation=kwargs["current_observation"],
             )
 
         native_reviewer.review = review
@@ -394,6 +397,105 @@ async def test_quorum_retry_and_restart_reuse_same_original_intent_and_signature
     )
     assert len({canonical_json_bytes(r.proposal) for r in c.requests}) == 1
     assert len({r.evidence for r in c.requests}) == len({r.metadata for r in c.requests}) == 1
+
+
+async def test_first_review_failure_and_restart_preserve_original_before_any_signature(
+    producer_case, monkeypatch
+):
+    c = producer_case
+    failed_inputs = []
+
+    async def interrupted(**kwargs):
+        failed_inputs.append(kwargs)
+        original = c.producer._original
+        assert original is not None and original.proposal == kwargs["proposal"]
+        slot = c.signer.journal.slot(original.proposal)
+        assert c.producer.originals.get("transition_original", slot) is not None
+        raise ValueError("native review interrupted after durable semantic checkpoints")
+
+    monkeypatch.setattr(c.producer.reviewer, "review", interrupted)
+    with pytest.raises(ValueError, match="native review interrupted"):
+        await c.producer.step(c.cohort, c.prefix)
+    original = c.producer._original
+    assert c.producer._reviewed is None
+    assert not c.signatures and not c.requests
+    c.reopen()
+    c.advance()
+    result = await c.producer.step(c.cohort, c.prefix)
+    assert result.status == "selected"
+    assert c.producer._original == original
+    assert c.reviews[0]["proposal"] == failed_inputs[0]["proposal"]
+    assert (
+        c.reviews[0]["current_observation"].snapshot.block_number
+        > original.proposal.issued_at_block
+    )
+    assert c.restores == [
+        (bytes.fromhex(original.control_evidence_hex), bytes.fromhex(original.control_metadata_hex))
+    ]
+    assert c.signatures == [original.proposal]
+
+
+async def test_producer_reuses_review_refreshed_control_through_publication(
+    producer_case, monkeypatch
+):
+    c = producer_case
+    review = c.producer.reviewer.review
+    renewed = []
+
+    async def reviewed_after_long_work(**kwargs):
+        result = await review(**kwargs)
+        c.advance()
+        current = await c.producer.reviewer.reviewer.provider.collect_control(
+            c.c.series.control_hotkey
+        )
+        renewed.append(current)
+        return replace(result, current_observation=current)
+
+    monkeypatch.setattr(c.producer.reviewer, "review", reviewed_after_long_work)
+    result = await c.producer.step(c.cohort, c.prefix)
+    assert result.status == "selected" and result.observation is renewed[0]
+    assert len(c.collects) == 2  # Initial issuance and the native review's refresh; no third proof.
+    assert c.signatures[0].issued_at_block == c.collects[0].snapshot.block_number
+    assert c.signatures[0].issued_at_block < result.observation.snapshot.block_number
+
+
+async def test_previous_slot_does_not_suppress_new_original_checkpoint(producer_case, monkeypatch):
+    c = producer_case
+    observed = await c.producer.reviewer.reviewer.provider.collect_control(
+        c.c.series.control_hotkey
+    )
+    previous = module.RewardTransitionOriginal(
+        schema="umi-reward-transition-original/1",
+        proposal=c.c.feed_initial.adoptions[0].adoption,
+        predecessor=c.prefix[-1],
+        control_evidence_hex=observed.evidence.hex(),
+        control_metadata_hex=observed.runtime.metadata_bytes.hex(),
+    )
+    previous_slot = c.signer.journal.slot(previous.proposal)
+    await module.run_owned_thread(
+        c.producer.originals.put, "transition_original", previous_slot, previous
+    )
+    c.producer._original = previous
+    review = c.producer.reviewer.review
+    selected_slots = []
+
+    async def assert_new_checkpoint(**kwargs):
+        selected = c.producer._original
+        slot = c.signer.journal.slot(selected.proposal)
+        assert slot != previous_slot and selected.proposal == kwargs["proposal"]
+        assert c.producer.originals.get("transition_original", slot) is not None
+        selected_slots.append(slot)
+        return await review(**kwargs)
+
+    monkeypatch.setattr(c.producer.reviewer, "review", assert_new_checkpoint)
+    assert (await c.producer.step(c.cohort, c.prefix)).status == "selected"
+    assert len(selected_slots) == 1
+    assert (
+        module.RewardTransitionOriginal.model_validate_json(
+            canonical_json_bytes(c.producer.originals.get("transition_original", previous_slot))
+        )
+        == previous
+    )
 
 
 @pytest.mark.parametrize("policy", ["one_group"], indirect=True)

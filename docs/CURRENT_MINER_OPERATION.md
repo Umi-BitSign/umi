@@ -2,11 +2,12 @@
 
 # What SN78 miners should run now
 
-C6's corrected results are certified and its rewards are live. C7 public-model
-intake is open; C7 challenges have not started. Existing model entries can be
-replaced while intake remains open. Follow the selected cohort's progress API
-for counted completion and its scoped ETA; intake, evaluation and reward
-activation are separate.
+Use the [live cohort catalog](https://api.umi.vision/v1/competition/cohorts) and
+the selected cohort's readiness response to find open public-model intake.
+Existing model entries can be replaced while that intake remains open. Follow
+its progress API for the current stage, counted completion and scoped ETA;
+intake, evaluation and reward activation are separate. A repository phase
+description or a pending successor does not authorize a new submission.
 
 ## Submit a model for an open cohort
 
@@ -62,14 +63,15 @@ server hold. Do not share wallet secrets or presigned R2 capabilities.
 
 The [connection guide](miners/connection.md) remains authoritative for supported
 endpoint runtime upgrades, policy files and retained endpoint-state compatibility.
-Its C5 `current.json` profile is for retained C5 endpoint work; successor model
-participation follows each signed cohort history through the separate model client. Preserve
+Its `current.json` endpoint profile can remain selected for retained historical
+work; successor model participation follows each signed cohort history through
+the separate model client. Preserve
 existing assignment, grant, nonce and retirement journals. Endpoint participation
 and public-model participation are distinct; running an endpoint does not submit
-a model for C6.
+a public model.
 
 The [bridge specification](operators/bridge.md) remains relevant to historical
 policies and retained verification/recovery consumers. Its HTTPS keepalive rules
-are not the current C5 competition reward mechanism and do not replace C6 model
-submission. Check the [public results API](reference/competition-results-api.md)
+do not define current competition rewards or replace public-model submission.
+Check the [public results API](reference/competition-results-api.md)
 for the selected cohort and published result scope.

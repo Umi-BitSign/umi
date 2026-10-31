@@ -23,6 +23,7 @@ from .competition_reward_adoption import (
 )
 from .competition_reward_control import (
     OwnedRewardControlObservation,
+    RewardControlExpired,
     validate_owned_reward_control,
 )
 from .competition_reward_control_archive import (
@@ -64,6 +65,9 @@ class ReviewedRewardAdoption:
     chain_submission_authorized: Literal[False] = False
     _issuer: object = field(default=None, repr=False, compare=False)
     _binding: str = field(default="", repr=False, compare=False)
+    current_observation: OwnedRewardControlObservation | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 def validate_reward_adoption_review(value: ReviewedRewardAdoption) -> RewardAdoptionReviewIntent:
@@ -92,8 +96,15 @@ class NativeRewardTransitionReviewer:
         )
         if not current and type(observation) is OwnedHistoricalRewardControl:
             validate_historical_reward_control(observation, **expected)
+            expired = None
         else:
-            validate_owned_reward_control(observation, **expected)
+            expired = None
+            try:
+                validate_owned_reward_control(observation, **expected)
+            except RewardControlExpired as error:
+                # An expiry is refreshable only after the original authentic
+                # observation is also bound to this exact predecessor.
+                expired = error
         if (
             predecessor.series_sha256 != digest(reader.series)
             or predecessor.kind
@@ -103,6 +114,20 @@ class NativeRewardTransitionReviewer:
             or observation.committed_at_block < predecessor.observed_at_block
         ):
             raise ValueError("reward transition predecessor is no longer selected")
+        if expired is not None:
+            raise expired
+
+    async def current_control(self, observation, predecessor, *, not_before_block):
+        """Reuse current proof, refreshing only authentic observations that expired."""
+        try:
+            self._control(observation, predecessor, current=True)
+        except RewardControlExpired:
+            reader = self.reviewer.reader
+            observation = await self.reviewer.provider.collect_control(reader.series.control_hotkey)
+            self._control(observation, predecessor, current=True)
+        if observation.snapshot.block_number < not_before_block:
+            raise ValueError("current control precedes pinned adoption issuance")
+        return observation
 
     def _proposal(self, package, proposal, predecessor, observation, live_endpoint):
         p = self.reviewer
@@ -271,12 +296,12 @@ class NativeRewardTransitionReviewer:
             progress.advance()
             await self._package(package, proposal)
             progress.advance()
-            # Semantic receipts are durable before this current freshness fence.
-            # A new current observation can retry the same pinned proposal without
-            # invalidating any completed unchanged native package verification.
-            self._control(current, predecessor, current=True)
-            if current.snapshot.block_number < proposal.issued_at_block:
-                raise ValueError("current control precedes pinned adoption issuance")
+            # Cold semantic review may outlive its initial current observation.
+            # Refresh only that proof; retain the exact pinned issuance and the
+            # completed package receipts, and reject a changed predecessor.
+            current = await self.current_control(
+                current, predecessor, not_before_block=proposal.issued_at_block
+            )
             intent = RewardAdoptionReviewIntent(
                 schema="umi-reward-adoption-review-intent/1",
                 proposal=proposal,
@@ -290,6 +315,11 @@ class NativeRewardTransitionReviewer:
                 ),
                 chain_config_sha256=self.reviewer.reader.chain_config_sha256,
             )
-            result = ReviewedRewardAdoption(intent, _issuer=_ISSUER, _binding=digest(intent))
+            result = ReviewedRewardAdoption(
+                intent,
+                _issuer=_ISSUER,
+                _binding=digest(intent),
+                current_observation=current,
+            )
             progress.advance()
             return result

@@ -291,6 +291,43 @@ class FoldedHistoryFrontier:
         return state
 
     @_repair_metadata
+    def unpopulated_layout(self, db):
+        """Validate initializer metadata without treating it as completed work.
+
+        Older retained journals can lack this layout entirely. Partial metadata,
+        later generations and populated frontiers require explicit recovery.
+        Source-only mutations may advance the revision before any result exists.
+        """
+        state = self.state(db)
+        records = set(
+            db.execute(
+                "SELECT kind,id FROM records WHERE kind GLOB 'control_history_folded_*' LIMIT 3"
+            )
+        )
+        if state is None:
+            if (
+                records
+                or db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name GLOB 'history_folded_*' LIMIT 1"
+                ).fetchone()
+            ):
+                raise HistoryCheckpointRepairRequired("original folded initializer is incomplete")
+            return set(), set()
+        expected = {(_MARKER, "owner"), (_GENERATION, "initial")}
+        if (
+            type(state[1]) is not int
+            or state[1] < 0
+            or state[3] is not None
+            or state[4] != "initial"
+            or records != expected
+            or db.execute(f"SELECT 1 FROM {_ANCHORS} LIMIT 1").fetchone()
+        ):
+            raise HistoryCheckpointRepairRequired(
+                "original folded history retains work or damaged initializer metadata"
+            )
+        return {_STATE, _ANCHORS}, expected
+
+    @_repair_metadata
     def remote_identity(self):
         source = self.blocks.remote_sources
         remote = None if source is None else source.remote
