@@ -129,7 +129,7 @@
     "competition_cohort_model_batch_adoption_series.py": "02c96063574e27b41c69b848bdc1947e7f7d88744fbc37b61464e156fdeeed92",
     "competition_cohort_model_batch_review.py": "7f2c5e8bd89739f9c1203b4074b14aa038b8e691f71454f521c8a062992efc6c",
     "competition_cohort_model_batch_store.py": "ee4c027274cc6c93ec9c6d7cbf6082ea1af4de7000af560694aae5b073fcb235",
-    "competition_cohort_model_batch_worker.py": "4f706d3c654954aa9dae7a3ec097856f76d87a9da9ecd2903e40acbe3458e2d5",
+    "competition_cohort_model_batch_worker.py": "004612f430ef1747e784fc2f384fdb4a7d85438c15096d1bde27fd02799d9862",
     "competition_cohort_model_client.py": "40afc1f3480078aaf2533e788207333d45f1c54316172f9bbbcff77a9eee190b",
     "competition_cohort_model_delivery_api.py": "f00cfc20c592bd62098dbebf60e7267fb4d85611e6ad22cb77702f620083eeba",
     "competition_cohort_model_delivery_candidate.py": "da5a7c354953dcd1c1e185a7b9fa7b9e3f50710e078392fd3d252dee71f57d7c",

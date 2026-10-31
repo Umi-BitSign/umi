@@ -264,6 +264,59 @@ async def test_preparation_reuses_inputs_and_serial_intents_after_reservation_dr
     assert len(prepared_calls) == 2
 
 
+async def test_parallel_model_publications_do_not_contend_on_their_own_export_locks(
+    batch_owner, monkeypatch
+):
+    from umi import competition_cohort_model_batch_worker as module
+
+    r = batch_owner
+    native = module.run_owned_thread
+    published = 0
+    active_exports = 0
+    exports = []
+    publications_ready = asyncio.Event()
+    export_started = asyncio.Event()
+    release_export = asyncio.Event()
+
+    async def owned(function, *args, **kwargs):
+        nonlocal published, active_exports
+        if function == r.owner.publish:
+            result = await native(function, *args, **kwargs)
+            published += 1
+            if published == len(r.subs):
+                publications_ready.set()
+            # Both independent publications are ready before either export;
+            # force the directory-lock race without depending on disk speed.
+            await publications_ready.wait()
+            return result
+        if function == r.owner.export:
+            if active_exports:
+                raise OSError("the sibling export still owns the private directory lock")
+            active_exports += 1
+            exports.append(args[1])
+            export_started.set()
+            try:
+                await release_export.wait()
+                return await native(function, *args, **kwargs)
+            finally:
+                active_exports -= 1
+        return await native(function, *args, **kwargs)
+
+    monkeypatch.setattr(module, "run_owned_thread", owned)
+    task = asyncio.create_task(r.create().poll_cohort(r.cohort, r.adoption))
+    try:
+        await asyncio.wait_for(export_started.wait(), 60)
+        await asyncio.sleep(0)  # Give the other ready publication its scheduling turn.
+        assert published == len(r.subs) == len(r.state.promoted)
+        assert active_exports == len(exports) == 1
+    finally:
+        publications_ready.set()
+        release_export.set()
+        report = await task
+    assert report["status"] == "completed"
+    assert sorted(exports) == sorted(digest(sub) for sub in r.subs)
+
+
 async def test_replacement_before_finalization_reuses_unchanged_intent_and_selects_latest(
     batch_owner, monkeypatch
 ):

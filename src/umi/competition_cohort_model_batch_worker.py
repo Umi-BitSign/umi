@@ -33,6 +33,7 @@ class ModelBatchAcceptanceWorker:
         self.worker, self.directory = worker, Path(directory)
         self.concurrency = concurrency
         self.store = CohortModelBatchStore(worker.owner)
+        self._export_lock = asyncio.Lock()
 
     async def _bounded(self, items, operation, *, cohort, stage):
         items = tuple(items)
@@ -313,8 +314,14 @@ class ModelBatchAcceptanceWorker:
                     await worker.promote(publication)
                 await run_owned_thread(owner.publish, publication, publication_capture)
             # Existing individually signed publication is retained byte-for-byte.
-            await run_owned_thread(owner.export, cohort, key, worker.output)
-            await run_owned_thread(self.store.mark_exported, request, publication, worker.output)
+            # These exports share nonblocking private-directory publication
+            # locks. Serialize this short commit so sibling preparation and
+            # promotion work cannot make our own batch retry completed items.
+            async with self._export_lock:
+                await run_owned_thread(owner.export, cohort, key, worker.output)
+                await run_owned_thread(
+                    self.store.mark_exported, request, publication, worker.output
+                )
 
         await self._bounded(unfinished, publish, cohort=cohort, stage="model_batch_publication")
         return await run_owned_thread(self.store.mark_completed, request, manifest, worker.output)
