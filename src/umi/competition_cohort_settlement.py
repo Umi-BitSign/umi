@@ -55,6 +55,7 @@ from .competition_reward_manifest import RewardReplayRequirement
 from .competition_round_journal import RoundJournal
 from .competition_store import CompetitionStore
 from .competition_verification_reuse import VerificationSourceChanged
+from .competition_work_progress import progress_items
 from .open_competition import CompetitionPolicy, digest
 from .private_files import private_path
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -303,7 +304,12 @@ class CohortSettlement:
                 by_submission[vote.result.submission_sha256].append(vote)
             certificates = {
                 key: collect_quality_certificate(self.journal, benchmark_review, key, votes)
-                for key, votes in by_submission.items()
+                for key, votes in progress_items(
+                    by_submission.items(),
+                    stage="quality_participant_certificates",
+                    unit="participants",
+                    cohort=benchmark_review.roster.round.cohort_sha256,
+                )
             }
             if any(c is None for c in certificates.values()):
                 return NativeSettlementResult("waiting_quality_votes")

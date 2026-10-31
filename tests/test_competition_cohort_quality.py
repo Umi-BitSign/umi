@@ -149,6 +149,45 @@ async def test_complete_certified_quality_preserves_all_participants_and_assigne
     assert all(e["percent"] == 100 and e["eta_seconds"] == 0 for e in completed)
 
 
+@pytest.mark.parametrize("scenario", ["endpoint"], indirect=True)
+def test_endpoint_outcome_reuse_preserves_legacy_bytes_and_fresh_pulse_authority(
+    closed, tmp_path, monkeypatch
+):
+    from umi import competition_cohort_quality as quality
+    from umi.competition_verification_reuse import VerificationReuse
+    from umi.drand import DrandVerificationError
+
+    from .test_competition_verification_collectors import snapshot_at
+
+    b = closed
+    b["quality_history"] = certified_history(b)
+    reopen = snapshot_at(tmp_path / "input", b["objects"])
+    root = tmp_path / "verdicts"
+    with VerificationReuse(root, owner="endpoint-reviewer").selected():
+        first = reviewer(b, objects=reopen().collector(8 * 1024**2))
+        key = first.closure.participants[0].submission_sha256
+        expected = first.outcome(key)
+    assert expected.schema_ == "umi-cohort-closed-quality/1"
+    assert all(run.candidate_basis == "endpoint_content_only" for run in expected.runs)
+    with VerificationReuse(root, owner="endpoint-reviewer").selected():
+        fresh = reviewer(b, objects=reopen().collector(8 * 1024**2))
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                quality,
+                "replay_endpoint_archive_quality",
+                lambda *a, **kw: pytest.fail("unchanged endpoint outcome was recalculated"),
+            )
+            assert canonical_json_bytes(fresh.outcome(key)) == canonical_json_bytes(expected)
+    original_pulse = RetainedRevealPulse(**pulse_record())
+    wrong_pulse = original_pulse.model_copy(update={"round": original_pulse.round + 1})
+    with VerificationReuse(root, owner="endpoint-reviewer").selected():
+        changed = reviewer(b, objects=reopen().collector(8 * 1024**2), pulses=lambda _: wrong_pulse)
+        with pytest.raises(DrandVerificationError, match="signature does not verify"):
+            changed.outcome(key)
+    with VerificationReuse(root, owner="endpoint-reviewer").selected(), pytest.raises(ValueError):
+        reviewer(b, objects=reopen().collector(8 * 1024**2), expected_tip_sha256="ff" * 32)
+
+
 async def test_missing_certificate_or_roster_entry_cannot_be_silently_dropped(closed, tmp_path):
     b = closed
     review = reviewer(b)

@@ -741,6 +741,29 @@ and native verification rules. Each independent owner establishes its own result
 Current history, finality, authority, signature creation and chain selection keep
 their native checks. A stored object alone does not establish valid miner work.
 
+Closed participant quality uses the additive `closed_participant_quality_v1`
+receipt in that same owner-private store. The first successful outcome checkpoints
+its exact terminal dependencies, signed authority, prepared round and runtime,
+suite, policy, execution window and any CPU-efficiency adoption. Later sample,
+attestation, transition, package and reward reviews reuse model outcomes across
+phase changes and restart, after their fresh authority and closure checks. This
+includes historical untimed results and prospective C8 timing results; it changes
+neither measured quality nor signed result bytes. Endpoint outcomes retain their
+current-history authorization context. Lost or damaged completed receipts report
+repair and rebuild only the affected outcome using retained lower-level proof
+verdicts; intact participant checkpoints remain reusable.
+
+Install the compatible source through the supported selection path for settlement
+coordinators, independent reviewers and every reward-package consumer, including
+the validator writer. Preserve their private verification directories and configured
+owner namespaces. The first outcome receipt reuses existing archived-execution
+and closure verdicts: this upgrade does not change their verification ABI or
+require another proof/payload-verification pass. No signed schema, miner submission
+client or model runner changes are required. Existing miner and validator readers
+continue to accept the same result bytes; an older consumer remains correct but
+still reconstructs outcomes until its runtime is updated. Verify selected release
+pointers and installed source adoption before claiming the optimization is live.
+
 Recovery history exports authenticate the committed prefix once within the
 owning SQLite snapshot. The export carries those exact checked certificates and
 derived tip forward, checks the separately supplied genesis quorum and repeated
