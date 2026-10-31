@@ -22,6 +22,8 @@ def test_selected_dependency_manifest_is_complete_and_qualified():
         "competition_reward_history_preparation.py",
         "competition_reward_history_preparation_capacity.py",
         "competition_reward_history_preparation_service.py",
+        "competition_reward_hold_source.py",
+        "competition_reward_transition_controls.py",
         "competition_reward_writer_broker.py",
         "competition_reward_writer_broker_worker.py",
         "competition_reward_writer_exchange.py",
