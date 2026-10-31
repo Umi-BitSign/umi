@@ -127,9 +127,9 @@ selection and restoration dependencies until every reader using them has moved.
 
 ### CPU-efficiency readers
 
-C8+ CPU-efficiency adoption is a prospective reader-first transition. Preserve
-existing C6/C7 signed inputs, timing evidence and reward behavior. Do not attach
-the contract to an already prepared round or infer timing from historical
+CPU-efficiency adoption from cohort sequence 8 is a prospective reader-first
+transition. Preserve historical signed inputs, timing evidence and reward behavior.
+Do not attach the contract to an already prepared round or infer timing from historical
 `elapsed_ms`. The [settlement specification](../operators/settlement.md#prospective-cpu-efficiency-rewards)
 defines the signed contract, model-execution boundary and bounded adjustment.
 
@@ -143,7 +143,7 @@ defines the signed contract, model-execution boundary and bounded adjustment.
 | Reference-following validator | Existing approved signed row/policy path remains sufficient; it does not parse raw timing. Publish and verify adoption of the eventual approved row through the usual channel. |
 
 Install the exclusive bundle-cache reader and retirement hooks with every
-selected evaluator/overlay. Drain legacy untracked readers before C8 timing;
+selected evaluator/overlay. Drain legacy untracked readers before prospective timing;
 a newly created Python process alone does not establish cache comparability.
 Retain external invocation markers across restart so cleanup can reconcile
 exact orphan containers. Timed receipts require model/invocation-bound empty
@@ -152,7 +152,8 @@ bundle-page-cache evidence; missing observations stop timing qualification.
 Ship the native `umi.host_cpu_partition` restorer and `umi.host_cpu_probe` helper
 with the selected signed host. Follow the
 [partition provisioning and qualification instructions](../operators/settlement.md#cpu-partition-provisioning-and-qualification)
-after C7 drains, preserving the existing reviewers and memory-slot identities.
+after the preceding untimed work drains, preserving existing reviewers and
+memory-slot identities.
 The plan selects an exclusive `root` partition, normal scheduler balancing and
 explicit cgroupfs Podman execution; it does not change global Podman defaults.
 Retain the historical systemd reader for untimed execution and orphan recovery.
@@ -174,7 +175,8 @@ authority. That same selected-config update must carry the private
 The existing adoption series timer then signs and delivers one retained CPU
 contract per authority through the authenticated model-review peers. Verify the
 exact reviewer selections before the owner selection; dynamic delivery changes
-only first new C8+ preparation, never a retained C7 round. The standalone model client has no background source updater; when a
+only first new preparation from sequence 8, never a retained round. The standalone
+model client has no background source updater; when a
 full-reader update is needed, publish the qualified `runtime.revision` through
 `deploy/miner-upgrade/current.json` and use its supported installer rerun. An
 upload-only miner needs no resubmission for this timing policy. Verify the actual
@@ -1899,7 +1901,7 @@ through the lifecycle's `request_start` argument before enabling dispatch. Its p
 from the qualified predecessor closure and the announced launch notice. The
 gate cannot infer a legacy closure from a current score or weight row.
 
-For C6 and subsequent cohorts, including successor series, select
+For cohort sequence 6 and subsequent cohorts, including successor series, select
 `rest_clock: "cohort_cutover"` in `request_start`. The lifecycle records each
 cohort's cutover during active intake, before artifact or preparation work.
 Requests require the preceding cohort's verified request-closing certificate and

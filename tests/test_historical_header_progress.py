@@ -178,6 +178,7 @@ async def test_broken_progress_sink_never_masks_native_result_or_rejection(walk,
 
 async def test_history_stage_exposes_ancestry_eta_without_claiming_block_proof_completion():
     reader = object.__new__(RewardControlHistoryReader)
+    reader.shutdown_event = None
     reader._next, reader._repair_reason, reader.remote_store = 10, None, None
     reader.progress = HistoryProgress(10)
     reader._validate_advance = lambda *_: None
@@ -216,6 +217,7 @@ async def test_coordinator_emits_each_bounded_ancestry_pass_across_outer_target_
     monkeypatch.setattr(history_telemetry, "time", telemetry.time)
     service = HistoricalHeaderRecovery(w.connect, batch_size=8)
     reader = object.__new__(RewardControlHistoryReader)
+    reader.shutdown_event = None
     reader._next, reader._repair_reason, reader.remote_store = w.target.block_number, None, None
     reader.progress = HistoryProgress(reader._next)
     reader._validate_advance = lambda *_: None
@@ -305,6 +307,7 @@ async def test_coordinator_logs_withdraw_ancestry_eta_without_losing_native_curs
     monkeypatch.setattr(history_telemetry, "time", telemetry.time)
     service = HistoricalHeaderRecovery(w.connect, batch_size=8)
     reader = object.__new__(RewardControlHistoryReader)
+    reader.shutdown_event = None
     reader._next, reader._repair_reason, reader.remote_store = w.target.block_number, None, None
     reader.progress = HistoryProgress(reader._next)
     reader._validate_advance = lambda *_: None

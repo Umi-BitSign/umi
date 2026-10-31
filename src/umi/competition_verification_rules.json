@@ -225,6 +225,7 @@
     "competition_cohort_request_tail_owner.py": "30e9d472f3d7d0a97b87c2ff0cd9c2588b59148d9ca8fa39085d1932072cb178",
     "competition_cohort_request_terminal.py": "5e2859b039f0498d68e154eb3c5e6394275cc8694b280cb17b10536f75d0bae8",
     "competition_cohort_request_window.py": "6e5adaf28b8f19e1ab8c255f3c3269b904dfabb5b6ef325054d10b8d3a4d6c57",
+    "competition_cohort_request_wire.py": "b868ed5bf44214094ad3a7bf6f20656ccb8ddcd60df2b191f54d03bf139c7015",
     "competition_cohort_request_worker.py": "5e88ad3edbbfe27f586f5dc25b3fe32f1b3af70f22c4174ad9e1d7410e933539",
     "competition_cohort_reserved_participation.py": "a2eaa93e55fd32d8f84dbce5e70a21a87586ff5a062d175b46098d2cd944a436",
     "competition_cohort_review_boot.py": "dd925d13c6f149f3ef708e3883086955fe1d95d16d74b61866ba772bf0235d10",
@@ -486,7 +487,7 @@
     "competition_reward_history_checkpoint.py": "240f40a89721cc1b86f310725f4899df5c37aac713a53b317686fbeea4f9da2a",
     "competition_reward_history_effects.py": "8bcb197e8385cec547c7a330cbebc8cf6734b581e1355e3a8c6fe49664ecfa35",
     "competition_reward_history_export.py": "da613166e56dcd7191e91744d282523b4a6f919999049a73b508747d29066185",
-    "competition_reward_history_frontier.py": "eec2ca9af45557b88a03a049e70572831918bf09c67fac3e2cc467781e29f8ed",
+    "competition_reward_history_frontier.py": "3d7fafe874a6a8bc365c00957ca105b3204d3aa931d82fd5b49b2497f9cb15c1",
     "competition_reward_history_local_delivery.py": "f6bd913e78dd6f0d0857148c9f545be61a3261e91509bc18e046d6dc22edfbc6",
     "competition_reward_history_origin.py": "a6e099be00f8de26be073427a97db7295ba9eff3f941485b7b168f181318a00e",
     "competition_reward_history_origin_cli.py": "9bae1fda847604565da7d71c6e260c5094faedeaf25c69e86942152a8f694416",
@@ -550,14 +551,14 @@
     "competition_reward_writer_broker_worker.py": "6e22bc7ee4d88de5a39629de8472e7a4ba080ef2e268dd5d83e7db93aaee2123",
     "competition_reward_writer_exchange.py": "2c0ebf1bce3dfe6a00a824d751cd4c07f7cf08b5c0d0db1a864d2ea139ca1e4c",
     "competition_reward_writer_journals.py": "83836734da9e40d42e6e5b6b5919b1676b467e095e578088a9153047e0c287e3",
-    "competition_reward_writer_prefix.py": "5d190ba9a7dd79190b4058123b6b4cebcfade3baf51dcf1bdd6bfac680bcd12f",
+    "competition_reward_writer_prefix.py": "cfaddc56d0ff6aaf02c2cad684e7184b149570b51c1ac3d02f5c22eff61bded7",
     "competition_reward_writer_reconciliation.py": "5f94a5c85d699c7f4b691b2f5371b1f2c00878cda7b3f58357693cab8afb5315",
     "competition_reward_writer_resources.py": "03936c29a69fdb5eecb81b3709601e07f18f74576cf2df1efc218f23e318f35c",
     "competition_reward_writer_review.py": "ba78b51d913a0cb1046d7752547da0f113c6351c8270cfa13eb7746c2fa2510f",
     "competition_reward_writer_review_cli.py": "ba84601bd2ef8f67d10641a04fed8e4072047fd903580e98b1cc6e60411e68d6",
     "competition_reward_writer_selection.py": "fb3cdbd6200eea7b89e1e5c513a55738502ce941a9b8fd89b6194e82e6a96459",
     "competition_reward_writer_service.py": "49fe3de98d35fc0dbd88a68d8dc507ea555e2a72b408af49ea1b6a5b1903d025",
-    "competition_reward_writer_sources.py": "b72807f3424c4bddb4efa2e341680bf4ab5a37372a1d43ca4938cd78643bd0bc",
+    "competition_reward_writer_sources.py": "61fe699d27dd50bf4c46e40fd3af4341c209bfe2582769fabccb6e3c744d2b9b",
     "competition_round_assets.py": "7c60ffad0ec932ac31e6fe020ad02f5ee61e6640dc3e686dba8b6f23acf70f6e",
     "competition_round_discovery.py": "9abce137aef37cf1c401a164034ee1fcd043a6593385979eb66c8b81b3a40c18",
     "competition_round_journal.py": "5400074edbfd21e6bb8e55c4356b6b26375e33137595d4bd9fc261cda6bcfa1c",
@@ -738,8 +739,7 @@
     "validator_transcript_effects.py": "e7e8ec2cd72b01d5decc8173aa9b6284c0f0fb1be0ba35f707b8f46b10390e47",
     "video.py": "dba863c934267fe565bea65914644da8cc1d43f6b661c494521c80a7504ebf4b",
     "weight_storage.py": "5959225e2c57c7895b7762a86df717d09eea4e9f07cd6d56978767a6d22d15a8",
-    "window.py": "b5e7b682e5a4bf3fafc5115aa3d1375fa2b2e981b5e028a2ae1be27d55eb22c6",
-    "competition_cohort_request_wire.py": "b868ed5bf44214094ad3a7bf6f20656ccb8ddcd60df2b191f54d03bf139c7015"
+    "window.py": "b5e7b682e5a4bf3fafc5115aa3d1375fa2b2e981b5e028a2ae1be27d55eb22c6"
   },
   "external_distributions": {
     "annotated-doc": [

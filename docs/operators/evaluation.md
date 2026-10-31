@@ -33,7 +33,8 @@ CPU, memory, scratch and inference budgets explicit. A Linux CPU quota does not
 change the host CPU count returned to MediaPipe, so a 128-process container can
 fail while constructing its thread pools even when memory remains available.
 
-For already signed C7+ policies using 128 processes, select one
+For already signed policies at cohort sequence 7 or later using 128 processes,
+select one
 `SignedCohortEvaluationRuntimeAdoption` in the admission host's optional
 `runtime_adoption` configuration (or the standalone preparation publication
 configuration). Its `adoption` body uses schema
@@ -50,7 +51,7 @@ rounds embed it in `umi-recoverable-evaluation-round/2`; preparation reviewers,
 order delivery, execution journals, sandbox memory admission and settlement
 replay all authenticate the same effective runtime. Existing retained rounds
 reuse their original embedded selection after restart, even if the configured
-selection changes. C5/C6 and earlier round `/1` bytes remain unchanged. No
+selection changes. Historical round `/1` bytes remain unchanged. No
 previous completed case is executed again for this resource adjustment.
 
 Deploy the compatible owner, preparation reviewers, evaluators, settlement and
@@ -707,7 +708,7 @@ preparation closure, baseline, suite, runtime, ordered clips and evaluators befo
 any dispatch or source reservation. No additional manual approval stage is needed.
 A local execution flag or a source update alone cannot authorize shared sampling.
 The enabled fields are durable host-wide settings for all configured future
-cohorts, not per-C7 overrides. Keep them when generating successor controls; fresh
+cohorts. Keep them when generating successor controls; fresh
 fully upgraded installations should select them as described in
 [automatic order configuration](rounds.md). Default omission supports the
 reader-first rollout and preserves old configuration bytes.

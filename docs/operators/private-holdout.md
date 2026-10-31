@@ -62,8 +62,8 @@ Provide the dataset privately to the evaluation operators, with:
   the public repository.
 - Recorded training exposure and any documented exclusion from training,
   fine-tuning or model selection. Public and unknown-exposure sources are
-  permitted for C7 and later; exclusion from a particular miner's training and
-  independently private recordings are not prerequisites. A new random split
+  permitted from cohort sequence 7; exclusion from a particular miner's training
+  and independently private recordings are not prerequisites. A new random split
   of previously trained-on data must not be described as unseen.
 - Recording and signer grouping where available, so overlapping clips from one
   recording are kept together and signer overlap can be reported. Keep exact
@@ -127,8 +127,9 @@ unknown metadata cannot fill a known-coverage requirement. The default requires
 two continuous corpora, two known signers in each task and two continuous topics.
 It prefers balanced datasets and less represented known signers/topics, and
 refuses unmet quotas instead of duplicating cases or relaxing exclusions.
-For new C7+ adoption candidates, set `maximum_cases_per_dataset: 2`. This is a
-global source limit across both tasks: every source contributes at most two
+For new adoption candidates at cohort sequence 7 or later, set
+`maximum_cases_per_dataset: 2`. This is a global source limit across both tasks:
+every source contributes at most two
 selected cases, including all of its splits and versions. A value of one is
 also supported. Use one stable corpus name in `dataset`; put train/dev/test,
 release and partition details in `dataset_version`. Case, Unicode-width and
@@ -140,12 +141,12 @@ quota capacity or unfilled task; add qualified sources instead of relaxing the c
 Set `maximum_continuous_dataset_share_bps` and
 `maximum_fingerspelling_dataset_share_bps` when a task has multiple independent
 sources. These are per-task upper bounds; selection refuses a pool that cannot
-meet them. An authenticated C7 or later suite adoption requires a continuous
-source cap of at most 50% and at least four continuous topics. Historical
+meet them. An authenticated suite adoption at sequence 7 or later requires a
+continuous source cap of at most 50% and at least four continuous topics. Historical
 selection inputs retain their original bytes and interpretation. Source balance
 does not prove that public clips were excluded from model training, so exposure
 claims must remain explicit in the private report.
-For C7 and later, adoption also requires at least two fingerspelling sources,
+From sequence 7, adoption also requires at least two fingerspelling sources,
 with no more than 75% of fingerspelling cases from one source. This requirement
 must be met together with the four fingerspelling categories; a missing source
 holds adoption until real labeled media is available.
@@ -158,8 +159,8 @@ unseen holdout because its evaluation selection is private. Optional
 actual evidence. A digest alone is only an evidence identity; establish the
 underlying exclusion before declaring `documented_training_excluded`.
 Historical candidate `/1` retains its original full training-exclusion rule for
-C7+ and its exact bytes for replay; do not relabel a retained candidate to change
-its meaning. Omitted global caps retain historical standalone selection behavior.
+sequence 7 onward and its exact bytes for replay; do not relabel a retained candidate
+to change its meaning. Omitted global caps retain historical standalone selection behavior.
 Existing signed cohort clocks and suites remain unchanged until a separately
 authenticated adoption.
 
@@ -220,13 +221,13 @@ Preparation, execution and settlement resolve the suite from that authenticated
 history. Run the incumbent quality-floor model and all submitted models on the
 same adopted suite; an old numeric score from another corpus is not a comparable
 cutoff. Once intake closes, another suite amendment is refused. In-progress and
-completed evaluations, including C6, retain their original suite and results.
+completed evaluations retain their original suite and results.
 
 Configure `evaluation_suite_adoption_candidates` on the owner and every selected
 reviewer with schema `umi-evaluation-suite-adoption-candidate/2`, the default for
 new candidate configuration. This version enforces the global one-or-two-case
-source cap for C7+ while retaining independent reference/media QA, known signers,
-topics, task shares and fingerspelling categories. Install its compatibility
+source cap from sequence 7 while retaining independent reference/media QA,
+known signers, topics, task shares and fingerspelling categories. Install its compatibility
 reader on all selected owners/reviewers before selecting the candidate. Each
 candidate names its exact suite, selection report, inventory,
 exclusions and selection-key files; private videos and reference-QA evidence;

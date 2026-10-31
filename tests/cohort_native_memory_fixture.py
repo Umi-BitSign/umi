@@ -166,8 +166,10 @@ class NativeAdmissionProbe:
         self.patch.setattr(admission.HostMemoryAdmission, "try_acquire", acquire)
         self.patch.setattr(admission.HostMemoryAdmission, "try_settlement", retained)
         self.patch.setattr(admission.HostMemoryLease, "close", release)
+        # Both the compatibility export and canonical-once signed response
+        # capture native evidence here under the same owner reservation.
         self._watch_sync(
-            export_module.RequestReviewExporter, "export", "request_export", "owner_export"
+            export_module.RequestReviewExporter, "_capture", "request_export", "owner_export"
         )
         self._watch_sync(request_module, "replay_request_export", "request_replay")
         self._watch_sync(reward_module, "review_reward_decision", "reward_review")

@@ -12,6 +12,7 @@ from umi.competition_reward_history_workers import HistoryVerificationProfile
 from umi.competition_reward_writer_prefix import restore_completed_prefix
 from umi.historical_header_recovery import HistoricalHeaderRecoveryProgress
 
+from .logging_helpers import progress_payloads
 from .test_competition_reward_history import chain as chain
 from .test_competition_reward_history import chain_config as chain_config
 from .test_competition_reward_history import control as control
@@ -68,7 +69,7 @@ async def retained(history_case, monkeypatch, *, per_block=False):
 
 @pytest.mark.parametrize("parallel", [False, True])
 async def test_progress_reuses_one_batch_but_rechecks_final_dependencies(
-    history_case, monkeypatch, parallel, caplog
+    history_case, monkeypatch, parallel, caplog, http_log_redaction
 ):
     h, expected, loads = await retained(history_case, monkeypatch, per_block=True)
     if parallel:
@@ -92,12 +93,11 @@ async def test_progress_reuses_one_batch_but_rechecks_final_dependencies(
         assert loads == list(range(h.old.height, h.end + 1))
         assert h.reader._next == h.old.height
         assert h.reader.progress.latest["stage"] == "owned_historical_ancestry"
-        emitted = [
-            row.args
-            for row in caplog.records
-            if row.name == "umi.competition_reward_history_progress"
-            and row.msg == "reward_history_progress %s"
-        ]
+        emitted = progress_payloads(
+            caplog.records,
+            logger="umi.competition_reward_history_progress",
+            event="reward_history_progress",
+        )
         # A fast bounded continuation must reach the log before the next pass
         # replaces the current stage with history_preparation.
         assert emitted[-1]["stage"] == "owned_historical_ancestry"

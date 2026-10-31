@@ -86,7 +86,7 @@ restore/repair error; this command cannot bypass those fences.
 This is an owner-local metadata change. Deploy through the admission supervisor's
 selected qualified host and preserve its existing queue directories. Existing
 miner/client messages, validator proofs, signed cohorts, automatic release
-selection and C6 reward evidence keep their formats; no miner or validator
+selection and retained reward evidence keep their formats; no miner or validator
 reinstallation is required for this local retention projection.
 
 ## Operator early reward release
@@ -2261,8 +2261,8 @@ all original signed work and already-earned credit through closure and replay.
 The recoverable cohort implementation separates model payout from reference-model
 promotion. Native geometric rewards use `umi-cohort-recovery-authority/4` with
 `baseline_or_better_geometric_bands_first_complete/1` and signed
-`model_reward_parameters`. C7 uses these quality-allocation parameters; C8 and
-later preserve them and add the version-4 CPU rule described below:
+`model_reward_parameters`. Cohort sequence 7 uses these quality-allocation
+parameters; sequence 8 and later preserve them and add the version-4 CPU rule below:
 
 ```json
 {
@@ -2283,8 +2283,8 @@ baseline gives a 59.40% cutoff. The candidate and baseline run on the same
 cohort's suite; their measured scores are unchanged. This grace affects reward
 eligibility only. A weaker model cannot replace the incumbent reference.
 
-C6 retains its finalized 0.75 multiplier at both levels and strict baseline
-eligibility. Use `cohort_reward_parameters(sequence)` for new authorities and
+Cohort sequence 6 retains its finalized 0.75 multiplier at both levels and strict
+baseline eligibility. Use `cohort_reward_parameters(sequence)` for new authorities and
 adoptions; historical schema constructor defaults remain unchanged. Width
 can be any integer from 1 through 10000 basis points. Each decay multiplier can
 independently range from 0 through 10000: zero gives all weight at that level to
@@ -2303,13 +2303,13 @@ first completed certified acceptance. Exclusion affects public-model rewards
 only; independent service-work earnings remain unchanged. Normalize the full
 public pool over the remaining models and occupied bands. Version1 and version2
 parameters retain their original behavior and bytes. Version2 adds the score
-duplicate rule; version3 adds the signed baseline grace for C7 and later.
+duplicate rule; version3 adds the signed baseline grace from cohort sequence 7.
 
 ### Prospective CPU-efficiency rewards
 
 `cohort_reward_parameters(sequence)` selects
 `umi-geometric-reward-parameters/4` with
-`cpu_efficiency_rule: cold_cpu_relative_latency/1` from C8 onward. Quality
+`cpu_efficiency_rule: cold_cpu_relative_latency/1` from cohort sequence 8. Quality
 eligibility, first-content acceptance, one-basis-point score deduplication and
 quality ranks are calculated first. For each evaluator and case, form the
 candidate/reference cold execution-time ratio, with a one-millisecond denominator
@@ -2331,7 +2331,7 @@ reservation. Its conservative schema envelope is 65,011,584 bytes: up to 512
 models, 64 bounded timing summaries per model, unchanged 4,096-digit exact quality
 components, individual or batch acceptance proofs and 65,535 recipients. Timing
 ratio components are limited to 20 digits; each original quality component stays
-exact. The old independent 1 MiB readers cannot carry supported larger C8
+exact. The old independent 1 MiB readers cannot carry supported larger timed
 allocations. Upgrade all consumers together. Portable reward packages retain their
 separately selected aggregate byte and memory budgets; this file ceiling does not
 raise those budgets or authorize a package that exceeds them.
@@ -2347,13 +2347,14 @@ Operator request-start `/2` binds its digest; an older start approval cannot
 silently approve a changed timing rule. Normal holds and operator start authority
 remain effective.
 
-New C8+ model preparation refuses to create an untimed round with
+New model preparation at sequence 8 or later refuses to create an untimed round with
 `cpu_efficiency_measurement_policy_missing`, before participant restoration or
 promotion reads. The same requirement applies to a new preparation observation
 and operator start. Retained historical rounds still decode and replay exactly;
 an untimed retained round cannot be backfilled or newly certified under the
 prospective rule. Already active request execution and historical replay remain
-on their original path. C7 and endpoint-only rounds gain no timing prerequisite.
+on their original path. Earlier sequences and endpoint-only rounds gain no
+timing prerequisite.
 
 Use the existing resumable adoption operator and its standing series timer.
 Select a private `cpu_efficiency_adoptions_directory` on the admission host,
@@ -2367,7 +2368,7 @@ canonical bytes.
 
 The root-owned `umi-model-batch-adoption-series/1` control selects
 `cpu_efficiency_operator_request_reference`, naming the retained standing
-operator decision for this fixed C8+ rule. The existing configuration/history
+operator decision for this fixed prospective rule. The existing configuration/history
 producer carries that decision as `cpu_efficiency_standing_request` with its
 exact path and SHA256. Before the first CPU job it also supplies a bounded
 current intake snapshot as `cpu_efficiency_anchor_history_file`; an already
@@ -2376,7 +2377,7 @@ same authority. Retained jobs reuse their original snapshot without another
 owner request. Its normal `run-series` pass prepares one CPU contract
 per recovery authority, not one per model or cohort, and uses the owner's actual
 original or separately authorized CPU runtime. Future authority generations
-receive the same default automatically; C7 is excluded. This CPU runtime
+receive the same default automatically from sequence 8. This CPU runtime
 identity is unrelated to the chain's routinely changing runtime/spec version.
 
 Reviewers receive the bounded authenticated
@@ -2402,7 +2403,7 @@ selected `owner`, and every configured `reviewers` target. Each target binds
 role, service unit/account and actual selected config path/hash. This reuses
 the normal actor publication and quorum workflow; the command opens no wallet.
 
-First new C8+ preparation and operator start read the same signed
+First new timed preparation and operator start read the same signed
 `<cpu_efficiency_adoptions_directory>/<authority>.json`. The contract is
 retained in the resulting round. Existing rounds never reread this selection or
 change their bytes, and installing the standing timer does not authorize intake
@@ -2492,7 +2493,7 @@ RAM working set. Residual pages, changed identities, failed ownership or failed
 cleanup require explicit repair. Reuse, cancellation and slot eviction retain
 ownership until bounded work drains. Existing preparation telemetry exposes
 counted cache work and scoped ETAs without adding a release stage. Drain legacy
-C7/untracked readers before the first timed C8 invocation. Cache evidence binds
+untracked readers before the first timed invocation. Cache evidence binds
 the exact model and invocation, and journal ingestion binds that invocation to
 the retained execution attempt.
 
@@ -2520,8 +2521,8 @@ support is not proof of installed selection, accepted signing or live rewards.
 The signed Python runtime includes `umi.host_cpu_partition` for root startup
 restoration and `umi.host_cpu_probe` for the existing reviewer to invoke with its
 installed interpreter and `-I -B`. Render the templates in `deploy/cpu-timing/`
-only after C7 releases the affected pool and a qualified plan exists. Preserve
-reviewer service accounts, startup commands, rootless namespace restoration,
+only after untimed work releases the affected pool and a qualified plan exists.
+Preserve reviewer service accounts, startup commands, rootless namespace restoration,
 wallets, journals, storage and the original memory-admission files.
 
 The dedicated `umiexecution.slice` holds the existing reviewer services on
@@ -2551,8 +2552,8 @@ Controller ceilings remain root-owned; restoration reads back exclusive
 partition activation. Its completion explicitly records `qualified=false` and
 `contract_selected=false`.
 
-After C7 drains, qualify actual delegation, rootless migration, cgroupfs layout,
-probe overhead and cleanup, memory reserves, bundle-cache eviction and equivalent
+After untimed work drains, qualify actual delegation, rootless migration,
+cgroupfs layout, probe overhead and cleanup, memory reserves, bundle-cache eviction and equivalent
 behavior under the intended concurrent lane/load configuration. Persist those
 results and publish selected profiles through the supported update/adoption
 path. These source changes and restoration completion do not authorize challenge
@@ -2577,10 +2578,10 @@ revision lineage, pending transactions and the finalized activation lock must
 be qualified across coordinator, reviewer, coverage and writer before cutover.
 Public status must identify the selected authority, cohort and adoption.
 
-The standing offer path holds C6 and later cohorts until they select the announced
-parameters for their sequence: the finalized version2 C6 settings, or the
-version3 C7 settings or version4 C8+ settings above. A matching native signed authority or
-a matching separately signed reward adoption satisfies this guard. The guard
+The standing offer path holds sequence 6 and later cohorts until they select the
+announced parameters for their sequence: finalized version2 settings for sequence 6,
+version3 for sequence 7, and version4 from sequence 8. A matching native signed
+authority or a matching separately signed reward adoption satisfies this guard. The guard
 logs `reward_offer_waiting_for_announced_economics` once per cohort per process
 while an adoption is absent or has different parameters; it never constructs
 an original-rule activation for that cohort. Prepare and sign an adoption only
@@ -2592,8 +2593,8 @@ signed cohort history or scoring results.
 `prepare_initial_reward_adoption` and `prepare_initial_early_release_adoption`
 select the announced sequence-specific parameters when none are supplied.
 Explicit historical parameters remain readable, while the offer guard refuses
-a new C7+ activation using C6's decay or omitting its grace. These paths still
-require the original certified package, configured signatures and supported
+a new activation from sequence 7 using the older 0.75 decay or omitting its grace.
+These paths still require the original certified package, configured signatures and supported
 consumer handoff before activation.
 
 Select the complete signed adoption lineage in `reward_adoptions` on the
@@ -3087,8 +3088,8 @@ eligible selected cohorts. It skips histories whose intake phase has closed.
 The earliest effective block comes from that signed history, and each reviewer
 independently checks current authority before signing.
 
-Use this series path for the initial configured C7–C10 jobs as well as later
-successors; no new manual authorization is needed for every cohort. Each job
+Use this series path for every configured successor job; no new manual
+authorization is needed for every cohort. Each job
 retains its exact original history and operator plan under
 `<state_directory>/<cohort>/`. Completed jobs reuse their votes and completion
 evidence; a missing selected service file is an explicitly counted restoration
@@ -3170,7 +3171,7 @@ open. Earlier host schemas retain their original behavior for recovery replay.
 
 ### Research-model training permissions and terms selection
 
-Apply the [conditional C7+ training-data rulings](../contributors/models.md#training-data-and-research-model-licensing)
+Apply the [conditional training-data rulings](../contributors/models.md#training-data-and-research-model-licensing)
 per model. Permitted NC-trained models and inherited NC checkpoints use
 `CC-BY-NC-SA-4.0` with fresh consent to the
 [NC supplement](../MODEL_CONTRIBUTION_TERMS_NC_V1.md). Permissive-only models keep
@@ -4521,7 +4522,8 @@ R2 credential file. The configuration protects that one credential once; it does
 not require a duplicate secret file. Metadata, verification, signing and other
 mutable stores must still be disjoint.
 
-For an originally mixed C7+ intake that is becoming public-model-only, select
+For an originally mixed intake at sequence 7 or later that is becoming
+public-model-only, select
 `model_only: true` in the candidate on the owner and every independent reviewer.
 This issues `umi-cohort-model-delivery-adoption/2`, explicitly binding
 `eligible_tracks: ["model"]` and `service_pool_bps: 0`. Omitting that flag keeps
@@ -5544,7 +5546,7 @@ matching exported certified histories), separate `output_directory` and
 capacity; the metadata read has its own explicit bound. All four directories must
 be private, owned and disjoint. The publisher has no network or signing need.
 
-For C7 and later, set optional `reward_coordinator_config` to the selected
+From cohort sequence 7, set optional `reward_coordinator_config` to the selected
 root-owned, mode-0444 reward coordinator boot. The publisher authenticates that
 boot's signed adoption lineage and consumes only its compact digest-addressed
 effective allocations. It retains a separate adopted-score completion and uses
@@ -5552,10 +5554,10 @@ the original native completion as its source, so changing reward terms never
 replays model work or rewrites original certification. The public `/3` result
 names the original allocation, selected adoption and effective allocation, with
 the measured baseline and exact eligibility threshold. This is certified reward
-metadata, not confirmation that weights are live. C6's existing correction
+metadata, not confirmation that weights are live. Sequence 6's existing correction
 overlay and retained original bytes remain unchanged.
-With this selection enabled, a C7+ original-rule result stays unpublished until
-its announced signed adoption is available; a native allocation already carrying
+With this selection enabled, an original-rule result from sequence 7 onward stays
+unpublished until its announced signed adoption is available; a native allocation already carrying
 the announced parameters needs no second adoption. Archived completed public
 results remain reusable when later standing series become current.
 
