@@ -367,6 +367,14 @@ publication stops new reward transitions. The publisher reads structured
 system-manager `ExecStart`, matches the actual process, service account and
 cgroup, and reads only its bounded, single-link, root-owned 0444 config.
 The default mirror retains those exact bytes.
+Independent reward readers parse only the complete series, policy, manifest,
+intake/execution authority and progression-hold contract from those authenticated
+bytes. They do not instantiate another service's private storage configuration
+or traverse its queues, databases and credentials. The startup owner and mirror
+publisher retain full configuration validation. Upgrade both coordinator and
+peer reward readers through their signed source path; do not grant a peer access
+to primary private directories to make hold parsing succeed. The hold view is
+read-only and cannot be used to start an admission or settlement service.
 It supports module entry points, installed console scripts and existing
 `runpy` wrappers with either literal `sys.argv` or trailing arguments. A config
 changed after the owner started requires the supported owner restart; a stale

@@ -1,5 +1,6 @@
 """Authoritative hold configs and retained operator approval never imply a row."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +13,10 @@ from umi.competition_cohort_lifecycle_host import LifecycleHostConfig
 from umi.competition_cohort_request_start import RequestStartConfig
 from umi.competition_cohort_review_http import CohortReviewPeerConfig
 from umi.competition_cohort_service_host import ServiceAdmissionHostConfig
-from umi.competition_cohort_settlement_config import SettlementOriginalSources
+from umi.competition_cohort_settlement_config import (
+    SettlementOriginalSources,
+    SettlementServiceConfig,
+)
 from umi.competition_service import CompetitionServiceConfig, RetainedIntakeState
 from umi.open_competition import digest, sign_object
 from umi.protocol import canonical_json_bytes
@@ -169,7 +173,7 @@ def test_holds_union_authoritative_sources_and_reuse_unchanged_full_loads(
             pytest.fail("unchanged authoritative hold config reloaded or rebound")
 
         unchanged.setattr(controls, "_admission", repeated)
-        unchanged.setattr(controls, "load_settlement_service_config", repeated)
+        unchanged.setattr(controls, "_settlement", repeated)
         unchanged.setattr(c.reader, "_series", repeated)
         assert c.reader.held(c.cohorts[1])
     c.save(Path(c.config.admission_config), canonical_json_bytes(c.admission))
@@ -206,6 +210,117 @@ def test_hold_damage_never_becomes_unheld(controls_case, damage):
             path, canonical_json_bytes(c.admission.model_copy(update={"recoverable_intake": bad}))
         )
     with pytest.raises((ValueError, OSError)):
+        c.reader.held(c.cohorts[1])
+
+
+@pytest.mark.parametrize("role", ["admission", "settlement"])
+def test_independent_hold_reader_never_traverses_owner_private_paths(
+    controls_case, monkeypatch, role
+):
+    c = controls_case
+    owner = c.admission if role == "admission" else c.settlement
+    value = json.loads(canonical_json_bytes(owner))
+
+    def private_paths(item):
+        if isinstance(item, str) and item.startswith("/"):
+            return "/other-private-owner" + item
+        if isinstance(item, list):
+            return [private_paths(child) for child in item]
+        if isinstance(item, dict):
+            return {key: private_paths(child) for key, child in item.items()}
+        return item
+
+    value = private_paths(value)
+    if role == "admission":
+        value["recoverable_service"]["lifecycle"]["automatic_progression_hold_cohorts"] = [
+            c.cohorts[1]
+        ]
+    else:
+        value["automatic_progression_hold_cohorts"] = [c.cohorts[1]]
+    raw = canonical_json_bytes(value)
+    path = Path(getattr(c.config, role + "_config"))
+    c.save(path, raw)
+    before = path.stat()
+    probes = []
+    for name in ("is_symlink", "resolve", "stat", "lstat"):
+        original = getattr(Path, name)
+
+        def probe(path, *args, method=original, **kwargs):
+            if str(path).startswith("/other-private-owner"):
+                probes.append(str(path))
+                raise PermissionError("another service owns this private path")
+            return method(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, name, probe)
+    full = CompetitionServiceConfig if role == "admission" else SettlementServiceConfig
+    with pytest.raises(PermissionError, match="another service"):
+        full.model_validate_json(raw)
+    assert probes  # Reproduce the old full-config loader failure first.
+    probes.clear()
+    assert c.reader.held(c.cohorts[1])
+    assert not c.reader.held(c.cohorts[2])
+    assert probes == []
+    assert path.stat() == before and path.read_bytes() == raw
+    with monkeypatch.context() as repeated:
+        repeated.setattr(controls, "_admission", lambda *a: pytest.fail("admission reloaded"))
+        repeated.setattr(controls, "_settlement", lambda *a: pytest.fail("settlement reloaded"))
+        assert c.reader.held(c.cohorts[1])
+
+
+@pytest.mark.parametrize("role", ["admission", "settlement"])
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "duplicate_hold",
+        "unknown_hold",
+        "chain_policy",
+        "manifest",
+        "series",
+        "role",
+        "duplicate_json",
+    ],
+)
+def test_read_only_hold_source_keeps_policy_authority_and_hold_validation(
+    controls_case, role, damage
+):
+    c = controls_case
+    value = json.loads(canonical_json_bytes(c.admission if role == "admission" else c.settlement))
+    selected = value["recoverable_service"] if role == "admission" else value
+    lifecycle = selected["lifecycle"] if role == "admission" else selected
+    if damage == "duplicate_hold":
+        lifecycle["automatic_progression_hold_cohorts"] = [c.cohorts[1], c.cohorts[1]]
+    elif damage == "unknown_hold":
+        lifecycle["automatic_progression_hold_cohorts"] = ["fe" * 32]
+    elif damage == "chain_policy":
+        value["chain"]["policy_sha256"] = "fe" * 32
+    elif damage == "manifest":
+        selected["manifest"]["policy_sha256"] = "fe" * 32
+    elif damage == "series":
+        selected["series"]["recovery"]["authority"]["policy_sha256"] = "fe" * 32
+    elif damage == "role":
+        value["mode" if role == "admission" else "role"] = "reviewer"
+    raw = canonical_json_bytes(value)
+    if damage == "duplicate_json":
+        raw = raw[:-1] + b',"chain":' + canonical_json_bytes(value["chain"]) + b"}"
+    c.save(Path(getattr(c.config, role + "_config")), raw)
+    with pytest.raises(ValueError):
+        c.reader.held(c.cohorts[1])
+
+
+@pytest.mark.parametrize("field", ["intake", "lifecycle_intake", "execution"])
+def test_read_only_hold_source_refuses_changed_bound_authority(controls_case, field):
+    c = controls_case
+    role = "settlement" if field == "execution" else "admission"
+    value = json.loads(canonical_json_bytes(c.settlement if role == "settlement" else c.admission))
+    if field == "intake":
+        bindings = value["recoverable_intake"]["cohorts"]
+    elif field == "lifecycle_intake":
+        bindings = value["recoverable_service"]["lifecycle"]["sources"]["intake"]["cohorts"]
+    else:
+        bindings = value["executions"][0]["cohorts"]
+    bindings[0]["authority_sha256"] = "fe" * 32
+    c.save(Path(getattr(c.config, role + "_config")), canonical_json_bytes(value))
+    with pytest.raises(ValueError):
         c.reader.held(c.cohorts[1])
 
 
