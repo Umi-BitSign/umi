@@ -215,7 +215,14 @@ class LifecycleHostConfig(StrictProtocolModel):
 
 class LifecycleHost:
     def __init__(
-        self, service: ServiceAdmissionHost, resources, client, credentials, sign, epoch_client=None
+        self,
+        service: ServiceAdmissionHost,
+        resources,
+        client,
+        credentials,
+        sign,
+        epoch_client=None,
+        sign_digest=None,
     ):
         self.service, self.resources, self.client = service, resources, client
         self.model_delivery_candidates = {}
@@ -246,6 +253,7 @@ class LifecycleHost:
         self.provider = getattr(service, "finality", service.provider)
         self.policy = service.intake.policy
         self.credentials, self.sign = credentials, sign
+        self.sign_digest = sign_digest
         self.root = Path(c.directory) / digest(service.config.series)
         self.forecast_ledger = None
         try:
@@ -587,6 +595,7 @@ class LifecycleHost:
             self.sign,
             maximum_bytes=self.maximum_bytes,
             timeout_seconds=self.timeout_seconds,
+            sign_digest=self.sign_digest,
         ).respond(request)
 
     async def node(self, cohort):

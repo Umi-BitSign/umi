@@ -649,11 +649,11 @@ async def test_request_review_releases_export_before_proofs_and_second_read(remo
     async def tracked_read(selected):
         nonlocal reads
         released()
-        exported, native = await read(selected)
+        exported, native, exported_sha256 = await read(selected)
         references.append(weakref.ref(exported))
         references.extend(weakref.ref(obj) for obj in exported.objects)
         reads += 1
-        return exported, native
+        return exported, native, exported_sha256
 
     async def checked_archive(observation):
         released()
@@ -676,15 +676,66 @@ async def test_request_review_rejects_changed_repeat_even_when_native_result_mat
 
     async def changed_repeat(selected):
         nonlocal reads
-        exported, native = await read(selected)
+        exported, native, _exported_sha256 = await read(selected)
         reads += 1
         if reads == 2:
             # Exercise the independent full-export comparison after both real
             # native replays; compact review equality alone is insufficient.
             exported = exported.model_copy(update={"transport_sha256": "ab" * 32})
-        return exported, native
+        return exported, native, digest(exported)
 
     monkeypatch.setattr(h.remote, "_read", changed_repeat)
     with pytest.raises(OSError, match="changed during independent review"):
         await h.remote_signer().attest(progress)
     assert reads == 2 and h.remote_calls == []
+
+
+@pytest.mark.parametrize("completion", ["pending", "complete"])
+async def test_owned_canonical_response_preserves_wire_and_avoids_full_export(remote, completion):
+    from umi.competition_cohort_request_export import RequestReviewRequest, RequestReviewResponse
+    from umi.open_competition import sign_competition_digest
+
+    h = remote
+    progress = h.sample() if completion == "pending" else h.window()
+    expected = h.exporter.export(progress)
+    request = RequestReviewRequest(
+        schema="umi-request-review-request/1", challenge="ab" * 32, progress=progress
+    )
+
+    async def prepared_sign(value_sha256):
+        return sign_competition_digest(value_sha256, wallet("Charlie"))
+
+    def forbidden(*args):
+        pytest.fail("prepared export rebuilt its typed object inventory")
+
+    h.exporter.sign_digest = prepared_sign
+    h.exporter.export = forbidden
+    raw = await h.exporter.respond(request)
+    actual = SignedRequestReviewResponse.model_validate_json(raw)
+    assert actual.response.evidence == expected
+    assert raw == canonical_json_bytes(
+        SignedRequestReviewResponse(
+            response=RequestReviewResponse(
+                schema="umi-request-review-response/1",
+                challenge=request.challenge,
+                evidence=expected,
+            ),
+            signature=actual.signature,
+        )
+    )
+    assert await h.remote.review(progress) == h.source.read(progress).record
+
+
+def test_canonical_export_legacy_reference_encoding_is_preserved():
+    import json
+
+    from umi.competition_cohort_object_codec import canonical_endpoint_export_bytes
+
+    # The native compatibility codec authenticates this historical ASCII form;
+    # an aggregate must still project the parsed value as exact RFC 8785 UTF-8.
+    value = {"schema": "umi-cohort-service-reference/1", "text": "é𐀀"}
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    assert raw != canonical_json_bytes(value)
+    assert canonical_endpoint_export_bytes(raw) == canonical_json_bytes(value)
+    ordinary = canonical_json_bytes({"value": "é𐀀"})
+    assert canonical_endpoint_export_bytes(ordinary) is ordinary

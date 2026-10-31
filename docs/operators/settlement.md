@@ -455,6 +455,20 @@ and current finality remain required. The observer's receipts cannot authorize
 the independent reviewer. Updaters retain these directories with the original
 signing state; existing startup configurations need no new field.
 
+The configured owner assembles request-review responses from those authenticated
+canonical originals, hashing the challenged response as it writes the wire bytes.
+It checks the selected owner's cryptographic signature against that same digest.
+The reviewer combines exact canonical-byte comparison with response/evidence
+hashing; later comparison reuses that locally computed evidence digest. This is
+an encoding optimization, with unchanged wire schemas, signing domains, native
+proofs and two-read challenge protocol. Mixed old/new owner and reviewer releases
+remain compatible. Keep their existing journals and verification roots during
+supported source upgrades; do not discard receipts to obtain the optimization.
+`request_export_canonical_objects` reports processed source bytes and objects,
+elapsed time, a measured ETA when available and a labeled transfer planning range
+before samples exist. Its ETA covers export assembly only; independent review and
+certification remain separate stages.
+
 
 The lifecycle's execution-rate sampler observes authenticated cached identities
 from its configured reviewer peers. Each reviewer application has a fresh epoch;
