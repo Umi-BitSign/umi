@@ -30,6 +30,7 @@ from .competition_cohort_request_phase import (
     RequestProgressReviewRecord,
     replay_request_completion,
 )
+from .competition_cohort_request_wire import prepare_request_response
 from .competition_cohort_review_export import MAX_EXPORT_BYTES, review_export_limits
 from .competition_cohort_reward_package import ReplayObjectCollector, RewardPackageObject
 from .competition_cohort_roster import RecoverableRosterEvidence
@@ -39,7 +40,14 @@ from .competition_cohort_service_work import SignedServiceWorkCatalog
 from .competition_work_progress import progress_items
 from .concurrency import run_owned_thread, wait_for_owned
 from .host_memory_request_bounds import check_stage_json, stage_count
-from .open_competition import CompetitionPolicy, Signature, digest, identity, verify_signature
+from .open_competition import (
+    CompetitionPolicy,
+    Signature,
+    digest,
+    identity,
+    verify_competition_digest,
+    verify_signature,
+)
 from .policy import ScoringPolicy, scoring_policy_hash
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -86,14 +94,16 @@ class RequestReviewExporter:
         *,
         maximum_bytes: int = MAX_EXPORT_BYTES,
         timeout_seconds: int = 2400,
+        sign_digest: Callable[[str], Awaitable[Signature]] | None = None,
     ):
         review_export_limits(maximum_bytes, timeout_seconds, aggregate_evidence=True)
         self.source, self.owner, self.sign = source, identity(owner), sign
         if self.owner not in {identity(e.hotkey) for e in source.intake.policy.evaluators}:
             raise ValueError("request export owner is outside the configured evaluator set")
         self.maximum_bytes, self.timeout_seconds = maximum_bytes, timeout_seconds
+        self.sign_digest = sign_digest
 
-    def export(self, progress: CohortPhaseProgress) -> RequestReviewExport:
+    def _capture(self, progress: CohortPhaseProgress):
         progress = CohortPhaseProgress.model_validate_json(canonical_json_bytes(progress))
         captured = ReplayObjectCollector(self.source.objects, self.maximum_bytes)
         original = self.source._read(progress, captured)
@@ -142,13 +152,19 @@ class RequestReviewExporter:
             services=tuple(services),
             seals=seals,
             records=tuple(records),
+            objects=(),
+        )
+        return result, captured
+
+    def export(self, progress: CohortPhaseProgress) -> RequestReviewExport:
+        metadata, captured = self._capture(progress)
+        result = RequestReviewExport(
+            **metadata.model_dump(mode="python", by_alias=True, exclude={"objects"}),
             objects=tuple(
                 RewardPackageObject(sha256=k, value=json.loads(raw))
                 for k, raw in sorted(captured.values.items())
             ),
         )
-        # The result owns the validated JSON inventory. Raw collector bytes are
-        # no longer needed during aggregate size checks, signing or delivery.
         del captured
         if canonical_json_size(result) > self.maximum_bytes:
             raise OSError("request export exceeds capacity; preserve and retry")
@@ -156,6 +172,22 @@ class RequestReviewExporter:
 
     async def respond(self, request: RequestReviewRequest) -> bytes:
         request = RequestReviewRequest.model_validate_json(canonical_json_bytes(request))
+        if self.sign_digest is not None:
+
+            def prepare():
+                metadata, captured = self._capture(request.progress)
+                return prepare_request_response(
+                    request.challenge, metadata, captured, self.maximum_bytes
+                )
+
+            prepared = await run_owned_thread(prepare)
+            signature = await wait_for_owned(
+                self.sign_digest(prepared.sha256), timeout=self.timeout_seconds
+            )
+            if identity(signature.hotkey) != self.owner:
+                raise ValueError("request export was signed by another owner")
+            verify_competition_digest(prepared.sha256, signature)
+            return prepared.finish(signature)
         evidence = await run_owned_thread(self.export, request.progress)
         response = RequestReviewResponse(
             schema="umi-request-review-response/1", challenge=request.challenge, evidence=evidence

@@ -72,7 +72,7 @@ from .host_memory_runtime import (
     selected_memory,
 )
 from .named_hotkey import load_named_hotkey
-from .open_competition import Hotkey, digest, identity, sign_object
+from .open_competition import Hotkey, digest, identity, sign_competition_digest, sign_object
 from .policy import scoring_policy_hash
 from .private_files import Directory, ensure_private_directory, lock_private_file
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -204,6 +204,9 @@ async def admission_owner_app(
         async def sign(body):
             return await run_owned_thread(sign_object, body, key)
 
+        async def sign_digest(value_sha256):
+            return await run_owned_thread(sign_competition_digest, value_sha256, key)
+
         client = await resources.enter_async_context(
             httpx.AsyncClient(
                 trust_env=False,
@@ -247,6 +250,7 @@ async def admission_owner_app(
                 credentials,
                 sign,
                 epoch_client,
+                sign_digest,
             )
         review_timeout_seconds = min(peer.timeout_seconds for peer in c.reviewers)
         phase_export_timeout_seconds = (

@@ -893,7 +893,7 @@ async def test_lifecycle_boot_owns_separate_epoch_client_until_shutdown(
     if legacy_constructor:
         constructor = boot.LifecycleHost
 
-        def older_boot(service, resources, client, credentials, sign, epoch_client):
+        def older_boot(service, resources, client, credentials, sign, epoch_client, sign_digest):
             # Exercise the supported five-argument constructor itself.
             return constructor(service, resources, client, credentials, sign)
 

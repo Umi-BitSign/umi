@@ -60,3 +60,19 @@ def validate_endpoint_object_bytes(raw: bytes, sha256: str) -> None:
     original = _materialized_reference_bytes(value)
     if original != raw or hashlib.sha256(original).hexdigest() != sha256:
         raise ValueError("endpoint archive object differs from its bounded identity")
+
+
+def canonical_endpoint_export_bytes(raw: bytes) -> bytes:
+    """Project an already authenticated original into a canonical JSON wrapper.
+
+    Native originals are RFC 8785 bytes. The sole historical exception accepted
+    by validate_endpoint_object_bytes is the materialized service reference,
+    whose ASCII escapes must become canonical UTF-8 in an aggregate wrapper.
+    The marker only selects that compatibility decoder; it is never authority.
+    Callers must already own the native verification/immutable-source identity.
+    """
+    if b'"schema":"umi-cohort-service-reference/1"' in raw:
+        value = json.loads(raw)
+        if isinstance(value, dict) and value.get("schema") == "umi-cohort-service-reference/1":
+            return canonical_json_bytes(value)
+    return raw

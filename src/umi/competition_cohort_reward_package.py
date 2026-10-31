@@ -263,6 +263,10 @@ class ReplayObjectCollector:
             self._sizes[key] = len(raw)
             self.used += len(raw)
 
+    def release_materialized(self, key: str) -> None:
+        """Release only ephemeral delivered bytes; preserve exact replay coverage."""
+        self._values.pop(key, None)
+
     def retain(self, value: StrictProtocolModel | JsonValue) -> str:
         if stage_bounds() is not None:
             size = canonical_json_size(value)

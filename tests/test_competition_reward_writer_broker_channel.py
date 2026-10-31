@@ -90,37 +90,85 @@ async def test_original_lock_ofd_remains_exclusive_after_sender_closes(channels,
     os.close(probe)
 
 
-async def test_drain_owns_native_descendant_that_created_a_separate_session(tmp_path):
+def test_drain_owns_native_descendant_that_created_a_separate_session():
     import subprocess
     import sys
+    from pathlib import Path
 
-    from umi.competition_reward_writer_broker import _drain_child, _own_child_tree
-
-    _own_child_tree()
-    left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-    child = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            "import os,subprocess,sys;"
-            "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(300)'],"
-            "start_new_session=True);"
-            "print(p.pid,flush=True);os._exit(7)",
-        ],
-        stdout=subprocess.PIPE,
-        start_new_session=True,
-    )
-    assert child.stdout is not None
-    descendant = int(await asyncio.to_thread(child.stdout.readline))
+    # The native broker owns every child in its fresh process. Running it in
+    # pytest would adopt/terminate unrelated proof workers and resource trackers.
+    # Its cooperative drain deliberately ignores asyncio cancellation, so bound
+    # the isolated process externally rather than using asyncio.wait_for.
+    code = r'''
+import asyncio, os, socket, subprocess, sys
+sys.path.insert(0, sys.argv[1])
+from umi.competition_reward_writer_broker import _drain_child, _own_child_tree
+_own_child_tree()
+lifetime = int(sys.argv[2])
+worker = r"""
+import os, subprocess, sys
+lifetime = int(sys.argv[1])
+p = subprocess.Popen(
+    [sys.executable, '-I', '-B', '-c',
+     'import os,sys;os.read(int(sys.argv[1]),1)', str(lifetime)],
+    pass_fds=(lifetime,), start_new_session=True,
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+print(p.pid, flush=True)
+os._exit(7)
+"""
+left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+child = subprocess.Popen(
+    [sys.executable, '-I', '-B', '-c', worker, str(lifetime)],
+    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    pass_fds=(lifetime,), start_new_session=True)
+try:
+    descendant = int(child.stdout.readline())
+    asyncio.run(_drain_child(child, left, cancel=False))
+    assert child.returncode == 7
     try:
-        await asyncio.wait_for(_drain_child(child, left, cancel=False), 10)
-        assert child.returncode == 7
-        with pytest.raises(ProcessLookupError):
-            os.kill(descendant, 0)
+        os.kill(descendant, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError('native descendant was not reaped')
+finally:
+    left.close()
+    right.close()
+    child.stdout.close()
+'''
+    # Only pytest holds the pipe writer: closing it also releases the detached
+    # descendant on timeout/failure, without an orphaned five-minute sleeper.
+    lifetime, release = os.pipe()
+    unrelated = subprocess.Popen(
+        [sys.executable, "-I", "-B", "-c", "import sys;sys.stdin.buffer.read()"],
+        stdin=subprocess.PIPE,
+    )
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                "-c",
+                code,
+                str(Path(__file__).parents[1] / "src"),
+                str(lifetime),
+            ],
+            pass_fds=(lifetime,),
+            capture_output=True,
+            timeout=15,
+        )
+        assert result.returncode == 0, (result.stdout + result.stderr).decode()
+        assert unrelated.poll() is None, "broker drain touched an unrelated pytest child"
     finally:
-        left.close()
-        right.close()
-        child.stdout.close()
+        os.close(release)
+        os.close(lifetime)
+        unrelated.stdin.close()
+        try:
+            unrelated.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            unrelated.kill()
+            unrelated.wait(timeout=5)
 
 
 def test_worker_permission_failure_logs_native_frames_without_private_paths():

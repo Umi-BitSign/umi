@@ -2,12 +2,12 @@
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import pytest
 
 from umi import competition_verification_reuse as reuse_module
 from umi.competition_verification_reuse import VerificationReuse, verified_replay
-from umi.private_files import PrivateStateBusyError
 from umi.protocol import StrictProtocolModel
 
 from .test_open_competition import policy as policy
@@ -66,22 +66,28 @@ def test_missing_completed_receipt_is_explicit_repair(tmp_path, policy, caplog):
     assert any(e.get("state") == "repair_required" for e in events)
 
 
-def test_other_worker_cannot_repeat_in_progress_native_work(tmp_path):
+def test_other_thread_waits_for_in_progress_native_work_before_entering(tmp_path):
     first = VerificationReuse(tmp_path / "owner", owner="one")
     second = VerificationReuse(tmp_path / "owner", owner="one")
+    attempted, entered, releasing = Event(), Event(), Event()
 
     def other():
+        attempted.set()
         with second.exclusive():
-            pytest.fail("another worker borrowed an in-progress native scope")
+            assert releasing.is_set(), "another thread borrowed in-progress native work"
+            entered.set()
 
-    with (
-        first.exclusive(),
-        ThreadPoolExecutor(max_workers=1) as pool,
-        pytest.raises(PrivateStateBusyError),
-    ):
-        pool.submit(other).result()
-    with second.exclusive():
-        pass
+    # Same-process owners deliberately serialize. Joining the worker while the
+    # parent owns that mutex would deadlock before the process-level lock check.
+    # Keep the executor outside the scope so even an assertion releases it first.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with first.exclusive():
+            pending = pool.submit(other)
+            assert attempted.wait(5)
+            assert not pending.done() and not entered.is_set()
+            releasing.set()
+        pending.result(timeout=5)
+    assert entered.is_set()
 
 
 def test_failed_shared_metadata_migration_retries_without_recomputing_native_work(
