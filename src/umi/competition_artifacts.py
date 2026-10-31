@@ -12,6 +12,7 @@ import os
 import secrets
 import shutil
 import stat
+from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
@@ -90,7 +91,14 @@ def _check_tree(root_fd: int, bundle: ModelBundle) -> None:
         raise ValueError("bundle is missing a declared artifact")
 
 
-def _copy_verified(stream: BinaryIO, record: BundleFile, target: BinaryIO | None) -> None:
+def _copy_verified(
+    stream: BinaryIO,
+    record: BundleFile,
+    target: BinaryIO | None,
+    *,
+    check_write: Callable[[int], None] | None = None,
+    on_bytes_written: Callable[[int], None] | None = None,
+) -> None:
     before = os.fstat(stream.fileno())
     hasher = hashlib.sha256()
     total = 0
@@ -100,7 +108,12 @@ def _copy_verified(stream: BinaryIO, record: BundleFile, target: BinaryIO | None
             raise ValueError("artifact grew while being verified")
         hasher.update(chunk)
         if target is not None:
-            target.write(chunk)
+            if check_write is not None:
+                check_write(len(chunk))
+            if target.write(chunk) != len(chunk):
+                raise OSError("artifact preservation write was incomplete")
+            if on_bytes_written is not None:
+                on_bytes_written(len(chunk))
     after = os.fstat(stream.fileno())
     if (
         total != record.size_bytes
@@ -126,11 +139,16 @@ def preserve_bundle(
     source: Path,
     archive: Path,
     policy: CompetitionPolicy,
+    *,
+    check_write: Callable[[int], None] | None = None,
+    on_bytes_written: Callable[[int], None] | None = None,
 ) -> Path:
     """Copy and verify all model files, then atomically publish a content directory.
 
     A destination interrupted before rename is never a promotable archive.
     Retries reuse the preserved verification receipt instead of overwriting it.
+    Optional admission and progress ports run before and after bounded payload
+    writes. The caller owns metadata headroom; receipt reuse performs no writes.
     """
     validate_bundle_policy(bundle, policy)
     if not archive.is_absolute() or archive.is_symlink():
@@ -141,12 +159,19 @@ def preserve_bundle(
     key = digest(bundle)
     lease = lock_private_file(archive / (".preserve-" + key + ".lock"))
     try:
-        return _preserve_locked(bundle, source, archive, policy)
+        return _preserve_locked(
+            bundle,
+            source,
+            archive,
+            policy,
+            check_write=check_write,
+            on_bytes_written=on_bytes_written,
+        )
     finally:
         os.close(lease)
 
 
-def _preserve_locked(bundle, source, archive, policy):
+def _preserve_locked(bundle, source, archive, policy, *, check_write=None, on_bytes_written=None):
     key = digest(bundle)
     final = archive / key
     # This exact, per-manifest scratch directory is exclusively owned by the
@@ -170,7 +195,16 @@ def _preserve_locked(bundle, source, archive, policy):
                 target = model_root / record.path
                 target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 with _artifact(root_fd, record) as (stream, _), target.open("xb") as output:
-                    _copy_verified(stream, record, output)
+                    if check_write is None and on_bytes_written is None:
+                        _copy_verified(stream, record, output)
+                    else:
+                        _copy_verified(
+                            stream,
+                            record,
+                            output,
+                            check_write=check_write,
+                            on_bytes_written=on_bytes_written,
+                        )
                     output.flush()
                     os.fsync(output.fileno())
                 target.chmod(0o400)
