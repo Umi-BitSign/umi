@@ -230,6 +230,9 @@ async def test_fresh_authority_and_changed_original_still_refuse_reuse(pipeline_
         fresh = reviewer(b, objects=source)
         item = fresh.closure.participants[0]
         path = source.snapshot.store.object_path(item.evaluators[0].terminal_sha256)
+        # Corrupt the immutable fixture deliberately, including when CI runs
+        # unprivileged; the production source-change fence must still refuse it.
+        path.chmod(0o600)
         path.write_bytes(b"{}")
         with pytest.raises(VerificationSourceChanged):
             fresh.outcome(item.submission_sha256)
