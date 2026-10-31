@@ -794,6 +794,15 @@ or evidence replay. Dependency coverage and resource budgets are still counted
 when a verdict is reused. Payloads are read when a new consumer actually needs them.
 A completed participant's verdict survives interruption before full closure.
 
+Settlement dependency replay batches archive selection and conflict metadata in
+one short read snapshot. It releases the SQLite transaction before checking
+external immutable objects, and retains the read-only connection solely for its
+`data_version` change fence. An unchanged journal needs no second selection scan;
+a concurrent commit triggers a bounded fresh check of exactly those keys. A new
+conflict, changed archive precedence or replaced journal refuses reuse. Immutable
+object identities, dependency coverage and current authority remain checked, so
+this reduces repeated journal bookkeeping without skipping dependency validation.
+
 Recurring evaluator partial exports retain small source facts in
 `<request-export-directory>/.model-partial-export`. For an unfinished public-model
 job, these bind the actual journal file, assignment, policy/verifier semantics,

@@ -15,7 +15,7 @@ import logging
 import os
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
@@ -340,9 +340,18 @@ def verified_replay(stage, result_model):
             with reuse.exclusive():
                 receipt = reuse.load(key)
                 if receipt is not None:
-                    with WorkProgress(
-                        "verification_dependencies", len(receipt.dependencies), unit="objects"
-                    ) as progress:
+                    with (
+                        WorkProgress(
+                            "verification_dependencies", len(receipt.dependencies), unit="objects"
+                        ) as progress,
+                        ExitStack() as batches,
+                    ):
+                        for kind in ("objects", "source"):
+                            batch = getattr(sources.get(kind), "verification_batch", None)
+                            if batch is not None:
+                                keys = tuple(d.key for d in receipt.dependencies if d.kind == kind)
+                                if keys:
+                                    batches.enter_context(batch(keys))
                         valid = True
                         for dependency in receipt.dependencies:
                             check_work_cancelled()
@@ -468,6 +477,7 @@ def verified_replay(stage, result_model):
                             "verification_identity",
                             "verification_sha256",
                             "verification_size",
+                            "verification_batch",
                         ):
                             if hasattr(source, method):
                                 setattr(read, method, getattr(source, method))

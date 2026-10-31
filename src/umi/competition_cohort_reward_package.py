@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -158,6 +159,13 @@ class ReplayObjectCollector:
         self._retained: set[str] = set()
         self.values = _ReplayObjects(self)
         self.used = 0
+
+    def verification_batch(self, keys):
+        # Objects retained directly by this collector have their own bytes and
+        # precedence; they must not borrow or depend on an upstream selection.
+        selected = tuple(key for key in keys if key not in self._retained)
+        batch = getattr(self.source, "verification_batch", None)
+        return nullcontext() if batch is None or not selected else batch(selected)
 
     def __call__(self, key: str) -> bytes:
         if key not in self._values:
