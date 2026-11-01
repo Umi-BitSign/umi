@@ -14,7 +14,7 @@ import stat
 import sys
 import time
 from collections import OrderedDict
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from pathlib import Path
 from threading import Lock
 from typing import Annotated, Literal
@@ -300,6 +300,7 @@ class RewardProofArchive:
             self._ensure_root()
         self._published = OrderedDict()
         self._publication_lock = Lock()
+        self._frame_publication_lock = Lock()
         self._read_objects = OrderedDict()
         self._read_bytes = 0
         self._read_lock = Lock()
@@ -412,6 +413,17 @@ class RewardProofArchive:
                 _Bytes(hex=raw.hex()),
                 maximum_bytes=MAX_PROOF_OBJECT_BYTES,
             )
+
+    def _publish_local_frame(self, path, frame):
+        # Parallel exports share the directory's nonblocking publication lease.
+        # Serialize only their final frame barrier within this owner; object
+        # preparation remains concurrent and another owner's lease still refuses.
+        # A forked child cannot acquire a lock inherited from another thread.
+        lock = self._frame_publication_lock if os.getpid() == self._pid else nullcontext()
+        with lock:
+            if self.physical_budget is not None:
+                self.physical_budget.check(self.root, MAX_FRAME_BYTES)
+            publish_private_model(path, frame, maximum_bytes=MAX_FRAME_BYTES)
 
     def _published_object_present(self, sha: str, size: int) -> bool:
         """Reuse only this process's completed, clock-qualified publication.
@@ -641,9 +653,7 @@ class RewardProofArchive:
             if directory is not None and not directory.unchanged():
                 raise ValueError("reward archive object directory changed during publication")
             if self.remote is None:
-                if self.physical_budget is not None:
-                    self.physical_budget.check(self.root, MAX_FRAME_BYTES)
-                publish_private_model(path, frame, maximum_bytes=MAX_FRAME_BYTES)
+                self._publish_local_frame(path, frame)
             else:
                 raw = canonical_json_bytes(frame)
                 checked_size(len(raw), MAX_FRAME_BYTES)
@@ -757,9 +767,7 @@ class RewardProofArchive:
                 if publication is not None:
                     publication.flush()
             if self.remote is None:
-                if self.physical_budget is not None:
-                    self.physical_budget.check(self.root, MAX_FRAME_BYTES)
-                publish_private_model(path, frame, maximum_bytes=MAX_FRAME_BYTES)
+                self._publish_local_frame(path, frame)
             else:
                 raw = canonical_json_bytes(frame)
                 checked_size(len(raw), MAX_FRAME_BYTES)

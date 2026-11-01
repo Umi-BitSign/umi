@@ -437,6 +437,7 @@ class CohortExecutionWorker:
         batch_size=16,
         concurrency=4,
         defer_endpoint_until_terminal=False,
+        maintenance=None,
     ):
         if (
             inbox.policy != executor.journal.policy
@@ -461,6 +462,7 @@ class CohortExecutionWorker:
         self.inbox, self.executor, self.batch_size = inbox, executor, batch_size
         self.concurrency = concurrency
         self.defer_endpoint_until_terminal = defer_endpoint_until_terminal
+        self.maintenance = maintenance
         self.capacity = asyncio.Semaphore(concurrency)
         # All assignments share one private inbox lock. Parallel sandbox jobs
         # must not make their own local reads compete for that nonblocking lock.
@@ -531,6 +533,7 @@ class CohortExecutionWorker:
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+            await self._maintain()
             pending = [r for r in results if r[1] == "pending"]
             deferred = [r for r in results if r[1] == "deferred"]
             return {
@@ -590,6 +593,11 @@ class CohortExecutionWorker:
             if task.done():
                 results.append(task.result())
                 del active[slot]
+        # Completed acknowledged assignments stay in the inbox for replay.
+        # Retire idle terminal caches before refilling, otherwise even an
+        # entirely completed inbox keeps `active` nonempty on every return.
+        if not active:
+            await self._maintain()
         if len(active) < self.concurrency:
             journal = self.executor.journal.journal
 
@@ -661,6 +669,21 @@ class CohortExecutionWorker:
         # Keep the process alive until owned sandbox writes and cleanup drain,
         # even if repeated shutdown signals arrive.
         await await_owned_task(asyncio.create_task(drained()))
+
+    async def _maintain(self):
+        if self.maintenance is not None:
+            try:
+                await self.maintenance()
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                sqlite3.Error,
+                asyncio.TimeoutError,
+            ) as error:
+                # Cleanup never suppresses execution or invents authority after
+                # an unavailable source. The existing owner retries its intent.
+                report_execution_retry(slot=None, error=error)
 
     async def run(
         self,

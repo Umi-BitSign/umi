@@ -15,6 +15,7 @@ from pydantic import Field, model_serializer, model_validator
 
 from .competition_artifacts import (
     _directory,
+    _file_identity,
     _preserved_verification_record,
     _remember_preserved_verification,
     verify_preserved_bundle,
@@ -44,6 +45,7 @@ from .competition_model_cache_space import (
 )
 from .competition_model_materialization import materialize_model_files, pending_materialization
 from .competition_remote_model_verification import (
+    RemoteModelBytes,
     model_byte_store,
     remember_model_bytes,
     remote_identity,
@@ -54,6 +56,7 @@ from .concurrency import run_owned_thread
 from .open_competition import CompetitionPolicy, Hotkey, digest, identity, validate_bundle_policy
 from .private_files import (
     Directory,
+    _read_bounded_private_bytes,
     ensure_private_directory,
     private_path,
     publish_private_model,
@@ -560,6 +563,74 @@ class DirectModelArtifactReviewer:
             payload_sha256=payload.payload_sha256,
             total_bytes=payload.total_bytes,
         )
+
+    def completed_cache_retirement(self, request, archive):
+        """Require retained restore completion; never repair or read model payloads.
+
+        The execution owner supplies terminal authority and consumer release.
+        These byte facts alone do not authorize retirement or model admission.
+        """
+        archive = Path(archive)
+        bundle, payload, key = self._source(request, preserved=True)
+        retained = read_private_model(archive / "materialization.json", DirectModelMaterialization)
+        if retained != self._materialization_record(request):
+            raise ValueError("cache retirement changed its materialization")
+        expected = _preserved_verification_record(bundle, archive)
+        local = archive / (".verified-" + digest(bundle) + ".json")
+        documents = tuple(f.path for f in bundle.files if f.role in {"license", "provenance"})
+        with TransferProgress("model_cache_retirement_verification", 1, unit="models") as progress:
+            saved = model_byte_store(
+                self.verification_root,
+                key,
+                bundle,
+                payload,
+                self._verification_context(request),
+                documents,
+                progress,
+            )
+            if self.verification_root is None:
+                raise ValueError("cache retirement requires durable remote completion")
+            # Reading these private records takes no writer lease and cannot
+            # create a missing marker or silently redo original byte work.
+            if _read_bounded_private_bytes(local, maximum_bytes=4 * 1024**2) != expected:
+                raise ValueError("cache retirement local identity requires repair")
+            path = saved.path("object")
+            marker, result_path = path.with_suffix(".complete"), saved.root / "result.json"
+            stamps = {str(p): _file_identity(p.lstat()) for p in (path, marker, result_path)}
+            record = saved._validated_record(
+                _read_bounded_private_bytes(path, maximum_bytes=64 * 1024)
+            )
+            source = record["identity"]
+            if (
+                not isinstance(source, dict)
+                or set(source) != {"endpoint", "bucket", "key_sha256", "etag", "size_bytes"}
+                or source["endpoint"] != self.multipart.signer.endpoint
+                or source["bucket"] != self.multipart.signer.bucket
+                or source["key_sha256"] != sha256_hex(key.encode())
+                or source["size_bytes"] != payload.total_bytes
+                or _read_bounded_private_bytes(marker, maximum_bytes=64) != path.stem.encode()
+                or record["context"] != saved.context
+            ):
+                raise ValueError("cache retirement remote completion requires repair")
+            raw = _read_bounded_private_bytes(result_path, maximum_bytes=64 * 1024**2)
+            result = RemoteModelBytes.model_validate_json(raw)
+            if (
+                canonical_json_bytes(result) != raw
+                or record["result"] != digest(result)
+                or result.payload_sha256 != payload.payload_sha256
+                or set(result.documents) != set(documents)
+                or any(
+                    _file_identity(Path(name).lstat()) != stamp for name, stamp in stamps.items()
+                )
+            ):
+                raise ValueError("cache retirement durable byte facts require repair")
+            progress.advance(1, restored=True)
+            return {
+                "request_sha256": digest(request),
+                "model_sha256": digest(bundle),
+                "payload_bytes": payload.total_bytes,
+                "remote_records": stamps,
+            }
 
     async def _materialized(self, request, archive):
         request = ModelReviewRequest.model_validate_json(canonical_json_bytes(request))

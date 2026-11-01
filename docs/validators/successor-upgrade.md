@@ -1601,6 +1601,26 @@ not cause a second payload hash pass solely to delete those bytes; a present but
 mismatched receipt still requires explicit repair. Signed manifests, requests,
 admissions, journals and remote objects remain retained.
 
+Benchmark evaluator owners also retire completed direct-model cache candidates
+incrementally from the existing execution worker's idle pass. A candidate needs
+its authenticated `complete` cohort history, completed local execution, intact
+remote byte-completion records and unchanged local materialization identities.
+The original `archive` and `standby` slots are included. Current and acknowledged
+frozen incumbents, unfinished transfers and live readers remain protected.
+An intent in the existing benchmark journal precedes eviction; restart finishes
+an interrupted removal without reading or hashing model payloads again. Unknown
+legacy sources retain their existing cleanup path and report a hold. Cohort
+history discovery uses the existing owner history port at most once per minute
+per pending cohort, then reuses retained terminal verification.
+
+Select this source through the supported immutable host/source maintenance path
+for each benchmark evaluator and execution overlay, preserving its cache root,
+benchmark journal and remote verification directory. Older two-slot layouts
+need no cache reset or signed-input migration. The upload-only miner, settlement
+reviewer, reward writer and public readers retain their existing formats; this
+cleanup introduces no new signed protocol or miner update requirement. Qualify
+the installed selection before claiming automatic reclamation is deployed.
+
 Schema versions 3 and 4 are the standing-series successors of versions 1 and 2.
 They include the immediate predecessor series, opportunity manifest and
 eligibility runtime selected by the signed boundary. Every coordinator and

@@ -3,12 +3,15 @@
 import hashlib
 import json
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import rfc8785
 
 from umi import competition_reward_proof_archive as archive_module
+from umi import private_files
+from umi.competition_evidence_codec import encode_evidence
 from umi.competition_reward_proof_archive import RewardProofArchive, history_archive_key
 from umi.protocol import canonical_json_bytes
 
@@ -161,6 +164,92 @@ def test_concurrent_exact_publications_share_one_completed_write(
     with ThreadPoolExecutor(max_workers=8) as executor:
         values = tuple(executor.map(archive._retain_bytes, [b"original"] * 16))
     assert len(set(values)) == len(calls) == 1
+
+
+def publish_frame(archive, key, method):
+    raw = b"original proof fields"
+    if method == "write":
+        archive.write("history", key, context={}, fields={"control": raw})
+    else:
+        encoded = encode_evidence(raw, kind="proof")
+        assert archive.copy_encoded_transport(
+            "history",
+            key,
+            context={},
+            fields={"control": ((encoded.sha256, len(raw), encoded.recipe),)},
+            resolve=lambda sha, size: encoded.objects[sha],
+        )
+
+
+@pytest.mark.parametrize("first_method", ["write", "copy"])
+@pytest.mark.parametrize("second_method", ["write", "copy"])
+def test_parallel_frame_publications_preserve_both_durable_results(
+    tmp_path, monkeypatch, first_method, second_method
+):
+    archive = RewardProofArchive(tmp_path / "export")
+    first_key, second_key = "aa" * 32, "bb" * 32
+    first_locked, second_attempted, release = (threading.Event() for _ in range(3))
+    publish = private_files._publish_locked
+
+    class ObservedLock:
+        def __init__(self):
+            self.lock = threading.Lock()
+
+        def __enter__(self):
+            if self.lock.locked():
+                second_attempted.set()
+            self.lock.acquire()
+
+        def __exit__(self, *_):
+            self.lock.release()
+
+    def hold_first_frame(path, *args, **kwargs):
+        if path.parent == archive.root / "history" and path.stem == first_key:
+            first_locked.set()
+            assert release.wait(5)
+        return publish(path, *args, **kwargs)
+
+    # Without owner serialization the second publication fails its real flock.
+    # Observe either that completion or its queued lock attempt without sleeping.
+    monkeypatch.setattr(archive, "_frame_publication_lock", ObservedLock(), raising=False)
+    monkeypatch.setattr(private_files, "_publish_locked", hold_first_frame)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(publish_frame, archive, first_key, first_method)
+        try:
+            assert first_locked.wait(5)
+            second = executor.submit(publish_frame, archive, second_key, second_method)
+            second.add_done_callback(lambda _: second_attempted.set())
+            assert second_attempted.wait(5)
+        finally:
+            release.set()
+        first.result(timeout=5)
+        second.result(timeout=5)
+    restarted = RewardProofArchive(archive.root)
+    for key in (first_key, second_key):
+        assert restarted.read("history", key, bounds={"control": 64}) == (
+            {},
+            {"control": b"original proof fields"},
+        )
+
+
+@pytest.mark.parametrize("method", ["write", "copy"])
+def test_frame_publication_refuses_another_owners_directory_lease(tmp_path, method):
+    archive = RewardProofArchive(tmp_path / "export")
+    publish_frame(archive, "aa" * 32, method)
+    lock = private_files.lock_private_file(archive.root / "history" / ".publish.lock")
+    try:
+        with pytest.raises(private_files.PrivateStateBusyError):
+            publish_frame(archive, "bb" * 32, method)
+    finally:
+        os.close(lock)
+
+
+@pytest.mark.parametrize("method", ["write", "copy"])
+def test_frame_publication_does_not_acquire_an_inherited_thread_lock(tmp_path, method):
+    archive = RewardProofArchive(tmp_path / "export")
+    archive._pid -= 1
+    with archive._publication_lock, archive._frame_publication_lock:
+        publish_frame(archive, "aa" * 32, method)
 
 
 def test_initial_tick_requires_later_verified_publication_before_reuse(tmp_path, monkeypatch):
