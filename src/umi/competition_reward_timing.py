@@ -18,6 +18,8 @@ from .protocol import Hex32, StrictProtocolModel
 
 THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000
 Timestamp = Annotated[int, Field(gt=0, le=2**53 - 1)]
+RewardActivationRule = Literal["at_finalized_control_commitment"]
+IMMEDIATE_ACTIVATION_RULE: RewardActivationRule = "at_finalized_control_commitment"
 
 
 class RewardActivationAge(StrictProtocolModel):
@@ -57,6 +59,19 @@ class RewardActivationAge(StrictProtocolModel):
         return self.observed_timestamp_ms - self.cohort_start_timestamp_ms > THREE_DAYS_MS
 
 
+def activation_delay_blocks(series, adoption=None):
+    """Selected START delay only; prior transaction reconciliation is unchanged."""
+    if adoption is not None:
+        if adoption.activation_rule == IMMEDIATE_ACTIVATION_RULE:
+            return 0
+        if adoption.activation_age is not None:
+            plan = next(p for p in series.cohorts if digest(p) == adoption.cohort_sha256)
+            adoption.activation_age.check_plan(plan)
+            if adoption.activation_age.skips_activation_delay:
+                return 0
+    return series.maximum_proof_lag_blocks + series.maximum_transaction_lifetime_blocks
+
+
 def activation_effective_block(series, decision, committed_at_block, reward_adoptions=None):
     """Deterministic START boundary for the exact signed activation.
 
@@ -80,13 +95,5 @@ def activation_effective_block(series, decision, committed_at_block, reward_adop
             or decision.observed_at_block > committed_at_block
         ):
             raise ValueError("activation timing changes its signed activation boundary")
-        if adopted.activation_age is not None:
-            plan = next(p for p in series.cohorts if digest(p) == activation.cohort_sha256)
-            adopted.activation_age.check_plan(plan)
-            if adopted.activation_age.skips_activation_delay:
-                return committed_at_block
-    return (
-        committed_at_block
-        + series.maximum_proof_lag_blocks
-        + series.maximum_transaction_lifetime_blocks
-    )
+        return committed_at_block + activation_delay_blocks(series, adopted)
+    return committed_at_block + activation_delay_blocks(series)

@@ -25,7 +25,7 @@ from .competition_geometric_rewards import (
     validate_cohort_reward_parameters,
 )
 from .competition_reward_bootstrap import BootstrapRewardPredecessor
-from .competition_reward_timing import RewardActivationAge
+from .competition_reward_timing import RewardActivationAge, RewardActivationRule
 from .competition_reward_transition_timing import RewardPredecessorLiveAge
 from .competition_verification_snapshot import VerifiedPackageSnapshot, verified_package_digest
 from .open_competition import CompetitionPolicy, Signature, digest
@@ -76,6 +76,7 @@ class RewardModelAdoption(StrictProtocolModel):
         "umi-standing-model-reward-adoption/4",
         "umi-standing-model-reward-adoption/5",
         "umi-standing-model-reward-adoption/6",
+        "umi-standing-model-reward-adoption/7",
     ] = Field(alias="schema")
     series_sha256: Hex32
     policy_sha256: Hex32
@@ -94,6 +95,7 @@ class RewardModelAdoption(StrictProtocolModel):
     original_signed_inputs_unchanged: Literal[True] = True
 
     activation_age: RewardActivationAge | None = None
+    activation_rule: RewardActivationRule | None = None
     bootstrap_predecessor: BootstrapRewardPredecessor | None = None
     score_correction_evidence: ModelScoreCorrectionEvidence | None = None
     signed_score_correction: SignedModelScoreCorrection | None = None
@@ -107,6 +109,8 @@ class RewardModelAdoption(StrictProtocolModel):
         value = handler(self)
         if self.activation_age is None:
             value.pop("activation_age", None)
+        if self.activation_rule is None:
+            value.pop("activation_rule", None)
         if self.bootstrap_predecessor is None:
             value.pop("bootstrap_predecessor", None)
         if self.score_correction_evidence is None:
@@ -124,8 +128,14 @@ class RewardModelAdoption(StrictProtocolModel):
         early = self.schema_ in {
             "umi-standing-model-reward-adoption/5",
             "umi-standing-model-reward-adoption/6",
+            "umi-standing-model-reward-adoption/7",
         }
-        automatic = self.schema_ == "umi-standing-model-reward-adoption/6"
+        immediate = self.schema_ == "umi-standing-model-reward-adoption/7"
+        automatic = self.schema_ == "umi-standing-model-reward-adoption/6" or (
+            immediate and isinstance(self.early_release, RewardAutomaticRelease)
+        )
+        if immediate != (self.activation_rule is not None):
+            raise ValueError("immediate activation requires an explicit versioned adoption")
         if bootstrap != (self.bootstrap_predecessor is not None):
             raise ValueError("bootstrap admission requires an explicit versioned adoption")
         if (self.score_correction_evidence is None) != (self.signed_score_correction is None):
@@ -223,6 +233,10 @@ class RewardAdoptionSelection(StrictProtocolModel):
                 or value.issued_at_block < prior.issued_at_block
                 or any(getattr(value, k) != getattr(prior, k) for k in immutable)
                 or (prior.early_release is not None and value.early_release != prior.early_release)
+                or (
+                    prior.activation_rule is not None
+                    and value.activation_rule != prior.activation_rule
+                )
             ):
                 raise ValueError("reward adoption revision changed its original evidence or parent")
             preceding[value.cohort_sha256] = value

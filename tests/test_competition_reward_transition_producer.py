@@ -23,6 +23,7 @@ from umi.competition_reward_coordinator import (
 )
 from umi.competition_reward_handoff_models import LegacyRewardHandoffPlan
 from umi.competition_reward_offers import StandingRewardOffers
+from umi.competition_reward_timing import IMMEDIATE_ACTIVATION_RULE, activation_effective_block
 from umi.competition_reward_transition_anchor import RewardLiveAnchorMissing
 from umi.competition_reward_transition_signing import RewardAdoptionJournal, RewardAdoptionSigner
 from umi.competition_reward_transition_timing import REWARD_TRANSITION_WAIT_MS
@@ -104,6 +105,7 @@ async def producer_case(live_case, tmp_path, monkeypatch):
     )
     state = SimpleNamespace(
         approved=True,
+        approval_rule=IMMEDIATE_ACTIVATION_RULE,
         held=False,
         package_available=True,
         peer_ready=True,
@@ -163,7 +165,11 @@ async def producer_case(live_case, tmp_path, monkeypatch):
             body.package_sha256,
         )
         if state.approved:
-            return SimpleNamespace(approval=SimpleNamespace(reason="Operator releases now"))
+            return SimpleNamespace(
+                approval=SimpleNamespace(
+                    reason="Operator releases now", activation_rule=state.approval_rule
+                )
+            )
         return None
 
     controls = SimpleNamespace(held=held, approval=approval)
@@ -325,6 +331,8 @@ async def test_operator_release_signs_under_24_hours_without_coverage_work(produ
     assert c.anchor_lookups == c.replays == []
     selected = c.feed.selected.latest(c.cohort)
     assert selected.adoption.early_release.schema_ == "umi-reward-early-release/1"
+    assert selected.adoption.schema_ == "umi-standing-model-reward-adoption/7"
+    assert selected.adoption.activation_rule == IMMEDIATE_ACTIVATION_RULE
     assert len(selected.signatures) == 2
     assert c.offers(c.cohort, c.prefix).reward_adoption_sha256 == digest(selected.adoption)
 
@@ -355,6 +363,7 @@ async def test_automatic_release_waits_exactly_24_hours_from_owned_live_anchor(p
     release = c.feed.selected.latest(c.cohort).adoption.early_release
     assert release.schema_ == "umi-reward-early-release/2"
     assert release.live_age.ready
+    assert c.feed.selected.latest(c.cohort).adoption.activation_rule == IMMEDIATE_ACTIVATION_RULE
     assert (
         release.live_age.observed_timestamp_ms - release.live_age.live_timestamp_ms
         == REWARD_TRANSITION_WAIT_MS
@@ -658,8 +667,10 @@ async def test_hold_after_quorum_prevents_publication(producer_case, monkeypatch
     assert c.feed.selected.latest(c.cohort).adoption.early_release is None
 
 
-async def test_coordinator_reuses_producer_current_observation(producer_case):
+@pytest.mark.parametrize("approved", [False, True])
+async def test_coordinator_reuses_producer_current_observation(producer_case, approved):
     c = producer_case
+    c.approved = approved
     # Existing-prefix publication/readback is a separate boundary here. Stop
     # at the coordinator's native decision-review entry, before decision signing.
     coordinator = object.__new__(StandingRewardCoordinator)
@@ -703,3 +714,49 @@ async def test_coordinator_reuses_producer_current_observation(producer_case):
     assert decisions[0].activation.reward_adoption_sha256 == digest(
         c.feed.selected.latest(c.cohort).adoption
     )
+    # Continue across the former test boundary into the real writer's shared
+    # selection calculation. No cohort age attestation or blanket START drain
+    # is required by a freshly signed immediate release.
+    adopted = c.feed.selected.latest(c.cohort).adoption
+    assert adopted.activation_age is None
+    committed = decisions[0].observed_at_block + 1
+    reader = c.producer.reviewer.reviewer.reader
+    selection = reader._selection_at(decisions[0], committed, committed)
+    assert selection.state == "selected" and selection.effective_at_block == committed
+    assert (
+        activation_effective_block(c.c.series, decisions[0], committed, c.feed.selected)
+        == committed
+    )
+
+
+async def test_retained_legacy_operator_original_keeps_timing_after_restart(producer_case):
+    c = producer_case
+    c.approval_rule = None
+    c.peer_ready = False
+    assert (await c.producer.step(c.cohort, c.prefix)).status == "adoption_quorum_pending"
+    original = c.producer._original
+    assert original.proposal.schema_ == "umi-standing-model-reward-adoption/5"
+    raw = canonical_json_bytes(original)
+    c.reopen()
+    c.advance()
+    c.peer_ready = True
+    assert (await c.producer.step(c.cohort, c.prefix)).status == "selected"
+    assert canonical_json_bytes(c.producer._original) == raw
+    assert len(c.signatures) == 1
+    selected = c.feed.selected.latest(c.cohort).adoption
+    assert selected.activation_rule is None and selected.activation_age is None
+
+
+async def test_retained_operator_original_rejects_changed_timing_before_signing(producer_case):
+    c = producer_case
+    c.approval_rule = None
+    c.peer_ready = False
+    assert (await c.producer.step(c.cohort, c.prefix)).status == "adoption_quorum_pending"
+    original = canonical_json_bytes(c.producer._original)
+    c.reopen()
+    c.advance()
+    c.approval_rule = IMMEDIATE_ACTIVATION_RULE
+    with pytest.raises(ValueError, match="retained activation rule"):
+        await c.producer.step(c.cohort, c.prefix)
+    assert canonical_json_bytes(c.producer._original) == original
+    assert len(c.signatures) == len(c.requests) == 1

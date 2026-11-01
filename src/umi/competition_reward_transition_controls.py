@@ -9,10 +9,11 @@ import threading
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, model_serializer, model_validator
 
 from . import competition_host_activation as root_controls
 from .competition_reward_hold_source import parse_reward_hold_source
+from .competition_reward_timing import RewardActivationRule
 from .open_competition import Signature, digest, identity, verify_signature
 from .private_files import Directory, lock_private_file
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -28,12 +29,30 @@ class RewardTransitionControls(StrictProtocolModel):
 
 
 class RewardTransitionApproval(StrictProtocolModel):
-    schema_: Literal["umi-reward-transition-approval/1"] = Field(alias="schema")
+    schema_: Literal["umi-reward-transition-approval/1", "umi-reward-transition-approval/2"] = (
+        Field(alias="schema")
+    )
     series_sha256: Hex32
     predecessor_decision_sha256: Hex32
     successor_cohort_sha256: Hex32
     successor_package_sha256: Hex32
     reason: Annotated[str, Field(min_length=1, max_length=1024)]
+    activation_rule: RewardActivationRule | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_approval(self, handler):
+        value = handler(self)
+        if self.activation_rule is None:
+            value.pop("activation_rule", None)
+        return value
+
+    @model_validator(mode="after")
+    def versioned_timing(self):
+        if (self.schema_ == "umi-reward-transition-approval/2") != (
+            self.activation_rule is not None
+        ):
+            raise ValueError("operator activation rule requires an explicit versioned approval")
+        return self
 
 
 class SignedRewardTransitionApproval(StrictProtocolModel):
@@ -72,6 +91,7 @@ def verify_transition_approval(signed, *, series, proposal=None):
             or body.successor_cohort_sha256 != proposal.cohort_sha256
             or body.successor_package_sha256 != proposal.package_sha256
             or body.reason != release.reason
+            or body.activation_rule != proposal.activation_rule
         ):
             raise ValueError("operator approval differs from its exact proposed release")
     return signed

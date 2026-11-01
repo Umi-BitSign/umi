@@ -20,7 +20,11 @@ from umi.competition_reward_boot import StandingRewardBootConfig
 from umi.competition_reward_coordinator_boot import RewardCoordinatorConfig
 from umi.competition_reward_decisions import RewardActivation, RewardControlDecision
 from umi.competition_reward_opportunity import prepare_early_release_revision
-from umi.competition_reward_timing import RewardActivationAge, activation_effective_block
+from umi.competition_reward_timing import (
+    IMMEDIATE_ACTIVATION_RULE,
+    RewardActivationAge,
+    activation_effective_block,
+)
 from umi.competition_reward_transition_timing import RewardPredecessorLiveAge
 from umi.open_competition import digest, identity
 from umi.protocol import canonical_json_bytes
@@ -91,7 +95,8 @@ def test_candidate_handoff_changes_only_reward_selection_and_repeats_exactly(han
 
 
 @pytest.mark.parametrize("automatic", [False, True])
-def test_early_release_revision_uses_same_consumer_handoff(handoff, automatic):
+@pytest.mark.parametrize("immediate", [False, True])
+def test_early_release_revision_uses_same_consumer_handoff(handoff, automatic, immediate):
     coordinator, writer, initial = handoff
     staged = prepare_reward_adoption_boot_candidates(coordinator, writer, initial)
     config = RewardCoordinatorConfig.model_validate_json(staged.coordinator)
@@ -119,6 +124,7 @@ def test_early_release_revision_uses_same_consumer_handoff(handoff, automatic):
         successor_cohort_sha256=initial.adoption.cohort_sha256,
         issued_at_block=initial.adoption.issued_at_block + 2,
         reason="Operator authorizes release of the certified successor package",
+        activation_rule=IMMEDIATE_ACTIVATION_RULE if immediate else None,
         live_age=None
         if not automatic
         else RewardPredecessorLiveAge(
@@ -286,7 +292,8 @@ def test_age_revision_preserves_early_release_and_changes_only_signed_timing(han
         )
 
 
-def test_initial_early_release_uses_one_signed_adoption(handoff):
+@pytest.mark.parametrize("immediate", [False, True])
+def test_initial_early_release_uses_one_signed_adoption(handoff, immediate):
     coordinator, writer, original = handoff
     config = RewardCoordinatorConfig.model_validate_json(coordinator)
     prior = RewardControlDecision(
@@ -317,8 +324,11 @@ def test_initial_early_release_uses_one_signed_adoption(handoff):
         canonical_json_bytes(
             original.adoption.model_copy(
                 update={
-                    "schema_": "umi-standing-model-reward-adoption/5",
+                    "schema_": "umi-standing-model-reward-adoption/7"
+                    if immediate
+                    else "umi-standing-model-reward-adoption/5",
                     "early_release": release,
+                    "activation_rule": IMMEDIATE_ACTIVATION_RULE if immediate else None,
                 }
             )
         )

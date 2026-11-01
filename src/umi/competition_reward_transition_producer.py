@@ -24,6 +24,7 @@ from .competition_reward_opportunity import (
     prepare_initial_early_release_adoption,
 )
 from .competition_reward_signing import RewardQuorumPending
+from .competition_reward_timing import IMMEDIATE_ACTIVATION_RULE
 from .competition_reward_transition_anchor import RewardLiveAnchorMissing
 from .competition_reward_transition_native import NativeRewardTransitionReviewer
 from .competition_reward_transition_review import predecessor_live_age_from_owned_control
@@ -198,6 +199,11 @@ class StandingRewardTransitionProducer:
                 issued_at_block=current.snapshot.block_number,
                 reason=reason,
                 live_age=age,
+                activation_rule=(
+                    IMMEDIATE_ACTIVATION_RULE
+                    if approval is None
+                    else approval.approval.activation_rule
+                ),
             )
             if latest is None:
                 proposal = await run_memory_thread(
@@ -234,6 +240,13 @@ class StandingRewardTransitionProducer:
                 raise ValueError("operator-approved transition lost its exact approval")
             if approval is not None and proposal.early_release.reason != approval.approval.reason:
                 raise ValueError("operator-approved transition changed its retained reason")
+            if (
+                approval is not None
+                and proposal.activation_rule != approval.approval.activation_rule
+            ):
+                raise ValueError(
+                    "operator-approved transition changed its retained activation rule"
+                )
             observation = None
         with WorkProgress(
             "reward_transition_producer",

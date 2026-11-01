@@ -17,6 +17,7 @@ from umi.competition_cohort_settlement_config import (
     SettlementOriginalSources,
     SettlementServiceConfig,
 )
+from umi.competition_reward_timing import IMMEDIATE_ACTIVATION_RULE
 from umi.competition_service import CompetitionServiceConfig, RetainedIntakeState
 from umi.open_competition import digest, sign_object
 from umi.protocol import canonical_json_bytes
@@ -366,6 +367,7 @@ def test_approval_rejects_wrong_signer_tampering_and_proposal_mismatch(controls_
         series_sha256=b.series_sha256,
         cohort_sha256=b.successor_cohort_sha256,
         package_sha256=b.successor_package_sha256,
+        activation_rule=None,
         early_release=SimpleNamespace(
             predecessor_decision_sha256=b.predecessor_decision_sha256, reason=b.reason
         ),
@@ -416,9 +418,18 @@ def test_operator_cli_reuses_retained_request_without_reopening_key(controls_cas
         reason=body.reason,
     )
     opened = []
-    monkeypatch.setattr(cli, "sign_operator_approval", lambda *a: (opened.append(a), signed(c))[1])
+
+    def sign(_config, request):
+        opened.append(request)
+        return controls.SignedRewardTransitionApproval(
+            approval=request, signature=sign_object(request, wallet("Ferdie"))
+        )
+
+    monkeypatch.setattr(cli, "sign_operator_approval", sign)
     first = cli.approve_successor(config, **args)
     assert first["chain_submission_authorized"] is False and len(opened) == 1
+    assert opened[0].schema_ == "umi-reward-transition-approval/2"
+    assert first["activation_rule"] == IMMEDIATE_ACTIVATION_RULE
     with monkeypatch.context() as repeated:
         repeated.setattr(
             cli,
@@ -438,3 +449,28 @@ def test_operator_cli_reuses_retained_request_without_reopening_key(controls_cas
         c.save(Path(c.config.settlement_config), canonical_json_bytes(held))
         with pytest.raises(ValueError, match="explicitly held"):
             cli.approve_successor(config, **args)
+
+
+def test_operator_cli_keeps_legacy_approval_bytes_and_timing(controls_case, monkeypatch):
+    from umi import competition_reward_transition_cli as cli
+
+    c = controls_case
+    original = signed(c)
+    path = controls.publish_reward_transition_approval(c.config, original, series=c.series)
+    raw = path.read_bytes()
+    config = SimpleNamespace(
+        role="coordinator", reward_transition=c.config, series=c.series, policy=c.policy
+    )
+    monkeypatch.setattr(
+        cli, "sign_operator_approval", lambda *args: pytest.fail("legacy approval was re-signed")
+    )
+    body = original.approval
+    result = cli.approve_successor(
+        config,
+        predecessor=body.predecessor_decision_sha256,
+        cohort=body.successor_cohort_sha256,
+        package=body.successor_package_sha256,
+        reason=body.reason,
+    )
+    assert result["activation_rule"] is None
+    assert path.read_bytes() == raw and b'"activation_rule"' not in raw

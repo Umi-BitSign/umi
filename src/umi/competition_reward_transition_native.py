@@ -171,6 +171,7 @@ class NativeRewardTransitionReviewer:
                 parameters=proposal.parameters,
                 reason=release.reason,
                 live_age=age,
+                activation_rule=proposal.activation_rule,
             )
         else:
             expected = prepare_early_release_revision(
@@ -181,6 +182,7 @@ class NativeRewardTransitionReviewer:
                 successor_cohort_sha256=proposal.cohort_sha256,
                 reason=release.reason,
                 live_age=age,
+                activation_rule=proposal.activation_rule,
             )
         if proposal != expected:
             raise ValueError("reward adoption differs from its native exact-package proposal")

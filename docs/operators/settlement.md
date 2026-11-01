@@ -92,21 +92,25 @@ reinstallation is required for this local retention projection.
 ## Operator early reward release
 
 The normal standing reward path waits for the predecessor's signed minimum
-validator opportunity. An operator can release a certified successor earlier
-by adding `umi-reward-early-release/1` to a quorum-signed model reward adoption
-`/5`. It names the exact effective predecessor decision and activation, signed
-manifest, successor cohort and certified package, plus a retained reason. This
-decision waives only the predecessor opportunity minimum; it does not claim
-coverage, change certified scores or grant transaction authority.
+validator opportunity. New operator-or-timeout releases use quorum-signed model
+reward adoption `/7`, with `activation_rule=at_finalized_control_commitment`.
+The operator trigger includes `umi-reward-early-release/1`, naming the exact
+effective predecessor decision and activation, signed manifest, successor cohort
+and certified package, plus a retained reason. Operator approval `/2` signs that
+same activation rule. The successor becomes selectable when its exact activation
+control commitment is finalized, without another fixed proof-lag/transaction-life
+START delay or a cohort-age requirement. Native prior-transaction reconciliation,
+nonce checks, signature quorum and finalized matching-row verification remain
+required; this adoption neither claims coverage nor grants transaction authority.
 
-The explicit automatic alternative is adoption `/6`, containing
-`umi-reward-early-release/2` with trigger `predecessor_live_for_24h`. Its signed
+The automatic trigger in adoption `/7` contains `umi-reward-early-release/2`
+with trigger `predecessor_live_for_24h`. Its signed
 evidence binds a matching predecessor weight row at the row's actual finalized
 write block and a later finalized timestamp at least 24 hours after it. This
 counts elapsed chain time, not accumulated validator coverage and not time since
 intake or certification. The native producer retains the earliest proved live
 anchor and reuses its checkpoint; later polls need only a current observation.
-An operator approval uses the immediate `/5` path. Explicit progression holds
+An operator approval uses the immediate release path. Explicit progression holds
 take precedence over either trigger, and the successor still needs its completed
 certification and authenticated adoption. A ready clock alone never starts scoring,
 closes intake or submits weights. Legacy manifests and interval certificates keep
@@ -136,10 +140,20 @@ at least as recent as issuance, and preserves all progression holds. The produce
 reuses that observation through signing and refreshes it again only if it expires
 before publication. Invalid or foreign observations remain errors.
 
-Deploy this behavior to both the coordinator and independent reward reviewers
-through their supported source handoff. Signed package/adoption formats, miner
-clients, verification receipt ABI and current-proof age limits remain compatible;
-source qualification alone does not establish installed selection.
+Deploy the compatible adoption `/7` and approval `/2` readers before enabling
+new production: coordinator, independent reward reviewers, standing writer,
+native reference publisher and public model-score adoption projection must all
+select the supported source. Carry the complete signed lineage through the
+existing adoption feed or static boot/supplemental handoff. Package delivery and
+reward/replay readers must parse it too. Preserve installed layouts, current and
+next-boot selections, state bindings and existing signatures. Verify the published
+release/host selection and actual consumer adoption; a source test is not rollout.
+
+Upload-only miner submissions and model-client wire formats do not change.
+Translation-reference followers keep their existing signed policy/channel format;
+verify the resulting policy publication and observed row adoption separately.
+Package/model verification receipts, current-proof age limits and real transaction
+reconciliation remain compatible. Do not repeat completed model or history work.
 
 To request immediate release of an exact completed
 successor, without restarting the coordinator, run:
@@ -153,31 +167,39 @@ configured key file's existing account, then verifies and publishes the signed
 document as root. Root-owned and service-account-owned mode-0400 keys are both
 supported; do not copy the key, change its ownership, or make the approval
 directory writable by the signer. The child uses the selected operator source
-and Python interpreter. Upgrade this operator command through the supported
-source installation before using an older installation with a service-owned key;
-the running miner, reviewer and writer formats remain compatible and need no
-restart for this command-only correction.
+and Python interpreter. Before this command creates a new `/2` approval, upgrade
+all affected readers through their supported source and service update paths as
+listed above, and verify their installed adoption `/7` and approval `/2` support.
+Keep progression held during the rollout; enable the producer last, after those
+consumers are ready. Preserve C8's challenge hold. The named-key signing behavior
+does not remove this reader-upgrade prerequisite.
 
-It sends no transaction and does not bypass independent review or quorum. An exact retry
-reuses the recorded approval without reopening the key or signing again. A held
+It sends no transaction and does not bypass independent review or quorum. A new
+approval uses `/2` and explicitly requests selection at finalized commitment.
+An exact retry reuses the recorded approval without reopening the key or signing
+again, including an original `/1` approval with its original timing. A held
 cohort refuses approval; remove a hold only through its separately authorized
 admission/settlement transition. Without approval, the producer waits for the
 24-hour native live-row boundary. A missing old anchor requests recovery of one
 explicit row-write endpoint, never a new full-history pass.
 
 For installations still using static adoption selection, build the first adoption with
-`prepare_initial_early_release_adoption` so the release needs one quorum vote.
+`prepare_initial_early_release_adoption` with
+`activation_rule="at_finalized_control_commitment"` so the release needs one
+quorum vote and explicitly selects its START semantics.
 For an already selected adoption, use `prepare_early_release_revision`, sign
 its exact bytes with the configured recovery quorum and append them with
-`select_signed_early_release_revision`. Reuse a previously authenticated
+`select_signed_early_release_revision`, passing the same explicit activation rule
+to the proposal builder. Reuse a previously authenticated
 finalized issuance anchor where its binding still applies. Both builders leave
 the certified package untouched and require the exact signed predecessor.
 For the automatic alternative, pass `live_age` from
 `predecessor_live_age_from_owned_control`; do not construct it from RPC-reported
 timestamps or a local clock. The same native signature, selection and consumer
-handoff paths carry either release. Install the compatible `/6` readers before
-selecting an automatic adoption; older supported readers reject that schema
-without changing their retained `/1`–`/5` evidence.
+handoff paths carry either release. Install compatible `/7` readers before
+selecting either prospective release. Retain `/6` readers for historical automatic
+adoptions and `/1`–`/5` readers for their original evidence; do not reinterpret
+their signed timing.
 
 Coordinator and writer boots may select a `reward_adoption_feed` object with
 `path` (an absolute shared selection-file path) and `maximum_bytes` (default
@@ -247,7 +269,15 @@ ETA cover the two selected routes and their actual bytes. A missing peer vote
 is pending independent review, not completed quorum. Transport health alone
 does not confirm native acceptance, adoption or a finalized weight row.
 
-If an already selected early release omitted the cohort age attestation, obtain
+Legacy approval `/1`, adoption `/1`–`/6` and already reserved transition originals
+retain their signed bytes and timing after upgrade. The independent reviewer
+reconstructs each proposal using its explicit version, not the latest producer
+default. Selecting a new adoption never accelerates an old control decision.
+These readers remain required while retained history or pending legacy work uses
+them. Existing `/5` and `/6` early releases waive only predecessor opportunity;
+they still use the original START delay unless their signed age rule waives it.
+
+If an already selected legacy early release omitted the cohort age attestation, obtain
 the cohort-start timestamp at the plan's signed `not_before_block` and a fresh
 finalized control observation through the native proof owner. Convert those
 owned facts with `activation_age_from_owned_control`, then use
