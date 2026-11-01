@@ -426,7 +426,11 @@ async def test_missing_byte_completion_marker_repairs_without_reading_model(prom
         assert (await delivery_for(f).status(f.key))["payload_preserved"]
     assert marker.read_bytes() == original
     assert not f.multipart.reads
-    events = [json.loads(row.message) for row in caplog.records if row.message.startswith("{")]
+    events = json_progress_payloads(
+        caplog.records,
+        logger="umi.competition.progress",
+        schema="umi-transport-work-progress/1",
+    )
     assert any(row["status"] == "repair_required" for row in events)
     assert any(
         row["reason_code"] == "byte_completion_marker_restored_from_receipt" for row in events
