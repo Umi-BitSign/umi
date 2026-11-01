@@ -286,7 +286,11 @@ async def test_reward_opportunity_runs_before_package_admission(provisioned, mon
             return SimpleNamespace()
 
         owner.opportunity = opportunity
-        owner.files = SimpleNamespace(verified_package=package, maximum_package_bytes=1024)
+        owner.files = SimpleNamespace(
+            verified_package=package,
+            maximum_package_bytes=1024,
+            retain_allocation=lambda *args, **kwargs: None,
+        )
         body = SimpleNamespace(
             kind="activate",
             observed_at_block=1,
