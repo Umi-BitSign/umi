@@ -171,8 +171,8 @@ and Python interpreter. Before this command creates a new `/2` approval, upgrade
 all affected readers through their supported source and service update paths as
 listed above, and verify their installed adoption `/7` and approval `/2` support.
 Keep progression held during the rollout; enable the producer last, after those
-consumers are ready. Preserve C8's challenge hold. The named-key signing behavior
-does not remove this reader-upgrade prerequisite.
+consumers are ready. Preserve the successor cohort's challenge hold. The named-key
+signing behavior does not remove this reader-upgrade prerequisite.
 
 It sends no transaction and does not bypass independent review or quorum. A new
 approval uses `/2` and explicitly requests selection at finalized commitment.
