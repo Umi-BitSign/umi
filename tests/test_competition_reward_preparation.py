@@ -28,7 +28,7 @@ from umi.competition_cohort_service_certification import (
     sign_service_allocation,
 )
 from umi.competition_endpoint_execution import RetainedRevealPulse
-from umi.competition_reward_control import FinalizedRewardControlProvider
+from umi.competition_reward_control import FinalizedRewardControlProvider, RewardControlExpired
 from umi.competition_reward_decisions import (
     HistoricalStandingRewardSelection,
     HistoryVerifiedStandingRewardSelection,
@@ -601,7 +601,7 @@ async def test_native_package_replay_is_reused_but_projection_needs_fresh_contro
         patch.setattr("time.monotonic_ns", lambda: virtual_time[0])
         ready = await p.preparation.prepare(p.package, **replay_args(observations))
         assert ready.allocation == p.allocation and not ready.chain_submission_authorized
-        with pytest.raises(ValueError, match="proof adapter"):
+        with pytest.raises(RewardControlExpired, match="fresh current proof required"):
             await p.preparation.project(ready, **observations)
     fresh = await p.observations()
     assert await p.preparation.prepare(p.package, **replay_args(fresh)) is ready

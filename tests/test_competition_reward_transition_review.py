@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from umi.competition_reward_control import RewardControlExpired
 from umi.competition_reward_coverage_intervals import _issue_retained_coverage
 from umi.competition_reward_opportunity import opportunity_rule
 from umi.competition_reward_transition_review import predecessor_live_age_from_owned_control
@@ -161,7 +162,9 @@ async def test_observation_is_fresh_when_consumed_not_only_when_captured(
         else observation.expires_monotonic_ns + 1
     )
     monkeypatch.setattr("umi.competition_reward_control.time.monotonic_ns", lambda: now)
-    with pytest.raises(ValueError, match="current proof adapter"):
+    expected = RewardControlExpired if when == "expired" else ValueError
+    reason = "fresh current proof required" if when == "expired" else "current proof adapter"
+    with pytest.raises(expected, match=reason):
         predecessor_live_age_from_owned_control(**live_case.args)
 
 
