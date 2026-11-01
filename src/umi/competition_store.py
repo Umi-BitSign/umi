@@ -2587,6 +2587,8 @@ class CompetitionStore(VoidEvidenceRetention):
         with self._historical_replay(historical_policy):
             authenticate_evaluation(attested, signed, round_, historical_policy)
         sub = signed.submission
+        # Training ancestry stays in the signed bundle; the paired incumbent
+        # and previous promotion bind the quality comparison and history.
         if (
             sub.track != "model"
             or sub.model_bundle is None
@@ -2594,7 +2596,6 @@ class CompetitionStore(VoidEvidenceRetention):
             or review.review.model_sha256 != sub.model_revision
             or review.review.incumbent_model_sha256 != round_.incumbent_model_sha256
             or review.review.evaluation_result_sha256 != digest(result)
-            or sub.model_bundle.parent_baseline_sha256 not in {None, round_.incumbent_model_sha256}
         ):
             raise ValueError("preserved promotion review does not bind its model evaluation")
         observed = record.get("promoted_at_block")
@@ -3940,8 +3941,8 @@ class CompetitionStore(VoidEvidenceRetention):
         agreed = isinstance(review.review, AgreedPromotionReview)
         if agreed:
             _validate_agreed_review(review.review, signed, attested, round_)
-        if sub.model_bundle.parent_baseline_sha256 not in {None, round_.incumbent_model_sha256}:
-            raise ValueError("candidate declares a different parent baseline")
+        # The declared training parent need not be the paired quality reference.
+        # Preserve the bundle and enforce the current promotion head below.
         verify_preserved_bundle(sub.model_bundle, archive, self.policy)
         with self._transaction() as connection:
             self._assert_action_allowed(connection, digest(round_))

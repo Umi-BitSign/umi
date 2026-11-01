@@ -325,12 +325,18 @@ confirmed on chain.
 
 Read the active policy for the service and model reward shares and the cohort
 manifest for allowed tracks. Future track selection may change until that
-cohort's intake opens. The public-model quality floor is equality with the
-reference selected for that cohort's frozen evaluation. When a previous cohort's
-winner becomes the next reference, entries must match or beat that model on
-the new cohort's paired evaluation; its previous aggregate is not a fixed numeric
-cutoff. A model may retain an older declared parent: derivation provenance and
-the paired evaluation reference serve different purposes.
+cohort's intake opens. The signed cohort rules select quality eligibility
+relative to the reference for that cohort's frozen evaluation. When a previous
+cohort's winner becomes the next reference, compare entries against that model
+on the new cohort's paired evaluation; its previous aggregate is not a fixed
+numeric cutoff. The reference is a quality benchmark: models may be trained
+from scratch or from any otherwise permitted checkpoint. Declare training provenance
+truthfully; `parent_baseline_sha256` may be absent or differ from the evaluation
+reference. An advancing reference does not require an existing submission to be
+re-signed or uploaded again. Rights, resources, duplicate rules and the signed
+cohort's quality threshold and reward grace still apply. Reference promotion
+requires its own quality gates and cannot replace the incumbent with a weaker
+model, even when that model qualifies for rewards.
 
 A sole eligible distinct model receives the full model pool. Exact duplicate
 content is counted once. The signed authority and any authenticated reward

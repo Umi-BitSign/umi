@@ -76,6 +76,12 @@ async def apply(s, provider=None, delivery=None):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scenario",
+    [None, "current", "89" * 32],
+    indirect=True,
+    ids=["from-scratch", "current-parent", "other-parent"],
+)
 async def test_actual_promotion_then_restart_late_retry_preserves_receipt(setup):
     s = setup
     result = await apply(s)
