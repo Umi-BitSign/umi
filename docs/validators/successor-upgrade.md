@@ -2703,6 +2703,20 @@ cohorts, and verify installed behavior before enabling release. See
 retirement, recovery and frozen-copier requirements. This storage transition has
 no cohort-closure prerequisite.
 
+Before selecting original-receipt retirement, qualify the installed
+`original_receipt_index_capacity` capability and the consumer's actual retained
+local index against its advertised physical allowance. An older native
+installation can parse the unchanged configuration fields without enforcing
+this allowance: a source checkout, configuration-only successor or descriptor
+from another installation is insufficient. Publish and select the new immutable
+Python host through the supported update path for every affected validator or
+offline-replay miner. This local capacity/refusal change preserves the native
+proof verification ABI and completed unaffected proof results. Admission still
+charges the local index, retirement journal, cache and restart envelopes; it
+cannot credit bytes that cleanup may release later. A latched importer-wide
+capacity fault requires explicit owner recovery and is never automatically
+cleared by repairing one object.
+
 A new unconditional direct requirement can name an already installed transitive
 dependency without reinstalling it. The builder authenticates the previous
 `pyproject.toml`, lock and installed distribution `METADATA` against the signed

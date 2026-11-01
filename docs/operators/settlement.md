@@ -1314,10 +1314,41 @@ committed snapshot. It never performs rollback recovery. A crashed hot journal,
 unsupported WAL owner or damaged completion ledger still refuses; the ordinary
 stopped history transfer reader retains its original clean-journal requirement.
 
+An original-receipt consumer's separate local index uses its own
+`imported_object_release_maximum_metadata_bytes` allowance (default 16 MiB).
+It retains fixed ownership/enrollment metadata and independent damage holds,
+not a second copy of the producer's receipts. Its physical SQLite ceiling is
+four times that allowance plus 16 MiB. The existing `maximum_index_bytes`
+logical limit and serialized configuration bytes are unchanged. This is an
+enforced operating ceiling, not an assurance that every possible damage history
+fits. Ordinary producers and importers without an original receipt source retain
+their existing behavior.
+
+Use the installed native `original_receipt_index_capacity` descriptor when
+admitting the consumer: it includes the database, DELETE rollback, a full-database
+restart reserve and allocation overhead. The default additional disk envelope
+is 261,423,104 bytes per consumer, separate from the retirement journal and memory
+cache. Do not use the producer's logical receipt allowance as a second copied
+receipt reservation or count space that retirement has not yet released.
+An oversized retained local index, unsupported WAL layout or incompatible schema
+refuses before a writable open. Compatible original local metadata keeps its
+inode, generation and damage holds; bounded interrupted rollback uses the native
+journal recovery path. The producer remains read-only throughout.
+
+If a failed remote read cannot retain its damage hold because this local index
+is physically full, a preallocated fixed-size fault slot latches an importer-wide
+refusal. It survives restart and concurrent failed reads. Repairing one object
+does not clear it: other concurrent failures might lack individual damage rows.
+This state requires explicit importer-wide owner recovery; there is no automatic
+clear operation. Successful reads add no local records or writes, and no shared
+metadata lock is held across HTTP.
+
 History journal byte allowances cover logical retained records and reservations,
 not a physical disk reservation. SQLite keys, indexes and page utilization need
 additional space. Journal writers preserve the existing database page size and
-do not impose a second physical ceiling derived from logical bytes. Monitor disk
+do not impose a second physical ceiling derived from logical bytes, except for
+explicitly selected physical budgets such as the independent original-receipt
+bookkeeping allowance above. Monitor disk
 headroom for retained pages, rollback journals, uploads and maintenance, and keep
 the host's storage admission guards in place. Increasing or using a logical
 allowance does not establish that physical capacity is available.

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import sqlite3
 from collections import OrderedDict
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +21,10 @@ from typing import Annotated, Literal
 from pydantic import Field, model_serializer, model_validator
 
 from .competition_evidence_codec import MAX_PROOF_OBJECT_BYTES, checked_digest
+from .competition_journal_physical_budget import JournalPhysicalBudget
+from .competition_remote_proof_generation import (
+    TABLE as _GENERATION_TABLE,
+)
 from .competition_remote_proof_generation import (
     generation_identity,
     install_generation,
@@ -37,10 +43,36 @@ from .r2_publish_batch import (
     R2PublishBatchUnavailable,
 )
 from .r2_sigv4 import R2SigV4, load_r2_credentials
+from .sqlite_contention import is_sqlite_full
 
 PROOF_PUBLICATION_WORKERS = 8
 PROOF_PUBLICATION_BATCH_OBJECTS = min(MAX_PUBLISH_OBJECTS, PROOF_PUBLICATION_WORKERS // 2)
 MAX_ACTIVE_PROOF_PUBLICATION_BYTES = 2 * MAX_PROOF_OBJECT_BYTES
+
+
+def original_receipt_index_capacity(maximum_metadata_bytes: int) -> dict:
+    """Describe enforced local bookkeeping, never the original receipt ledger.
+
+    Original-receipt consumers retain ownership/enrollment and independent damage
+    holds only. Their existing imported-object metadata selection also bounds
+    this separate local index. The producer's logical index allowance and all
+    signed configuration bytes remain unchanged. Physical exhaustion refuses;
+    it does not discard holds or rewrite the original producer's receipts.
+    """
+    if type(maximum_metadata_bytes) is not int or not 1024**2 <= maximum_metadata_bytes <= 1024**3:
+        raise ValueError("bounded original-receipt metadata allowance required")
+    database = 4 * maximum_metadata_bytes + 16 * 1024**2
+    rollback = database * 65 // 64 + 65536
+    overhead = 8 * 1024**2
+    return dict(
+        schema="umi-original-receipt-index-physical-budget/1",
+        maximum_metadata_bytes=maximum_metadata_bytes,
+        maximum_database_bytes=database,
+        rollback_bytes=rollback,
+        restart_reserve_bytes=database,
+        allocation_overhead_bytes=overhead,
+        additional_disk_bytes=2 * database + rollback + overhead,
+    )
 
 
 class ProofArchiveR2Config(StrictProtocolModel):
@@ -330,6 +362,184 @@ class _ProofIndex(RoundJournal):
         db.execute("INSERT INTO records VALUES (?,?,?)", (kind, key, raw))
 
 
+class _OriginalReceiptIndex(_ProofIndex):
+    """Bound the consumer's own metadata while its producer stays read-only."""
+
+    def __init__(self, root, binding, *, metadata_capacity, **kwargs):
+        budget = JournalPhysicalBudget(
+            maximum_database_bytes=metadata_capacity["maximum_database_bytes"],
+            minimum_free_bytes=0,
+            allocation_overhead_bytes=metadata_capacity["allocation_overhead_bytes"],
+        )
+        existing = (root / "rounds.sqlite3").exists()
+        if not existing:
+            # Refuse first creation before allocating a directory or SQLite file.
+            # Retained indexes instead use the native page-aware transaction check.
+            parent = root
+            while not parent.exists():
+                parent = parent.parent
+            space = os.statvfs(parent)
+            if space.f_bavail * space.f_frsize < (
+                budget.maximum_database_bytes + 65536 + budget.allocation_overhead_bytes
+            ):
+                raise ValueError("original-receipt index physical growth reserve unavailable")
+        # Existing supported metadata is opened in place without schema migration.
+        # Its original bounded rollback is recovered by RoundJournal if necessary.
+        # Legacy layouts requiring migration refuse before any writable open.
+        super().__init__(root, binding, existing_only=existing, physical_budget=budget, **kwargs)
+
+    def _check_files(self):
+        super()._check_files()
+        if (
+            self.path.exists()
+            and self.path.stat().st_size > self.physical_budget.maximum_database_bytes
+        ):
+            raise ValueError(
+                "retained original-receipt index exceeds its physical metadata ceiling"
+            )
+        for suffix in ("-wal", "-shm"):
+            path = Path(str(self.path) + suffix)
+            if path.exists() or path.is_symlink():
+                raise ValueError("original-receipt index requires bounded DELETE rollback format")
+
+    def _validate_existing(self, binding):
+        with self.path.open("rb") as stream:
+            header = stream.read(100)
+        if len(header) != 100 or int.from_bytes(header[60:64], "big") != 4:
+            raise ValueError(
+                "retained original-receipt completion layout requires explicit migration"
+            )
+        return super()._validate_existing(binding)
+
+    _capacity_kind = "original_receipt_capacity_fault"
+    _capacity_owner = "original_receipt_capacity_owner"
+
+    @classmethod
+    def _empty_fault(cls):
+        return dict(
+            schema="umi-original-receipt-capacity-fault/1",
+            active=0,
+            key="0" * 64,
+            reference_sha256="0" * 64,
+        )
+
+    @classmethod
+    def _capacity_fences(cls):
+        result = {}
+        for kind, actions in (
+            (cls._capacity_owner, ("UPDATE", "DELETE")),
+            (cls._capacity_kind, ("DELETE",)),
+        ):
+            for action in actions:
+                name = kind + "_" + action.lower()
+                result[name] = (
+                    f"CREATE TRIGGER {name} BEFORE {action} ON records WHEN OLD.kind='{kind}' "
+                    "BEGIN SELECT RAISE(ABORT,"
+                    "'original receipt capacity enrollment is immutable'); END"
+                )
+        return result
+
+    def initialize_capacity_fault(self):
+        """Reserve one fixed-size durable failure slot before remote reads."""
+        owner = {"schema": "umi-original-receipt-index-physical-budget/1"}
+        with self.read_transaction() as db:
+            retained = self.get(self._capacity_owner, "owner", db=db)
+            fault = self.get(self._capacity_kind, "owner", db=db)
+            fences = dict(
+                db.execute(
+                    "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND "
+                    "(name GLOB 'original_receipt_capacity_owner_*' OR "
+                    "name GLOB 'original_receipt_capacity_fault_*')"
+                )
+            )
+        if retained is not None or fault is not None or fences:
+            if retained != owner or fences != self._capacity_fences():
+                raise ValueError(
+                    "original receipt capacity metadata damaged; explicit repair required"
+                )
+            self._check_fault(fault)
+            return
+
+        def initialize(db):
+            for sql in self._capacity_fences().values():
+                db.execute(sql)
+
+        self.put_many(
+            (
+                (self._capacity_owner, "owner", owner),
+                (self._capacity_kind, "owner", self._empty_fault()),
+            ),
+            index=initialize,
+        )
+
+    @classmethod
+    def _check_fault(cls, value):
+        if (
+            not isinstance(value, dict)
+            or set(value) != set(cls._empty_fault())
+            or value["schema"] != cls._empty_fault()["schema"]
+            or type(value["active"]) is not int
+            or value["active"] not in (0, 1)
+            or any(
+                type(value[key]) is not str
+                or len(value[key]) != 64
+                or any(c not in "0123456789abcdef" for c in value[key])
+                for key in ("key", "reference_sha256")
+            )
+            or (not value["active"] and value != cls._empty_fault())
+        ):
+            raise ValueError(
+                "original receipt capacity fault missing or damaged; explicit repair required"
+            )
+        return value
+
+    def require_capacity(self, db):
+        value = self._check_fault(self.get(self._capacity_kind, "owner", db=db))
+        if value["active"]:
+            raise ValueError(
+                "original receipt metadata exhausted; "
+                "explicit importer-wide capacity repair required"
+            )
+
+    def _write_fault(self, db, value):
+        prior = self._check_fault(self.get(self._capacity_kind, "owner", db=db))
+        raw = canonical_json_bytes(value)
+        if len(raw) != len(canonical_json_bytes(prior)):
+            raise ValueError("original receipt emergency slot cannot grow")
+        db.execute(
+            "UPDATE records SET body=? WHERE kind=? AND id='owner'", (raw, self._capacity_kind)
+        )
+        # Invalidate retained damage-dependent results through their existing
+        # mutation identity. The fixed record and index keys do not grow.
+        db.execute(f"UPDATE {_GENERATION_TABLE} SET revision=revision+1 WHERE id=1")
+
+    def put_damage(self, key, value):
+        try:
+            self.put("remote_proof_damage", key, value)
+        except (sqlite3.OperationalError, ValueError) as error:
+            if not (
+                (isinstance(error, sqlite3.OperationalError) and is_sqlite_full(error))
+                or (
+                    type(error) is ValueError
+                    and str(error)
+                    in {
+                        "round journal record capacity exhausted",
+                        "round journal capacity exhausted",
+                    }
+                )
+            ):
+                raise
+            with self.transaction() as db:
+                fault = self._check_fault(self.get(self._capacity_kind, "owner", db=db))
+                if not fault["active"]:
+                    fault.update(active=1, key=key, reference_sha256=value["reference_sha256"])
+                    self._write_fault(db, fault)
+            raise ValueError(
+                "original receipt metadata exhausted; "
+                "explicit importer-wide capacity repair required"
+            ) from error
+
+
 class RemoteProofStore:
     """One authenticated namespace with metadata independent of cached bytes.
 
@@ -380,15 +590,6 @@ class RemoteProofStore:
             "prefix": config.prefix,
         }
         self.namespace_sha256 = digest(self.binding)
-        self.journal = _ProofIndex(
-            root,
-            self.binding,
-            maximum_rounds=65536,
-            maximum_bytes=config.maximum_index_bytes,
-            maximum_record_bytes=64 * 1024,
-        )
-        self.journal.migrate_completions(self.namespace_sha256)
-        install_generation(self.journal, self.namespace_sha256)
         self.receipt_source = None
         if receipt_source_directory is not None:
             self.receipt_source = _ProofIndex(
@@ -403,6 +604,24 @@ class RemoteProofStore:
             with self.receipt_source.read_transaction() as db:
                 if db.execute("PRAGMA user_version").fetchone()[0] != 4:
                     raise ValueError("receipt source requires its completed immutable ledger")
+        index_type, index_options = _ProofIndex, {}
+        if receipt_source_directory is not None:
+            index_type = _OriginalReceiptIndex
+            index_options["metadata_capacity"] = original_receipt_index_capacity(
+                config.imported_object_release_maximum_metadata_bytes
+            )
+        self.journal = index_type(
+            root,
+            self.binding,
+            maximum_rounds=65536,
+            maximum_bytes=config.maximum_index_bytes,
+            maximum_record_bytes=64 * 1024,
+            **index_options,
+        )
+        self.journal.migrate_completions(self.namespace_sha256)
+        install_generation(self.journal, self.namespace_sha256)
+        if isinstance(self.journal, _OriginalReceiptIndex):
+            self.journal.initialize_capacity_fault()
         self._cache, self._pins, self._bytes = OrderedDict(), {}, 0
         self._lock = RLock()
         self._publication_condition = Condition(self._lock)
@@ -494,15 +713,15 @@ class RemoteProofStore:
         return hashlib.sha256(reference.key.encode()).hexdigest()
 
     def _hold(self, reference: RemoteProofReference) -> None:
-        self.journal.put(
-            "remote_proof_damage",
-            self._damage_key(reference),
-            {
-                "schema": "umi-r2-proof-damage/1",
-                "reference_sha256": digest(reference),
-                "reason": "remote_proof_missing_changed_or_corrupt",
-            },
-        )
+        value = {
+            "schema": "umi-r2-proof-damage/1",
+            "reference_sha256": digest(reference),
+            "reason": "remote_proof_missing_changed_or_corrupt",
+        }
+        if isinstance(self.journal, _OriginalReceiptIndex):
+            self.journal.put_damage(self._damage_key(reference), value)
+        else:
+            self.journal.put("remote_proof_damage", self._damage_key(reference), value)
 
     def validate_reference(self, value: dict) -> RemoteProofReference:
         """Check this owner's durable replication fact without reading payloads.
@@ -515,6 +734,8 @@ class RemoteProofStore:
 
     def _require_undamaged(self, reference, db, damage_db):
         owner = self.receipt_source or self.journal
+        if isinstance(self.journal, _OriginalReceiptIndex):
+            self.journal.require_capacity(damage_db)
         key = self._damage_key(reference)
         if owner.get("remote_proof_damage", key, db=db) is not None or (
             self.receipt_source is not None
