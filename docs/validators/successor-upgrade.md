@@ -309,7 +309,13 @@ automatic discovery under the selected coordinator's protected
 `files_directory/allocations/{digest}.json`; explicit map entries retain their
 original precedence and file ownership contract. The coordinator, reviewer and
 writer boot paths export the compact original and authenticated effective
-allocations during their existing native preparation. The publisher reads only
+allocations during their existing native preparation. Coordinator and independent
+reviewer decision review also exports its already validated allocation values
+to that reviewer's selected `files_directory` before signing. Certified input
+publication restores missing exports for older completed decisions before
+publishing their decision files. This reuses the existing package/adoption
+review; it does not wait for a writer whose preparation can use a separate
+readback directory. The publisher reads only
 these compact files and checks their identity against the current signed/native
 selection; it does not reopen reward packages. Export/discovery grants no reward
 authority by itself.
@@ -324,6 +330,10 @@ copy from its immutable source before resuming; never reset native verification
 or publication journals to repair discovery. A missing producer export waits
 with progress; an older coordinator must select the supported export-capable
 upgrade or keep its existing explicit allocation map until that upgrade.
+These exports use the existing allocation schema and immutable publication
+format. Existing miner and reference readers require no format migration;
+coordinator/reviewer upgrades must include the decision-review and certified
+publication producers as well as the writer preparation path.
 
 An explicit compatible transport selection uses schema
 `umi-reference-publisher-config/2`, `gateway_origin` set to

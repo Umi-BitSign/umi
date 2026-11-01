@@ -1161,6 +1161,10 @@ async def test_native_coordinator_recovers_admission_then_certifies_first_activa
 
         def signer(name, calls):
             async def sign(body):
+                if body.activation is not None:
+                    assert primary.allocation(body.activation.allocation_sha256) == p.allocation
+                    # Writer preparation uses this separate root and has not run.
+                    assert not tuple((readback.root / "allocations").glob("*.json"))
                 calls.append(body)
                 return sign_object(body, wallet(name))
 
@@ -1282,7 +1286,31 @@ async def test_native_coordinator_recovers_admission_then_certifies_first_activa
     assert primary.package(offer.package_sha256) == p.package
     monkeypatch.setattr(primary, "retain_package", retain)
     coordinator = build()
-    assert (await converge(coordinator)).status == "certified_delivery_pending"
+    retain_allocation = primary.retain_allocation
+
+    def lost_allocation_reply(allocation):
+        retain_allocation(allocation)
+        raise OSError("allocation acknowledgement lost")
+
+    monkeypatch.setattr(primary, "retain_allocation", lost_allocation_reply)
+    with pytest.raises(OSError, match="allocation acknowledgement"):
+        await converge(coordinator)
+    assert coordinator.signer.journal.load(1) is None and len(local_calls) == 1
+    allocation_path = primary.root / "allocations" / (offer.allocation_sha256 + ".json")
+    allocation_bytes = allocation_path.read_bytes()
+    allocation_stat = allocation_path.stat()
+    monkeypatch.setattr(primary, "retain_allocation", retain_allocation)
+    coordinator = build()
+    # The failed delivery completed native semantic verification. A reconstructed
+    # reviewer must recover that durable result instead of rerunning payload work.
+    from .reward_snapshot_assertions import forbid_expensive_native_replay
+
+    with monkeypatch.context() as warm:
+        forbid_expensive_native_replay(warm)
+        assert (await converge(coordinator)).status == "certified_delivery_pending"
+    assert allocation_path.read_bytes() == allocation_bytes
+    assert allocation_path.stat().st_ino == allocation_stat.st_ino
+    assert allocation_path.stat().st_mtime_ns == allocation_stat.st_mtime_ns
     certificate = coordinator.signer.journal.prefix(2)[1]
     assert certificate.decision.activation == offer
     assert primary.package(offer.package_sha256) == p.package
@@ -1787,6 +1815,7 @@ async def test_native_pending_activation_signs_recovers_and_delivers_after_resta
 
     retained = await history()
     control = await h.reader.review_control(h.item.provider, retained.tip.block_number)
+    exported = []
     inputs = dict(
         control=control,
         history=retained,
@@ -1794,6 +1823,7 @@ async def test_native_pending_activation_signs_recovers_and_delivers_after_resta
         promotion_store=p.store,
         approved_handoff=handoff,
         maximum_promotion_bytes=1_000_000,
+        allocation_sink=exported.append,
     )
 
     def review(decision=body, **changes):
@@ -1820,7 +1850,9 @@ async def test_native_pending_activation_signs_recovers_and_delivers_after_resta
     )
     with pytest.raises(ValueError, match="allocation differs"):
         review(wrong)
+    assert exported == []
     accepted = review()
+    assert exported == [p.allocation]
     assert not accepted.chain_submission_authorized
 
     def journal():
@@ -3412,7 +3444,7 @@ async def test_portable_proofs_restore_fresh_native_journals_without_history_rpc
     assert set(h.rpc_calls) <= {"chain_getHeader", "chain_getBlockHash"}
 
 
-@pytest.mark.parametrize("interrupt_after", ["packages", "decisions"])
+@pytest.mark.parametrize("interrupt_after", ["packages", "allocations", "decisions"])
 async def test_reward_input_publication_recovers_original_bytes_and_offline_source(
     preparation_case, tmp_path, monkeypatch, interrupt_after
 ):
@@ -3469,6 +3501,7 @@ async def test_reward_input_publication_recovers_original_bytes_and_offline_sour
         lambda _: pytest.fail("completed package fetched after restart"),
     )
     assert head == digest(p.active.decision)
+    assert reopened.allocation(digest(p.allocation)) == p.allocation
     assert all(path.read_bytes() == raw for path, raw in before.items())
     complete = {path: path.read_bytes() for path in files.root.rglob("*.json")}
     variants = tuple(signed(item.decision) for item in prefix)
@@ -3526,6 +3559,7 @@ async def test_reward_input_publication_holds_incomplete_or_conflicting_inputs(
     with pytest.raises((ValueError, FileNotFoundError)):
         retain_standing_reward_inputs(files, p.reader.series, p.reader.policy, prefix, source)
     assert not tuple((files.root / "decisions").glob("*.json"))
+    assert not tuple((files.root / "allocations").glob("*.json"))
 
 
 @pytest.fixture
@@ -6821,6 +6855,7 @@ async def test_native_allocation_export_repairs_partial_delivery_without_replay(
             assert await owner.prepare(p.package, **replay_args(observations)) is prepared
             assert files.allocation(digest(prepared.allocation)) == prepared.allocation
     assert "reward_allocation_export" in caplog.text
+    assert attempts == [digest(prepared.allocation)] * 4
     assert digest(prepared.allocation) == p.active.decision.activation.allocation_sha256
 
 

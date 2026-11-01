@@ -293,6 +293,7 @@ class StandingRewardDecisionReviewer:
                 ),
                 revision_clearance=revision_clearance,
                 live_lock=live_lock,
+                allocation_sink=p.files.retain_allocation,
             )
         )
 

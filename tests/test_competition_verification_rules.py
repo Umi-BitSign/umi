@@ -18,6 +18,7 @@ def test_selected_dependency_manifest_is_complete_and_qualified():
     )
     for module in (
         "competition_verification_reuse.py",
+        "competition_reward_allocation_export.py",
         "competition_reward_cutover.py",
         "competition_reward_history_preparation.py",
         "competition_reward_history_preparation_capacity.py",
