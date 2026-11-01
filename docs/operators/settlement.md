@@ -782,7 +782,7 @@ its exact terminal dependencies, signed authority, prepared round and runtime,
 suite, policy, execution window and any CPU-efficiency adoption. Later sample,
 attestation, transition, package and reward reviews reuse model outcomes across
 phase changes and restart, after their fresh authority and closure checks. This
-includes historical untimed results and prospective C8 timing results; it changes
+includes historical untimed results and prospectively adopted timing results; it changes
 neither measured quality nor signed result bytes. Endpoint outcomes retain their
 current-history authorization context. Lost or damaged completed receipts report
 repair and rebuild only the affected outcome using retained lower-level proof
