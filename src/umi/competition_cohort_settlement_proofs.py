@@ -139,6 +139,11 @@ class SettlementRegistrationFiles:
     async def ensure_published(self, observation: ExecutionBoundary) -> None:
         await self.publish(observation)
 
+    async def publication_completed(self, observation: ExecutionBoundary) -> bool:
+        """Check durable delivery metadata without acquiring or restoring proof bytes."""
+        observation = ExecutionBoundary.model_validate_json(canonical_json_bytes(observation))
+        return await run_owned_thread(self._publication_completed, observation)
+
     async def read(self, observation: ExecutionBoundary) -> tuple[bytes, bytes]:
         observation = ExecutionBoundary.model_validate_json(canonical_json_bytes(observation))
         return await run_owned_thread(self._read_selected, observation)

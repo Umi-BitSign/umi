@@ -577,6 +577,7 @@ class LifecycleHost:
             self.proofs.publish,
             sources=self.config.sources,
             history_directory=Path(self.config.settlement_history_directory),
+            proof_completed=self.proofs.publication_completed,
         )
         return CohortPhaseDriver(
             CertifiedPhaseObserver(live, self._peers("requests"), self.policy),

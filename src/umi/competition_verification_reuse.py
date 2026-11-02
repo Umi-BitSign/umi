@@ -338,14 +338,7 @@ def verified_replay(stage, result_model, *, restore=None):
     def decorate(function):
         signature = inspect.signature(function)
 
-        @wraps(function)
-        def run(*args, **kwargs):
-            check_work_cancelled()
-            reuse = _CURRENT.get()
-            if reuse is None or reuse.pid != os.getpid():
-                if _CACHE_ONLY.get():
-                    raise VerificationReceiptUnavailable("native verification owner unavailable")
-                return function(*args, **kwargs)
+        def bind(args, kwargs):
             bound = signature.bind(*args, **kwargs)
             bound.apply_defaults()
             if "intake_records" in bound.arguments:
@@ -355,21 +348,46 @@ def verified_replay(stage, result_model, *, restore=None):
                 for k, v in bound.arguments.items()
                 if k in ("objects", "source", "decision_source", "pulses")
             }
+            return bound, sources
 
-            def context():
-                return _identity(
-                    {
-                        "arguments": {k: v for k, v in bound.arguments.items() if k not in sources},
-                        "bounds": stage_bounds(),
-                        "lineage": admitted_policy_sha256s(bound.arguments["policy"]),
-                        "owner": reuse.owner,
-                        "runtime": reuse.runtime,
-                        "stage": stage,
-                    }
-                )
+        def context(bound, sources, reuse):
+            return _identity(
+                {
+                    "arguments": {k: v for k, v in bound.arguments.items() if k not in sources},
+                    "bounds": stage_bounds(),
+                    "lineage": admitted_policy_sha256s(bound.arguments["policy"]),
+                    "owner": reuse.owner,
+                    "runtime": reuse.runtime,
+                    "stage": stage,
+                }
+            )
+
+        def retained_receipt(*args, **kwargs):
+            """Locate exact completed metadata without replay or dependency traversal.
+
+            This is not a verification verdict. The consuming native owner must
+            retain current authority and source/output fences before using it.
+            Missing or damaged receipts never start native work through this port.
+            """
+            reuse = selected_verification_reuse()
+            if reuse is None:
+                raise VerificationReceiptUnavailable("native verification owner unavailable")
+            bound, sources = bind(args, kwargs)
+            key = _sha(canonical_json_bytes(context(bound, sources, reuse)))
+            return key, reuse.load(key)
+
+        @wraps(function)
+        def run(*args, **kwargs):
+            check_work_cancelled()
+            reuse = _CURRENT.get()
+            if reuse is None or reuse.pid != os.getpid():
+                if _CACHE_ONLY.get():
+                    raise VerificationReceiptUnavailable("native verification owner unavailable")
+                return function(*args, **kwargs)
+            bound, sources = bind(args, kwargs)
 
             started = time.monotonic()
-            original = context()
+            original = context(bound, sources, reuse)
             key = _sha(canonical_json_bytes(original))
             # Serialize same-owner work, including nested replay. Separate owners
             # have separate receipts and must establish their own verification.
@@ -453,7 +471,7 @@ def verified_replay(stage, result_model, *, restore=None):
                                     )
                                 check_stage_json(raw, kind="object")
                             progress.advance()
-                    if valid and context() == original:
+                    if valid and context(bound, sources, reuse) == original:
                         if selected_workload() is not None:
                             # The native owner has validated this receipt and
                             # its dependencies. Reuse only its authenticated
@@ -571,7 +589,7 @@ def verified_replay(stage, result_model, *, restore=None):
                 )
                 if result is None:
                     result = function(*bound.args, **bound.kwargs)
-                if context() != original:
+                if context(bound, sources, reuse) != original:
                     raise ValueError("native verification context changed during replay")
                 recorded = tuple(
                     VerificationDependency(kind=k, key=i, sha256=s, source_identity=t)
@@ -586,6 +604,7 @@ def verified_replay(stage, result_model, *, restore=None):
                 _event(stage, "retained", len(recorded), elapsed=time.monotonic() - started)
                 return result
 
+        run.retained_receipt = retained_receipt
         return run
 
     return decorate

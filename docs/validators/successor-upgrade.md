@@ -1931,6 +1931,32 @@ preparation publisher's `publish_history` port restores the original round file
 from the owning journal after a lost acknowledgement or a missing derived file.
 After request publication succeeds, the lifecycle returns
 `settlement_handoff_published` and the recurring settlement service takes over.
+Request publication reviews each exact closure once during initial delivery.
+Its current certified-history check must select that same reviewed prefix. Each
+native receipt pass reads an object's authenticated export descriptor once and
+shares it across identity, size and coverage accounting; selected native conflict
+fences and file identities bracket the pass.
+
+After durable handoff, a completion projection binds the existing native receipt
+to the exact policy, authority, verifier/runtime semantics, relevant intake-source
+revisions, output identities and full proof-observation set. Unchanged restarts
+and repeated lifecycle calls check current authority, selected native holds,
+output stamps and the proof owner's durable delivery metadata before returning.
+They do not replay closure dependencies, decode unchanged descriptors, read
+evidence payloads or acquire the aggregate publication lane. Operation permission
+checks remain mandatory. Legacy injected proof publishers without the completion
+probe retain the guarded delivery path.
+
+Existing handoffs migrate from their exact retained native receipt and original
+closure/inventory metadata, without another native semantic review. A missing or
+damaged completion/native receipt reports a scoped metadata repair; it cannot
+silently become first verification. Changed outputs restore only affected files;
+unfinished proof delivery resumes through its existing owner. Final receipt,
+authority and selected-output fences run after asynchronous delivery, before
+publishing the handoff. Native receipt namespaces, signed evidence, miner and
+validator wire formats and resource limits remain unchanged. No journal reset or
+new consent is needed; the supported lifecycle host wires the proof-completion
+port for retained and future cohorts.
 
 For a standing series, the configured lifecycle host supplies `SeriesRequestStart`
 through the lifecycle's `request_start` argument before enabling dispatch. Its private
@@ -3674,6 +3700,11 @@ preserved. Oversize, encoding and substantive-document holds continue to apply.
 Successful reviews retain their original bytes across this upgrade.
 
 Each acceptance sweep checks up to 16 latest uncertified model entries per cohort.
+Pending selection pages participant-certified latest candidates first, resetting
+an old unready offset at that ready-group boundary. Certificate presence is only
+a scheduling hint: exact preparation, current selection and quorum checks remain
+mandatory. When no candidates have participant certificates, ordinary pending
+selection continues so incomplete admission and review diagnostics remain visible.
 When more than one cohort has pending latest models, it processes one model from
 each and rotates the first cohort on the next sweep. This prevents hash ordering
 and large model batches from delaying all later cohorts. The ordinary cursor
