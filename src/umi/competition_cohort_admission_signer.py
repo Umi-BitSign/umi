@@ -30,6 +30,7 @@ from .competition_cohort_participation import (
 from .competition_cohort_recovery import verify_recovery_quorum
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .concurrency import run_owned_thread, wait_for_owned
+from .host_memory_runtime import memory_operation
 from .open_competition import CompetitionPolicy, Signature, digest, identity
 from .protocol import canonical_json_bytes
 
@@ -120,38 +121,45 @@ class CohortAdmissionSigner:
                         # require an online RPC or create a new signing action.
                         return saved[4]
                     registration_archive = saved[2:4]
-                if registration_archive is None:
-                    registration_archive = await self.archive(record.observation)
-                source = await self.history(cohort)
-                result = await review_cohort_participation(
-                    raw,
-                    source.history,
-                    self.journal.policy,
-                    self.provider,
-                    expected_tip_sha256=history_tip(source.history),
-                    registration_archive=registration_archive,
-                )
-                current = await self.history(cohort)
-                if current.history != source.history:
-                    raise OSError("admission history changed during review; retry unchanged")
-                check_selected(
-                    raw, current, self.journal.policy, result.registration.replayed_at.block_number
-                )
-                await run_owned_thread(self.journal.remember_participation_review, raw)
-                await run_owned_thread(
-                    self.journal.remember_history,
-                    current.history,
-                    result.registration.replayed_at.block_number,
-                )
-                await run_owned_thread(
-                    partial(self.journal.reserve, result.admission, raw, *registration_archive)
-                )
-                signature = await wait_for_owned(
-                    self.sign(result.admission),
-                    timeout=self.journal.config.signing_timeout_seconds,
-                )
-                vote = CohortAdmissionVote(admission=result.admission, signature=signature)
-                return await run_owned_thread(self.journal.commit, slot, vote)
+                return await self._attest_pending(raw, record, slot, cohort, registration_archive)
+
+    @memory_operation
+    async def _attest_pending(self, raw, record, slot, cohort, registration_archive):
+        # The signer and journal locks remain owned by attest. Retained votes
+        # return before admission; fresh graph work holds one transient lease
+        # through durable commit, including cancellation drainage.
+        if registration_archive is None:
+            registration_archive = await self.archive(record.observation)
+        source = await self.history(cohort)
+        result = await review_cohort_participation(
+            raw,
+            source.history,
+            self.journal.policy,
+            self.provider,
+            expected_tip_sha256=history_tip(source.history),
+            registration_archive=registration_archive,
+        )
+        current = await self.history(cohort)
+        if current.history != source.history:
+            raise OSError("admission history changed during review; retry unchanged")
+        check_selected(
+            raw, current, self.journal.policy, result.registration.replayed_at.block_number
+        )
+        await run_owned_thread(self.journal.remember_participation_review, raw)
+        await run_owned_thread(
+            self.journal.remember_history,
+            current.history,
+            result.registration.replayed_at.block_number,
+        )
+        await run_owned_thread(
+            partial(self.journal.reserve, result.admission, raw, *registration_archive)
+        )
+        signature = await wait_for_owned(
+            self.sign(result.admission),
+            timeout=self.journal.config.signing_timeout_seconds,
+        )
+        vote = CohortAdmissionVote(admission=result.admission, signature=signature)
+        return await run_owned_thread(self.journal.commit, slot, vote)
 
 
 def certify_admission(

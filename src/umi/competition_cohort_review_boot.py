@@ -52,6 +52,7 @@ from .competition_store import CompetitionStore
 from .concurrency import await_owned_task, run_owned_thread
 from .host_memory_runtime import (
     RequestsStageASGIBinding,
+    WorkloadASGIBinding,
     memory_runtime,
     requests_stage_policy,
     selected_memory,
@@ -128,6 +129,7 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 config.host_memory_admission,
                 role="phase_reviewer",
                 protocol_policy_sha256=digest(config.policy),
+                evaluation_runtime_sha256=config.policy.evaluation_runtime_sha256,
                 series_sha256=digest(config.series),
                 authority_sha256=digest(config.series.recovery.authority),
                 maximum_aggregate_bytes=max(
@@ -214,6 +216,8 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 controller=selected_memory(),
                 private_role="phase_reviewer",
             )
+        elif getattr(selected_memory(), "workload_profile", None) is not None:
+            app.add_middleware(WorkloadASGIBinding, controller=selected_memory())
         models = None
         direct_artifacts = None
         legacy_readers = None

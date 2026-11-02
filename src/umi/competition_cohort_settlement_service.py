@@ -25,6 +25,7 @@ from .competition_cohort_history import verify_cohort_history
 from .competition_cohort_intake import history_tip
 from .competition_cohort_model_award import read_model_acceptances
 from .competition_cohort_order_signer import CohortOrderHistory
+from .competition_cohort_quality_migration import retained_quality_owner_operation
 from .competition_cohort_recovery import ModelRewardCohortAuthority, RecoverableCohortPlan
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_cohort_request_closure import CohortRequestClosure
@@ -122,6 +123,7 @@ class CohortSettlementService:
             "role": config.role,
             "proposer": identity(config.proposer_hotkey),
         }
+        self._quality_migration_binding = binding
         self.verification_reuse = VerificationReuse(
             promotion.directory / "verification" / digest(config.series) / "native",
             owner={
@@ -821,6 +823,7 @@ class CohortSettlementService:
         return "reviewing"
 
     @verification_owner_operation
+    @retained_quality_owner_operation
     async def maintain(self):
         self.provider.ensure_observer_running()
         history = await self._selected_history()
@@ -828,6 +831,7 @@ class CohortSettlementService:
         return await self._maintain_selected(history, state)
 
     @verification_owner_operation
+    @retained_quality_owner_operation
     async def tick(self) -> str:
         self.provider.ensure_observer_running()
         history = await self._selected_history()

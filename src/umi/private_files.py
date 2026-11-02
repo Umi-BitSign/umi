@@ -92,15 +92,29 @@ def _byte_bound(maximum_bytes: int | None) -> int:
     return maximum_bytes
 
 
-def _read_private_bytes(path: Path, *, maximum_bytes: int) -> bytes:
+def _read_private_bytes(
+    path: Path, *, maximum_bytes: int, workload_kind: str | None = None
+) -> bytes:
     maximum_bytes = _byte_bound(maximum_bytes)
-    return _read_bounded_private_bytes(path, maximum_bytes=maximum_bytes)
+    return _read_bounded_private_bytes(
+        path, maximum_bytes=maximum_bytes, workload_kind=workload_kind
+    )
 
 
-def _read_bounded_private_bytes(path: Path, *, maximum_bytes: int) -> bytes:
+def _read_bounded_private_bytes(
+    path: Path, *, maximum_bytes: int, workload_kind: str | None = None
+) -> bytes:
     """Read with a caller-validated capacity; all private file checks still apply."""
     private_path(str(path))
     ensure_private_directory(path.parent)
+    from .host_memory_workload_profile import (
+        WorkloadQualificationPending,
+        check_workload_input,
+        selected_workload,
+        trusted_workload_identity,
+    )
+
+    profile = selected_workload() if workload_kind is not None else None
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb") as stream:
         info = os.fstat(stream.fileno())
@@ -111,11 +125,46 @@ def _read_bounded_private_bytes(path: Path, *, maximum_bytes: int) -> bytes:
             or info.st_mode & 0o077
         ):
             raise ValueError("evaluator input must be an owned private regular file")
+        if profile is not None and info.st_size > getattr(
+            profile.bounds, "maximum_" + workload_kind + "_bytes"
+        ):
+            raise WorkloadQualificationPending("input_byte_bound", kind=workload_kind)
         if not 1 <= info.st_size <= maximum_bytes:
             raise ValueError("evaluator input exceeds its byte bound")
         raw = stream.read(maximum_bytes + 1)
+        if profile is not None:
+            fields = (
+                "st_dev",
+                "st_ino",
+                "st_uid",
+                "st_gid",
+                "st_mode",
+                "st_nlink",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+            before = tuple(getattr(info, field) for field in fields)
+            if any(
+                tuple(getattr(after, field) for field in fields) != before
+                for after in (os.fstat(stream.fileno()), path.lstat())
+            ):
+                raise WorkloadQualificationPending("input_identity_changed", kind=workload_kind)
     if len(raw) != info.st_size:
         raise ValueError("evaluator input must have stable canonical bytes")
+    if profile is not None:
+        check_workload_input(
+            raw,
+            workload_kind,
+            identity=trusted_workload_identity(
+                # Native stat timestamps exceed RFC 8785's exact integer
+                # domain. Decimal strings preserve every bit of the checked
+                # generation without converting through a lossy float.
+                "private-file-generation",
+                [str(path), tuple(str(n) for n in before)],
+                len(raw),
+            ),
+        )
     return raw
 
 
@@ -123,7 +172,9 @@ def read_private_model(
     path: Path, model: type[_Model], *, maximum_bytes: int | None = None
 ) -> _Model:
     raw = _read_private_bytes(
-        path, maximum_bytes=stage_limit("maximum_declaration_bytes", _byte_bound(maximum_bytes))
+        path,
+        maximum_bytes=stage_limit("maximum_declaration_bytes", _byte_bound(maximum_bytes)),
+        workload_kind="declaration",
     )
     charge_stage_declaration(len(raw))
     check_stage_json(raw, kind="declaration")

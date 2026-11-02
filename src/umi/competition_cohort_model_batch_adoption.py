@@ -17,6 +17,7 @@ from .competition_cohort_model_batch import (
 from .competition_execution import execution_boundary
 from .competition_work_progress import WorkProgress, work_heartbeats
 from .concurrency import run_owned_thread, wait_for_owned
+from .host_memory_runtime import memory_operation
 from .open_competition import Signature, digest, identity, verify_signature
 from .private_files import read_private_model
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -84,87 +85,85 @@ async def attest_model_batch_adoption(reviewer, request):
                 )
                 return vote
 
-            with (
-                work_heartbeats(),
-                WorkProgress(
-                    "model_batch_adoption_review",
-                    1,
-                    unit="adoptions",
-                    cohort=cohort,
-                    estimate=False,
-                    planning_range_seconds=(0, reviewer.config.signing_timeout_seconds),
-                    planning_basis="planning_current_authority_check_and_configured_signing_budget",
-                ) as progress,
+            return await _attest_model_batch_adoption_pending(reviewer, request, saved, directory)
+
+
+@memory_operation
+async def _attest_model_batch_adoption_pending(reviewer, request, saved, directory):
+    adoption, cohort = request.adoption, request.adoption.cohort_sha256
+    with (
+        work_heartbeats(),
+        WorkProgress(
+            "model_batch_adoption_review",
+            1,
+            unit="adoptions",
+            cohort=cohort,
+            estimate=False,
+            planning_range_seconds=(0, reviewer.config.signing_timeout_seconds),
+            planning_basis="planning_current_authority_check_and_configured_signing_budget",
+        ) as progress,
+    ):
+        if saved is None:
+            approved = await run_owned_thread(
+                partial(
+                    read_private_model,
+                    Path(directory) / (cohort + ".candidate.json"),
+                    ModelBatchAdoptionReviewRequest,
+                    maximum_bytes=64 * 1024,
+                )
+            )
+            if approved != request:
+                raise ValueError("model batch adoption differs from private operator selection")
+        source = await reviewer.history(cohort)
+        current = source.history
+        block = execution_boundary(await reviewer.capture()).block
+        view = verify_cohort_history(
+            current,
+            reviewer.policy,
+            expected_tip_sha256=history_tip(current),
+            current_block=block,
+        )
+        if view.state.phase != "intake" or adoption.effective_at_block > block:
+            raise ValueError("model batch adoption requires current intake authority")
+        original = current
+        if saved is not None:
+            raw = await run_owned_thread(
+                reviewer.journal.get, "model_batch_adoption_history", cohort
+            )
+            if raw is None:
+                raise ValueError("model batch adoption lost original history; repair required")
+            original = CohortRecoveryHistory.model_validate_json(canonical_json_bytes(raw))
+            prefix = current.model_copy(
+                update={"transitions": current.transitions[: len(original.transitions)]}
+            )
+            if digest(prefix) != digest(original) or (
+                len(current.transitions) > len(original.transitions)
+                and adoption.effective_at_block
+                > current.transitions[len(original.transitions)].transition.observed_at_block
             ):
-                if saved is None:
-                    approved = await run_owned_thread(
-                        partial(
-                            read_private_model,
-                            Path(directory) / (cohort + ".candidate.json"),
-                            ModelBatchAdoptionReviewRequest,
-                            maximum_bytes=64 * 1024,
-                        )
-                    )
-                    if approved != request:
-                        raise ValueError(
-                            "model batch adoption differs from private operator selection"
-                        )
-                source = await reviewer.history(cohort)
-                current = source.history
-                block = execution_boundary(await reviewer.capture()).block
-                view = verify_cohort_history(
-                    current,
-                    reviewer.policy,
-                    expected_tip_sha256=history_tip(current),
-                    current_block=block,
-                )
-                if view.state.phase != "intake" or adoption.effective_at_block > block:
-                    raise ValueError("model batch adoption requires current intake authority")
-                original = current
-                if saved is not None:
-                    raw = await run_owned_thread(
-                        reviewer.journal.get, "model_batch_adoption_history", cohort
-                    )
-                    if raw is None:
-                        raise ValueError(
-                            "model batch adoption lost original history; repair required"
-                        )
-                    original = CohortRecoveryHistory.model_validate_json(canonical_json_bytes(raw))
-                    prefix = current.model_copy(
-                        update={"transitions": current.transitions[: len(original.transitions)]}
-                    )
-                    if digest(prefix) != digest(original) or (
-                        len(current.transitions) > len(original.transitions)
-                        and adoption.effective_at_block
-                        > current.transitions[
-                            len(original.transitions)
-                        ].transition.observed_at_block
-                    ):
-                        raise ValueError("model batch adoption history rolled back or changed")
-                expected = prepare_model_batch_certification_adoption(
-                    original,
-                    reviewer.policy,
-                    expected_tip_sha256=adoption.predecessor_sha256,
-                    effective_at_block=adoption.effective_at_block,
-                )
-                if expected != adoption:
-                    raise ValueError("model batch adoption changes independently retained history")
-                await run_owned_thread(
-                    reviewer.journal.put_many,
-                    (
-                        ("model_batch_adoption_request", cohort, request),
-                        ("model_batch_adoption_history", cohort, original),
-                    ),
-                )
-                signature = await wait_for_owned(
-                    reviewer.sign(adoption), timeout=reviewer.config.signing_timeout_seconds
-                )
-                vote = ModelBatchAdoptionVote(adoption=adoption, signature=signature)
-                check_model_batch_adoption_vote(
-                    vote, request, reviewer.policy, signer=reviewer.config.signer
-                )
-                await run_owned_thread(
-                    reviewer.journal.put, "model_batch_adoption_vote", cohort, vote
-                )
-                progress.advance()
-                return vote
+                raise ValueError("model batch adoption history rolled back or changed")
+        expected = prepare_model_batch_certification_adoption(
+            original,
+            reviewer.policy,
+            expected_tip_sha256=adoption.predecessor_sha256,
+            effective_at_block=adoption.effective_at_block,
+        )
+        if expected != adoption:
+            raise ValueError("model batch adoption changes independently retained history")
+        await run_owned_thread(
+            reviewer.journal.put_many,
+            (
+                ("model_batch_adoption_request", cohort, request),
+                ("model_batch_adoption_history", cohort, original),
+            ),
+        )
+        signature = await wait_for_owned(
+            reviewer.sign(adoption), timeout=reviewer.config.signing_timeout_seconds
+        )
+        vote = ModelBatchAdoptionVote(adoption=adoption, signature=signature)
+        check_model_batch_adoption_vote(
+            vote, request, reviewer.policy, signer=reviewer.config.signer
+        )
+        await run_owned_thread(reviewer.journal.put, "model_batch_adoption_vote", cohort, vote)
+        progress.advance()
+        return vote

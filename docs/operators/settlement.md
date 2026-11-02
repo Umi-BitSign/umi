@@ -785,8 +785,21 @@ phase changes and restart, after their fresh authority and closure checks. This
 includes historical untimed results and prospective C8 timing results; it changes
 neither measured quality nor signed result bytes. Endpoint outcomes retain their
 current-history authorization context. Lost or damaged completed receipts report
-repair and rebuild only the affected outcome using retained lower-level proof
-verdicts; intact participant checkpoints remain reusable.
+repair; they do not silently become first scoring work. Intact participant
+checkpoints remain reusable.
+
+For retained untimed model results that predate the participant receipt,
+settlement maintenance and collection select the same owner's original journal
+binding, successful `closed_quality_collect_intent` and matching
+`closed_quality_certificate`. The native receipt path restores the exact outcome
+after checking its original inputs and existing execution receipts. This path
+does not recompute quality, replay proofs, create signatures or rewrite the
+retained journal. A remote certificate alone cannot establish this owner's
+completed work. Missing or conflicting local completion records, changed inputs,
+or missing lower-level receipts report the specific repair and retain completed
+work. This migration applies to untimed model results; explicit migration mode
+refuses unsupported contracts. Keep this compatibility reader while a supported
+settlement journal retains successful untimed results without outcome receipts.
 
 Install the compatible source through the supported selection path for settlement
 coordinators, independent reviewers and every reward-package consumer, including
@@ -5590,6 +5603,54 @@ references them. Retire their migration guidance only after the last such
 dependency is removed. A retained helper or qualification receipt does not
 require selecting that policy for an aggregate-budget upgrade.
 
+For a qualified host that must serialize native graph work with model inference,
+select `umi-host-execution-memory-admission/1` explicitly. This policy has exactly
+four slots: one owner export/preparation slot, one shared transient graph/model
+slot, and one retained slot for each of the two settlement replicas. All consumers
+select the same policy bytes and transaction lock. Keep export independent of
+transient work so a reviewer can fetch an export while holding its graph slot.
+The policy binds the protocol, evaluation runtime, workload profile, actual
+container roots and qualification. It permits a qualified minimum available
+memory of at least 4 GiB; it does not change the legacy `/2` policy's 24 GiB floor.
+The model's signed memory allowance remains required in full.
+
+Unfinished participant-admission review and model-artifact review use that same
+transient slot while retaining their existing signer and journal locks. A
+committed vote returns through its native retry path before taking a new grant
+or contacting the owner or RPC. The ordinary admission worker and model worker
+may select different records; observe a complete native operation when measuring
+a bounded intake canary, and let its owned work drain before ending the sample.
+
+The selected `umi-host-memory-workload-profile/1` binds the actual service role,
+protocol, evaluation runtime and optional exact series/authority pair. Its
+predecode limits cover JSON bytes, values, depth and record inventories. It also
+bounds queued HTTP bytes, simultaneous requests and preparation workers, since
+several decoded copies can coexist even when they refer to the same input.
+Per-account private count stores reuse authenticated unchanged input identities;
+they are separate from native proof receipts and do not change verdict keys.
+Exceeding the profile or losing a completed count is a pending capacity/repair
+condition, reported as retryable HTTP 503 where applicable. It is not a failed
+model score. A single-graph measurement does not qualify a concurrent batch.
+
+Every grant accounts for the other occupied slots, background allowance and
+surviving container ceilings. A populated model container whose lease has ended
+blocks the next shared transient grant even if memory is otherwise available.
+Admission reports this as waiting for native model-container cleanup; admission
+does not kill containers or infer ownership. The execution worker reconciles its
+exact retained attempts before current chain, phase and cache work, including
+after restart when their cohort has closed. Cleanup uses the original job lock
+and native sandbox ownership checks. Retain stopped/completed receipts so retry
+does not repeat cleanup.
+
+Adopting this policy requires a supported service/configuration handoff. Drain
+the old policy's users and surviving owned invocations before selecting a new
+namespace; a new unused slot does not fence an old consumer. Carry the selection
+through startup, memory-grant collectors, CPU timing and unattended recovery.
+Keep historical peaks as evidence. Any smaller prospective service liability
+must be bound to a qualified workload, exact source/configuration and enforced
+kernel ceiling; closing a lease does not prove that Python returned its pages.
+The model-only lane-expansion command cannot alter this four-slot policy.
+
 An explicitly selected stopped-writer upgrade can retain an older journal that
 contains only raw block inputs with no completed native results. Select
 `--preserve-unverified-original` on the root writer broker for that layout. It
@@ -5741,8 +5802,10 @@ selections, bounded history/vote/model/order buffers and future allocations that
 do not own a slot. Logical object release does not imply that Python returned its
 resident pages to the operating system.
 
-With host memory admission enabled, startup requires current available memory
-above the 24 GiB floor plus all slot reservations and background allowance.
+With the ordinary `/2` host memory policy enabled, startup requires current
+available memory above the 24 GiB floor plus all slot reservations and background
+allowance. The explicitly qualified joint policy uses its selected floor and the
+same full startup accounting.
 Each serialized grant rechecks
 current available memory against the floor, background allowance, candidate
 reservation and the full reservations of all occupied slots. This deliberately

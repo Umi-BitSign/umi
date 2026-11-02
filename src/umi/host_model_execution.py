@@ -27,6 +27,26 @@ _ACTIVE = ContextVar("host_model_execution_lease", default=None)
 _LOGGER = logging.getLogger("umi.competition.progress")
 
 
+def inherited_model_lease():
+    """A descendant still carries its parent's live capacity dependency."""
+    active = _ACTIVE.get()
+    if active is not None and not active[1].closed:
+        return active[1]
+    return None
+
+
+def current_task_model_lease():
+    """Return only this task's live invocation lease, never an inherited grant."""
+    lease = inherited_model_lease()
+    return (
+        lease
+        if lease is not None
+        and lease._creator_pid == os.getpid()
+        and _ACTIVE.get()[2] is asyncio.current_task()
+        else None
+    )
+
+
 def _report_admission(controller, *, lane, count, started, state):
     observation = controller.last_model_admission
     if observation is None:
@@ -50,6 +70,8 @@ def _report_admission(controller, *, lane, count, started, state):
                     eta_basis=(
                         "capacity_granted"
                         if state == "admitted"
+                        else "awaiting_native_model_container_cleanup"
+                        if observation.get("exclusive_orphan_hold", False)
                         else "awaiting_external_capacity_change"
                     ),
                     eta_scope="model_capacity_admission_only",
@@ -251,6 +273,11 @@ class ModelExecutionAdmission:
         self, runtime, *, exclusive=False, preparation=False, runtime_authorization=None
     ):
         self.check_runtime(runtime, runtime_authorization=runtime_authorization)
+        if self.controller.joint_execution_stage and not preparation:
+            from .host_memory_runtime import inherited_graph_lease
+
+            if inherited_graph_lease() is not None or inherited_model_lease() is not None:
+                raise RuntimeError("nested joint execution would wait on its own capacity")
         lane = "owner_export" if preparation else "transient"
         count = len(self.slots) if exclusive and not preparation else 1
         started = time.monotonic()
@@ -273,7 +300,10 @@ class ModelExecutionAdmission:
                     progress.emit(
                         "waiting",
                         reason=(
-                            "host_model_preparation_capacity"
+                            "native_model_container_cleanup"
+                            if self.controller.last_model_admission is not None
+                            and self.controller.last_model_admission.get("exclusive_orphan_hold")
+                            else "host_model_preparation_capacity"
                             if preparation
                             else "host_model_invocation_capacity"
                         ),

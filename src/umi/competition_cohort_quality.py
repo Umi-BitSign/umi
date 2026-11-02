@@ -23,6 +23,7 @@ from .competition_cohort_endpoint_quality import replay_endpoint_archive_quality
 from .competition_cohort_execution_journal import CohortExecutionAssignment
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
 from .competition_cohort_orders import recoverable_order_job
+from .competition_cohort_quality_migration import restore_closed_participant_quality
 from .competition_cohort_recovery import ModelRewardCohortAuthority
 from .competition_cohort_request_closure import (
     CohortRequestClosure,
@@ -360,7 +361,11 @@ class ClosedQualityReview:
         return result
 
 
-@verified_replay("closed_participant_quality_v1", ClosedParticipantQuality)
+@verified_replay(
+    "closed_participant_quality_v1",
+    ClosedParticipantQuality,
+    restore=restore_closed_participant_quality,
+)
 def _closed_participant_quality(
     member,
     round_,

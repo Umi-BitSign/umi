@@ -369,6 +369,9 @@ class RemoteIntakeProgressReviewer:
         )
         if type(raw) is not bytes or not 0 < len(raw) <= self.maximum_bytes:
             raise ValueError("intake response exceeds its byte bound")
+        from .host_memory_workload_profile import check_workload_input
+
+        check_workload_input(raw)
         signed = SignedIntakeReviewResponse.model_validate_json(raw)
         response, signature = signed.response, signed.signature
         if canonical_json_bytes(signed) != raw or identity(signature.hotkey) != self.owner:

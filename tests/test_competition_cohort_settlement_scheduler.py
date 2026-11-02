@@ -663,7 +663,7 @@ async def test_boot_memory_refusal_releases_service_descriptor(tmp_path, monkeyp
         maximum_package_bytes=4096,
         legacy_model_storage=(),
         model_delivery_adoptions=(),
-        policy=object(),
+        policy=SimpleNamespace(evaluation_runtime_sha256="original-runtime"),
     )
     monkeypatch.setattr(
         boot, "SettlementServiceConfig", SimpleNamespace(model_validate_json=lambda raw: config)

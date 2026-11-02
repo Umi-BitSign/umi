@@ -903,6 +903,103 @@ class CohortExecutionJournal:
                 )
             )
 
+    def retained_assignment_page(self, *, after="", limit=32):
+        """Bounded local recovery inventory, independent of current cohort phase."""
+        if type(limit) is not int or not 1 <= limit <= 32:
+            raise ValueError("invalid execution recovery inventory bound")
+        with self.journal.read_transaction() as db:
+            total = db.execute("SELECT COUNT(*) FROM records WHERE kind='assignment'").fetchone()[0]
+            slots = tuple(
+                row[0]
+                for row in db.execute(
+                    "SELECT id FROM records WHERE kind='assignment' AND id>? ORDER BY id LIMIT ?",
+                    (after, limit),
+                )
+            )
+        return slots, total
+
+    def pending_reconciliation_jobs(self):
+        """Small uncertain-head inventory before decoding any assignment graph."""
+        with self.journal.read_transaction(coordinated=True) as db:
+            rows = db.execute(
+                "SELECT h.attempt FROM execution_heads h "
+                "LEFT JOIN records r ON r.kind='result' AND r.id=h.attempt "
+                "WHERE r.id IS NULL LIMIT ?",
+                (self.config.maximum_attempts + 1,),
+            ).fetchall()
+            if len(rows) > self.config.maximum_attempts:
+                raise ValueError("retained cleanup attempt inventory exceeds its native bound")
+            copied = tuple(
+                (
+                    key,
+                    self.journal._copy_raw(db, "attempt", key, maximum_bytes=_STEP_RECORD_BYTES),
+                    self.journal._copy_raw(db, "stopped", key, maximum_bytes=1024),
+                )
+                for (key,) in rows
+            )
+        jobs = set()
+        for key, raw, raw_stopped in copied:
+            raw = self.journal._check_record_bytes(raw, "attempt")
+            attempt = CohortExecutionAttempt.model_validate_json(b"null" if raw is None else raw)
+            if digest(attempt) != key:
+                raise ValueError("retained cleanup attempt changed its identity")
+            raw_stopped = self.journal._check_record_bytes(raw_stopped, "stopped")
+            if raw_stopped is not None:
+                stopped = CohortStoppedAttempt.model_validate_json(raw_stopped)
+                if stopped.attempt_sha256 != key:
+                    raise ValueError("retained stopped attempt changed its invocation")
+                continue
+            jobs.add(attempt.job_sha256)
+        return jobs
+
+    def retained_job_sha256(self, slot):
+        return self._project_assignment(slot, lambda value: digest(value[1]))
+
+    def reconciliation_attempts(self, slot, pending_jobs=None):
+        """Exact retained authority for cleanup only; no current execution grant.
+
+        Call under the existing job lock. Successful result and stopped records
+        already establish native cleanup. Read only bounded attempt metadata;
+        neither historical step replay nor model/cache preparation is needed.
+        """
+        assignment, job = self.assignment_and_job(slot)
+        if pending_jobs is not None and digest(job) not in pending_jobs:
+            return assignment, job, ()
+        pending = []
+        with self.journal.read_transaction(coordinated=True) as db:
+            for index in range(step_count(job)):
+                key = execution_step_key(job, index)
+                row = db.execute(
+                    "SELECT attempt FROM execution_heads WHERE step=?", (key,)
+                ).fetchone()
+                if row is None:
+                    continue
+                if db.execute("SELECT 1 FROM records WHERE kind='result' AND id=?", row).fetchone():
+                    continue
+                pending.append(
+                    (
+                        index,
+                        row[0],
+                        self.journal._copy_raw(
+                            db, "attempt", row[0], maximum_bytes=_STEP_RECORD_BYTES
+                        ),
+                        self.journal._copy_raw(db, "stopped", row[0], maximum_bytes=1024),
+                    )
+                )
+        attempts = []
+        for index, key, raw_attempt, raw_stopped in pending:
+            attempt = self._checked_head(
+                job, index, key, self.journal._check_record_bytes(raw_attempt, "attempt")
+            )
+            raw_stopped = self.journal._check_record_bytes(raw_stopped, "stopped")
+            if raw_stopped is not None:
+                stopped = CohortStoppedAttempt.model_validate_json(raw_stopped)
+                if stopped.attempt_sha256 != key:
+                    raise ValueError("retained stopped attempt changed its invocation")
+            else:
+                attempts.append(attempt)
+        return assignment, job, tuple(attempts)
+
     def step(
         self, job: RecoverableExecutionJob, index: int, *, db=None, shared=None
     ) -> ExecutionStep | None:
@@ -1072,6 +1169,15 @@ class CohortExecutionJournal:
                 status="sandbox_stopped",
             ),
         )
+
+    def attempt_stopped(self, attempt: CohortExecutionAttempt) -> bool:
+        raw = self.journal.get_raw("stopped", digest(attempt))
+        if raw is None:
+            return False
+        stopped = CohortStoppedAttempt.model_validate_json(raw)
+        if stopped.attempt_sha256 != digest(attempt):
+            raise ValueError("retained stopped attempt changed its invocation")
+        return True
 
     def begin(
         self,

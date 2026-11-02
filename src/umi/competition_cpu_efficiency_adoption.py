@@ -21,6 +21,7 @@ from .competition_evaluation_runtime import (
 from .competition_execution import execution_boundary
 from .competition_work_progress import WorkProgress, work_heartbeats
 from .concurrency import run_owned_thread, wait_for_owned
+from .host_memory_runtime import memory_operation
 from .open_competition import Signature, digest, identity, verify_signature
 from .private_files import read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -119,60 +120,63 @@ async def attest_cpu_efficiency(reviewer, request):
                     vote, request, reviewer.policy, signer=reviewer.config.signer
                 )
                 return vote
-            with (
-                work_heartbeats(),
-                WorkProgress(
-                    "cpu_efficiency_adoption_review",
-                    1,
-                    unit="authorities",
-                    cohort=cohort,
-                    estimate=False,
-                    planning_range_seconds=(0, reviewer.config.signing_timeout_seconds),
-                    planning_basis="planning_current_authority_and_configured_signing_budget",
-                ) as progress,
-            ):
-                if saved is None:
-                    approved = await run_owned_thread(
-                        partial(
-                            read_private_model,
-                            Path(directory) / (slot + ".candidate.json"),
-                            CpuEfficiencyReviewRequest,
-                            maximum_bytes=MAX_CPU_ADOPTION_BYTES,
-                        )
-                    )
-                    if approved != request:
-                        raise ValueError("CPU adoption differs from private operator selection")
-                source = await reviewer.history(cohort)
-                current = source.history
-                block = execution_boundary(await reviewer.capture()).block
-                verify_cpu_efficiency_request(
-                    request, current, reviewer.policy, current_block=block
+            return await _attest_cpu_efficiency_pending(reviewer, request, saved, directory)
+
+
+@memory_operation
+async def _attest_cpu_efficiency_pending(reviewer, request, saved, directory):
+    body, cohort = request.adoption, request.anchor_cohort_sha256
+    slot = body.authority_sha256
+    with (
+        work_heartbeats(),
+        WorkProgress(
+            "cpu_efficiency_adoption_review",
+            1,
+            unit="authorities",
+            cohort=cohort,
+            estimate=False,
+            planning_range_seconds=(0, reviewer.config.signing_timeout_seconds),
+            planning_basis="planning_current_authority_and_configured_signing_budget",
+        ) as progress,
+    ):
+        if saved is None:
+            approved = await run_owned_thread(
+                partial(
+                    read_private_model,
+                    Path(directory) / (slot + ".candidate.json"),
+                    CpuEfficiencyReviewRequest,
+                    maximum_bytes=MAX_CPU_ADOPTION_BYTES,
                 )
-                original = current
-                if saved is not None:
-                    raw = await run_owned_thread(reviewer.journal.get, "cpu_adoption_history", slot)
-                    if raw is None:
-                        raise ValueError("CPU adoption lost original history; repair required")
-                    original = CohortRecoveryHistory.model_validate_json(canonical_json_bytes(raw))
-                    prefix = current.model_copy(
-                        update={"transitions": current.transitions[: len(original.transitions)]}
-                    )
-                    if digest(prefix) != digest(original):
-                        raise ValueError("CPU adoption history rolled back or changed")
-                await run_owned_thread(
-                    reviewer.journal.put_many,
-                    (
-                        ("cpu_adoption_request", slot, request),
-                        ("cpu_adoption_history", slot, original),
-                    ),
-                )
-                signature = await wait_for_owned(
-                    reviewer.sign(body), timeout=reviewer.config.signing_timeout_seconds
-                )
-                vote = CpuEfficiencyVote(adoption=body, signature=signature)
-                check_cpu_efficiency_vote(
-                    vote, request, reviewer.policy, signer=reviewer.config.signer
-                )
-                await run_owned_thread(reviewer.journal.put, "cpu_adoption_vote", slot, vote)
-                progress.advance()
-                return vote
+            )
+            if approved != request:
+                raise ValueError("CPU adoption differs from private operator selection")
+        source = await reviewer.history(cohort)
+        current = source.history
+        block = execution_boundary(await reviewer.capture()).block
+        verify_cpu_efficiency_request(request, current, reviewer.policy, current_block=block)
+        original = current
+        if saved is not None:
+            raw = await run_owned_thread(reviewer.journal.get, "cpu_adoption_history", slot)
+            if raw is None:
+                raise ValueError("CPU adoption lost original history; repair required")
+            original = CohortRecoveryHistory.model_validate_json(canonical_json_bytes(raw))
+            prefix = current.model_copy(
+                update={"transitions": current.transitions[: len(original.transitions)]}
+            )
+            if digest(prefix) != digest(original):
+                raise ValueError("CPU adoption history rolled back or changed")
+        await run_owned_thread(
+            reviewer.journal.put_many,
+            (
+                ("cpu_adoption_request", slot, request),
+                ("cpu_adoption_history", slot, original),
+            ),
+        )
+        signature = await wait_for_owned(
+            reviewer.sign(body), timeout=reviewer.config.signing_timeout_seconds
+        )
+        vote = CpuEfficiencyVote(adoption=body, signature=signature)
+        check_cpu_efficiency_vote(vote, request, reviewer.policy, signer=reviewer.config.signer)
+        await run_owned_thread(reviewer.journal.put, "cpu_adoption_vote", slot, vote)
+        progress.advance()
+        return vote
