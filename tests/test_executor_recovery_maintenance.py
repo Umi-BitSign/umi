@@ -4,11 +4,12 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
-
 from umi.competition_cohort_executor import CohortExecutionWorker
 
 
-@pytest.mark.parametrize("recovered,finished", [(False, False), (False, True), (True, False), (True, True)])
+@pytest.mark.parametrize(
+    "recovered,finished", [(False, False), (False, True), (True, False), (True, True)]
+)
 async def test_retirement_waits_for_recovery_and_drained_executions(recovered, finished):
     events = []
     worker = object.__new__(CohortExecutionWorker)
@@ -56,7 +57,9 @@ async def test_retirement_waits_for_recovery_and_drained_executions(recovered, f
     worker.source_priority_due = False
     worker._startup_resume = lambda: ()
     worker.inbox_reads = asyncio.Lock()
-    worker.executor = SimpleNamespace(journal=SimpleNamespace(journal=SimpleNamespace(transaction=transaction)))
+    worker.executor = SimpleNamespace(
+        journal=SimpleNamespace(journal=SimpleNamespace(transaction=transaction))
+    )
     worker.inbox = SimpleNamespace(assignments=assignments)
     active["retained"] = SimpleNamespace(done=lambda: finished, result=result)
 
