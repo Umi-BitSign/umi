@@ -173,6 +173,89 @@ def test_joint_runtime_keeps_native_verification_bounds_separate(joint):
         assert stage_bounds() is before is None
 
 
+async def test_public_intake_binds_actual_joint_runtime_and_bounds_each_asgi_root(
+    joint, provisioned, tmp_path, monkeypatch
+):
+    from pydantic import BaseModel
+
+    from umi import competition_service as service
+    from umi.host_memory_workload_profile import selected_workload
+
+    class Recovery(BaseModel):
+        authority: dict[str, str]
+
+    class Series(BaseModel):
+        recovery: Recovery
+
+    series = Series(recovery=Recovery(authority={"fixture": "actual-service-authority"}))
+    body = profile_body(tmp_path, digest(joint.policy), digest(joint.runtime))
+    body.update(series_sha256=digest(series), authority_sha256=digest(series.recovery.authority))
+    workload = write_profile(tmp_path / "actual-owner-profile.json", body)
+    policy = dict(joint.body, workload_profile=workload.model_dump(mode="json"))
+    selection = memory.HostMemoryAdmissionSelection(
+        policy_path=joint.selection.policy_path, policy_sha256=provisioned[3](policy)
+    )
+    owner = SimpleNamespace(
+        host_memory_admission=selection,
+        maximum_export_bytes=4 * GIB,
+        request_evidence_bytes=4 * GIB,
+        request_replay_bytes=4 * GIB,
+    )
+    config = SimpleNamespace(
+        recoverable_service=SimpleNamespace(admission_owner=owner, series=series)
+    )
+    monkeypatch.setattr(
+        service, "CompetitionServiceConfig", SimpleNamespace(model_validate_json=lambda _: config)
+    )
+    monkeypatch.setattr(service, "canonical_json_bytes", lambda _: b"{}")
+    entered, middleware, responses = [], [], []
+
+    class App:
+        def add_middleware(self, factory, **kwargs):
+            middleware.append(factory(self, **kwargs))
+
+        async def __call__(self, scope, receive, send):
+            assert selected_workload().sha256 == workload.sha256
+            assert memory.selected_memory().policy_sha256 == selection.policy_sha256
+            entered.append(scope["path"])
+            await send(dict(type="http.response.start", status=200, headers=[]))
+            await send(dict(type="http.response.body", body=b"ok"))
+
+    app = App()
+
+    def construct(*args, **kwargs):
+        assert selected_workload().sha256 == workload.sha256
+        return app
+
+    monkeypatch.setattr(service, "_create_intake_app", construct)
+    assert service.create_intake_app(config, joint.policy) is app
+    assert memory.selected_memory() is None and selected_workload() is None
+    assert len(middleware) == 1
+
+    async def receive():
+        pytest.fail("entry admission must happen before body reads")
+
+    async def send(value):
+        responses.append(value)
+
+    scope = dict(
+        type="http", method="POST", path="/native-intake", headers=[(b"content-length", b"0")]
+    )
+    await middleware[0](scope, receive, send)
+    assert entered == ["/native-intake"] and responses[0]["status"] == 200
+    responses.clear()
+    scope["headers"] = [
+        (
+            b"content-length",
+            str(workload_bytes := body["bounds"]["maximum_input_bytes"] + 1).encode(),
+        )
+    ]
+    assert workload_bytes > 0
+    await middleware[0](scope, receive, send)
+    assert entered == ["/native-intake"] and responses[0]["status"] == 503
+    assert selected_workload() is None and memory.selected_memory() is None
+
+
 @pytest.mark.parametrize("actual_runtime", [None, "f" * 64])
 def test_joint_runtime_requires_actual_configured_evaluation_identity(joint, actual_runtime):
     with (

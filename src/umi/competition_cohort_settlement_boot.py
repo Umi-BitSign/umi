@@ -174,6 +174,8 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
                 role="settlement",
                 protocol_policy_sha256=digest(config.policy),
                 evaluation_runtime_sha256=config.policy.evaluation_runtime_sha256,
+                series_sha256=digest(config.series),
+                authority_sha256=digest(config.series.recovery.authority),
             )
         )
         if memory is not None and {digest(p) for p in config.series.cohorts} != {

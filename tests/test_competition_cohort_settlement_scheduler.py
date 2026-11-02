@@ -658,7 +658,7 @@ async def test_boot_memory_refusal_releases_service_descriptor(tmp_path, monkeyp
 
     config = SimpleNamespace(
         state_directory=str(tmp_path),
-        series=object(),
+        series=SimpleNamespace(recovery=SimpleNamespace(authority=object())),
         host_memory_admission=object(),
         maximum_package_bytes=4096,
         legacy_model_storage=(),
@@ -681,6 +681,8 @@ async def test_boot_memory_refusal_releases_service_descriptor(tmp_path, monkeyp
 
     @contextmanager
     def refuse(*args, **kwargs):
+        assert kwargs["evaluation_runtime_sha256"] == "original-runtime"
+        assert kwargs["series_sha256"] == kwargs["authority_sha256"] == "original-series"
         raise OSError("qualified memory unavailable")
         yield
 
