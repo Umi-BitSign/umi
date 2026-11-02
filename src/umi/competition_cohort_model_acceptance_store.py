@@ -60,6 +60,7 @@ from .competition_model_transport_qualification import (
 )
 from .competition_store import AdmissionCapacityError
 from .concurrency import run_owned_thread
+from .host_productive_operation import productive_model_operation
 from .open_competition import digest, identity, model_content_digest
 from .private_files import publish_private_model
 from .protocol import canonical_json_bytes
@@ -697,6 +698,7 @@ class CohortModelAcceptances:
             raise AdmissionCapacityError("model acceptance needs additional durable capacity")
         db.execute(f"INSERT INTO {table} VALUES (?,?,?)", (cohort, submission, raw))
 
+    @productive_model_operation("model_preparation")
     def prepare(self, cohort, submission, inputs: ModelArtifactReviewInputs, capture):
         """Reserve a proposal after byte verification, before requesting any votes.
 
@@ -911,6 +913,7 @@ class CohortModelAcceptances:
             self._put(db, "cohort_model_acceptances", cohort, submission, publication)
         return publication
 
+    @productive_model_operation("model_export")
     def export(self, cohort, submission, destination: Path):
         """Publish certificate and original documents for replication, certificate last."""
         self.intake._allowed(cohort)

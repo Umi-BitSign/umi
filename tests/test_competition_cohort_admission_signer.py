@@ -129,9 +129,18 @@ async def test_two_independent_votes_form_a_native_admission_certificate(harness
 async def test_pending_admission_waits_for_shared_lane_and_committed_vote_bypasses_it(
     harness, provisioned, monkeypatch
 ):
+    from umi import competition_cohort_admission_signer as signing
     from umi import host_memory_runtime as memory
 
     worker = harness.worker()
+    completions = []
+
+    def completed(kind, *, inputs, result):
+        saved = worker.journal.load(inputs["slot"])
+        assert saved[4] == result
+        completions.append((kind, result))
+
+    monkeypatch.setattr(signing, "productive_operation_completed", completed)
     peer = selected(provisioned)
     busy = peer.try_acquire("transient")
     entered = asyncio.Event()
@@ -187,6 +196,7 @@ async def test_pending_admission_waits_for_shared_lane_and_committed_vote_bypass
         finally:
             busy.close()
     assert len(harness.calls) == 1 and not worker.serial.locked()
+    assert completions == [("admission_vote", vote)]
 
 
 async def test_completed_participation_review_reuses_metadata_after_restart(harness, monkeypatch):

@@ -43,6 +43,7 @@ from .competition_model_transport_qualification import (
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread, wait_for_owned
 from .host_memory_runtime import memory_operation
+from .host_productive_operation import productive_operation_completed
 from .open_competition import CompetitionPolicy, Hotkey, digest, identity
 from .private_files import Directory, publish_private_model, read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -425,6 +426,16 @@ class ModelArtifactReviewer:
         vote = ModelArtifactVote(acceptance=a, signature=signature)
         check_model_vote(vote, a, self.policy, signer=self.config.signer)
         await run_owned_thread(self.journal.put, "model_vote", slot, vote)
+        productive_operation_completed(
+            "model_vote",
+            inputs=dict(
+                cohort_sha256=a.cohort_sha256,
+                slot=slot,
+                intent_kind="model_intent",
+                journal_directory=str(self.config.directory),
+            ),
+            result=vote,
+        )
         return vote
 
     async def attest_batch(self, request):

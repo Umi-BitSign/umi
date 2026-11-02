@@ -31,6 +31,7 @@ from .competition_cohort_recovery import verify_recovery_quorum
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .concurrency import run_owned_thread, wait_for_owned
 from .host_memory_runtime import memory_operation
+from .host_productive_operation import productive_operation_completed
 from .open_competition import CompetitionPolicy, Signature, digest, identity
 from .protocol import canonical_json_bytes
 
@@ -159,7 +160,18 @@ class CohortAdmissionSigner:
             timeout=self.journal.config.signing_timeout_seconds,
         )
         vote = CohortAdmissionVote(admission=result.admission, signature=signature)
-        return await run_owned_thread(self.journal.commit, slot, vote)
+        committed = await run_owned_thread(self.journal.commit, slot, vote)
+        productive_operation_completed(
+            "admission_vote",
+            inputs=dict(
+                cohort_sha256=cohort,
+                slot=slot,
+                intent_kind="admission_intent",
+                journal_directory=str(self.journal.config.directory),
+            ),
+            result=committed,
+        )
+        return committed
 
 
 def certify_admission(

@@ -71,6 +71,7 @@ from .host_memory_runtime import (
     memory_operation,
     selected_memory,
 )
+from .host_productive_operation import productive_settlement_operation
 from .open_competition import Signature, digest, identity
 from .private_files import ensure_private_directory, publish_private_model, read_private_model
 from .protocol import canonical_json_bytes
@@ -822,6 +823,7 @@ class CohortSettlementService:
         self.reviewed_terminal_tip = state.tip_sha256
         return "reviewing"
 
+    @productive_settlement_operation
     @verification_owner_operation
     @retained_quality_owner_operation
     async def maintain(self):
@@ -830,6 +832,7 @@ class CohortSettlementService:
         state, _ = self.store.status(self.cohort)
         return await self._maintain_selected(history, state)
 
+    @productive_settlement_operation
     @verification_owner_operation
     @retained_quality_owner_operation
     async def tick(self) -> str:

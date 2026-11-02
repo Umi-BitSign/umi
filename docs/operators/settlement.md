@@ -5621,6 +5621,16 @@ or contacting the owner or RPC. The ordinary admission worker and model worker
 may select different records; observe a complete native operation when measuring
 a bounded intake canary, and let its owned work drain before ending the sample.
 
+Selected installed hosts emit `umi-native-productive-operation/1` only after a
+native admission/model vote is durably committed, an owner model preparation or
+export returns, or terminal settlement maintenance/tick succeeds. Events retain
+compact input/result identities and the selected workload profile; their `1/1`
+count means one completed operation. Qualification must bind the original
+journald cursor and trusted unit, invocation, PID and boot metadata to the actual
+selected source and launch. A self-reported source field, an old signed result,
+or a running process alone is not a fresh-operation witness. These events add no
+signing or proof checks and cannot establish full workload capacity by themselves.
+
 The selected `umi-host-memory-workload-profile/1` binds the actual service role,
 protocol, evaluation runtime and optional exact series/authority pair. Its
 predecode limits cover JSON bytes, values, depth and record inventories. It also
