@@ -315,7 +315,10 @@ async def test_retry_wrappers_preserve_boundary_and_original_cause(
 ):
     case = delivery_case
     cause = sqlite3.OperationalError("private provider URL and local path")
-    cause.sqlite_errorcode, cause.sqlite_errorname = getattr(sqlite3, "SQLITE_BUSY", 5), "SQLITE_BUSY"
+    cause.sqlite_errorcode, cause.sqlite_errorname = (
+        getattr(sqlite3, "SQLITE_BUSY", 5),
+        "SQLITE_BUSY",
+    )
     if stage == "receipt_lookup":
         monkeypatch.setattr(case.intake, "receipt", Mock(side_effect=cause))
     elif stage == "payload_prerequisite":
