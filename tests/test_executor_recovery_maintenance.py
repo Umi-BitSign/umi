@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
+
 from umi.competition_cohort_executor import CohortExecutionWorker
 
 
