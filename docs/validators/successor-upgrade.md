@@ -61,6 +61,14 @@ does not reserve all those lanes in advance or promise that all can run at once.
 Keep each model's signed memory limit, the separate preparation lane, host
 reserve, background allowance and bounded disk working set intact.
 
+A host selecting `umi-host-execution-memory-admission/1` shares one transient
+slot between native graph work and model inference. Its independent export and
+two retained settlement slots are part of the same qualified policy. The
+model-only lane-expansion command below refuses this selection; change it only
+through the supported whole-host configuration handoff. See
+[host memory admission](../operators/settlement.md#host-memory-admission) for
+orphan cleanup, restart and capacity requirements.
+
 Prepare a prospective policy using the qualified host interpreter:
 
 ```sh

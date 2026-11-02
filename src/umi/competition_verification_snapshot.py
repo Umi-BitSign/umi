@@ -41,6 +41,12 @@ from .host_memory_request_bounds import (
     stage_limit,
     stage_shape_identity,
 )
+from .host_memory_workload_profile import (
+    WorkloadQualificationPending,
+    check_workload_input,
+    selected_workload,
+    trusted_workload_identity,
+)
 from .open_competition import digest
 from .private_files import (
     PrivateStateBusyError,
@@ -182,6 +188,27 @@ class SnapshotPreparation(_Checksummed):
     inputs: tuple[SnapshotInput, ...]
 
 
+def _check_workload_envelope(record):
+    """Bound a checked native envelope without changing its verification key."""
+    if selected_workload() is None:
+        return
+    raw = record.envelope_json.encode("utf-8")
+    check_workload_input(
+        raw,
+        identity=trusted_workload_identity(
+            "native-package-envelope",
+            [
+                record.original_path,
+                record.original_stamp,
+                record.package_sha256,
+                record.semantics,
+                record.checksum,
+            ],
+            len(raw),
+        ),
+    )
+
+
 class _ConsumedObjects(Mapping):
     def __init__(self, collector):
         self.collector = collector
@@ -288,6 +315,8 @@ class VerifiedPackageSnapshot:
         path = self.store.object_path(key)
         try:
             current = _stamp(path, readonly=True)
+        except WorkloadQualificationPending:
+            raise
         except (OSError, ValueError) as error:
             raise VerificationSourceChanged("verified object needs restoration") from error
         if current != descriptor.stamp:
@@ -297,7 +326,9 @@ class VerifiedPackageSnapshot:
     def read(self, key):
         before = self.identity(key)
         raw = _read_bounded_private_bytes(
-            self.store.object_path(key), maximum_bytes=self.records[key].size
+            self.store.object_path(key),
+            maximum_bytes=self.records[key].size,
+            workload_kind="object",
         )
         if self.identity(key) != before:
             raise VerificationSourceChanged("verified object changed while reading")
@@ -332,6 +363,8 @@ class VerifiedPackageSnapshot:
                 ).sealed()
                 _atomic(shape_path, canonical_json_bytes(descriptor))
                 remember_metadata_completion(shape_path)
+            except WorkloadQualificationPending:
+                raise
             except (OSError, ValueError) as error:
                 raise VerificationSnapshotRepairRequired(
                     "retained shape verification needs repair"
@@ -401,6 +434,8 @@ class VerificationPackageStore:
                     and value.metadata_key == expected_metadata.stem
                 ):
                     unrelated.add(expected_metadata.name)
+            except WorkloadQualificationPending:
+                raise
             except (OSError, ValueError):
                 continue
         return tuple(item for item in self.directory.glob("*.json") if item.name not in unrelated)
@@ -457,6 +492,8 @@ class VerificationPackageStore:
         raw = canonical_json_bytes(selection.sealed())
         try:
             unchanged = read_verification_metadata(target) == raw
+        except WorkloadQualificationPending:
+            raise
         except (OSError, ValueError):
             unchanged = False
         if not unchanged:
@@ -478,6 +515,7 @@ class VerificationPackageStore:
             or (expected is not None and record.package_sha256 != expected)
         ):
             raise VerificationSnapshotRepairRequired("verification snapshot identity changed")
+        _check_workload_envelope(record)
         package = model.model_validate_json(record.envelope_json)
         snapshot = VerifiedPackageSnapshot(self, record, package, issuer=_ISSUER)
         with WorkProgress(
@@ -541,6 +579,8 @@ class VerificationPackageStore:
                         if prior.original_path == str(path):
                             known_source = True
                             break
+                except WorkloadQualificationPending:
+                    raise
                 except (OSError, ValueError) as damaged:
                     _event("verification_snapshot", "repair_required")
                     raise VerificationSnapshotRepairRequired(
@@ -621,6 +661,8 @@ class VerificationPackageStore:
         except PrivateStateBusyError:
             _event("verification_snapshot", "retrying")
             raise
+        except WorkloadQualificationPending:
+            raise
         except (OSError, ValueError) as error:
             _event("verification_snapshot", "repair_required")
             if isinstance(error, VerificationSnapshotRepairRequired):
@@ -640,6 +682,8 @@ class VerificationPackageStore:
             expected_metadata, _ = self._paths(original, prior.original_stamp)
             if original != path or prior.metadata_key != expected_metadata.stem:
                 raise ValueError("repair source binding changed its original")
+        except WorkloadQualificationPending:
+            raise
         except (OSError, ValueError):
             prior = None
         if prior is not None and prior.package_sha256 is not None:
@@ -665,6 +709,8 @@ class VerificationPackageStore:
                     ):
                         continue
                     identities.add(record.package_sha256)
+                except WorkloadQualificationPending:
+                    raise
                 except (OSError, ValueError):
                     # These records are being explicitly repaired. A separate
                     # surviving native binding can still recover their identity.
@@ -943,6 +989,8 @@ class VerificationPackageStore:
                 or prepared.original_stamp != current
             ):
                 raise ValueError("package preparation identity changed")
+        except WorkloadQualificationPending:
+            raise
         except (OSError, ValueError) as error:
             if not repair and (preparation.exists() or metadata_completion(preparation).exists()):
                 raise VerificationSnapshotRepairRequired(
@@ -957,6 +1005,7 @@ class VerificationPackageStore:
             _event("verification_snapshot_prepare", "hit", len(prepared.inputs))
         if expected is not None and prepared.package_sha256 != expected:
             raise ValueError("prepared package differs from independently selected identity")
+        _check_workload_envelope(prepared)
         envelope = model.model_validate_json(prepared.envelope_json)
         item_model = get_args(model.model_fields["objects"].annotation)[0]
         records = []
@@ -974,6 +1023,8 @@ class VerificationPackageStore:
                     ).checked()
                     if prior.key != item.key or prior.stamp != _stamp(destination, readonly=True):
                         raise ValueError("verified object identity changed")
+                except WorkloadQualificationPending:
+                    raise
                 except (OSError, ValueError) as error:
                     if not repair and (
                         descriptor_path.exists() or metadata_completion(descriptor_path).exists()
@@ -1007,6 +1058,8 @@ class VerificationPackageStore:
                             or shaped.shape_bounds != stage_shape_identity()
                         ):
                             raise ValueError("retained shape changed its original identity")
+                    except WorkloadQualificationPending:
+                        raise
                     except (OSError, ValueError) as error:
                         if not repair and (
                             shape_path.exists() or metadata_completion(shape_path).exists()
@@ -1017,7 +1070,9 @@ class VerificationPackageStore:
                     else:
                         records.append(shaped)
                         continue
-                    raw = _read_bounded_private_bytes(destination, maximum_bytes=prior.size)
+                    raw = _read_bounded_private_bytes(
+                        destination, maximum_bytes=prior.size, workload_kind="object"
+                    )
                     if _stamp(destination, readonly=True) != prior.stamp:
                         raise VerificationSourceChanged("object changed during shape verification")
                 else:
@@ -1039,6 +1094,16 @@ class VerificationPackageStore:
                         if len(member_raw) != item.size or _stamp(path) != current:
                             raise VerificationSourceChanged(
                                 "source changed during object restoration"
+                            )
+                        if selected_workload() is not None:
+                            check_workload_input(
+                                member_raw,
+                                "object",
+                                identity=trusted_workload_identity(
+                                    "native-package-member-slice",
+                                    [str(path), current, item.key, item.offset, item.size],
+                                    len(member_raw),
+                                ),
                             )
                         member = item_model.model_validate_json(member_raw)
                     if member.sha256 != item.key:

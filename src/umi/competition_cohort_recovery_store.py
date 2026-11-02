@@ -34,6 +34,7 @@ from .competition_cohort_recovery import (
     verify_recovery_quorum,
 )
 from .host_memory_request_bounds import check_stage_json
+from .host_memory_workload_profile import check_workload_input
 from .open_competition import CompetitionPolicy, Signature, digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -78,6 +79,7 @@ def _decode(model: type[_Record], raw: bytes, maximum: int) -> _Record:
     if type(raw) is not bytes or not 0 < len(raw) <= maximum:
         raise ValueError("cohort recovery record exceeds its byte bound")
     check_stage_json(raw, kind="declaration")
+    check_workload_input(raw, "declaration")
     value = model.model_validate_json(raw)
     if canonical_json_bytes(value) != raw:
         raise ValueError("cohort recovery record is not canonical")

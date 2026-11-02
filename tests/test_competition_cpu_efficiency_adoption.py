@@ -49,6 +49,7 @@ from .test_competition_cpu_efficiency_policy import (
 from .test_competition_cpu_efficiency_policy import (
     scenario as scenario,
 )
+from .test_host_memory_admission import provisioned as provisioned
 from .test_open_competition import wallet
 
 
@@ -138,6 +139,36 @@ async def test_completed_cpu_vote_reuses_original_without_candidate_history_or_r
     c.state.online = False
     assert await attest_cpu_efficiency(restarted, c.request) == vote
     assert len(c.state.votes) == 1
+
+
+async def test_cpu_adoption_uses_native_memory_lane_and_completed_vote_needs_no_grant(
+    cpu_review, provisioned, monkeypatch
+):
+    import asyncio
+
+    from umi import host_memory_runtime as memory
+
+    from .test_host_memory_admission import selected
+    from .test_host_memory_runtime import bind
+
+    c = cpu_review
+    reviewer = c.create("Charlie", approve=True)
+    original = reviewer.history
+
+    async def history(cohort):
+        assert memory._active.get() is not None
+        return await original(cohort)
+
+    monkeypatch.setattr(reviewer, "history", history)
+    with bind(provisioned):
+        vote = await reviewer.attest_cpu_efficiency(c.request)
+        busy = selected(provisioned).try_acquire("transient")
+        assert busy is not None
+        try:
+            c.state.online = False
+            assert await asyncio.wait_for(reviewer.attest_cpu_efficiency(c.request), 5) == vote
+        finally:
+            busy.close()
 
 
 async def test_cpu_vote_resumes_reserved_intent_and_refuses_another_request(cpu_review):

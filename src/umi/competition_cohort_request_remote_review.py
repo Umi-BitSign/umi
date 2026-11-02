@@ -121,6 +121,9 @@ class RemoteRequestProgressReviewer:
         ) as validation:
             if type(raw) is not bytes or not 0 < len(raw) <= self.maximum_bytes:
                 raise ValueError("request response exceeds its byte bound")
+            from .host_memory_workload_profile import check_workload_input
+
+            check_workload_input(raw)
             check_stage_json(raw)
             validation.advance()
             signed = SignedRequestReviewResponse.model_validate_json(raw)

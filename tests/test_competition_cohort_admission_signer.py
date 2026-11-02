@@ -46,6 +46,9 @@ from .test_competition_cohort_recovery import recovery as recovery
 from .test_competition_cohort_recovery import signatures, signed_transition
 from .test_competition_historical_registration import archive as archive
 from .test_competition_historical_registration import change_block
+from .test_host_memory_admission import provisioned as provisioned
+from .test_host_memory_admission import selected
+from .test_host_memory_runtime import bind
 from .test_open_competition import policy as policy
 from .test_open_competition import wallet
 
@@ -121,6 +124,79 @@ async def test_two_independent_votes_form_a_native_admission_certificate(harness
         certify_admission(votes[:1], h.archive.chain.policy)
     with pytest.raises(ValueError, match="unique"):
         certify_admission([votes[0], votes[0]], h.archive.chain.policy)
+
+
+async def test_pending_admission_waits_for_shared_lane_and_committed_vote_bypasses_it(
+    harness, provisioned, monkeypatch
+):
+    from umi import competition_cohort_admission_signer as signing
+    from umi import host_memory_runtime as memory
+
+    worker = harness.worker()
+    completions = []
+
+    def completed(kind, *, inputs, result):
+        saved = worker.journal.load(inputs["slot"])
+        assert saved[4] == result
+        completions.append((kind, result))
+
+    monkeypatch.setattr(signing, "productive_operation_completed", completed)
+    peer = selected(provisioned)
+    busy = peer.try_acquire("transient")
+    entered = asyncio.Event()
+    original_history, original_sign, original_commit = (
+        worker.history,
+        worker.sign,
+        worker.journal.commit,
+    )
+
+    async def history(cohort):
+        assert memory.current_task_graph_lease() is not None
+        assert worker.serial.locked()
+        entered.set()
+        return await original_history(cohort)
+
+    async def sign(admission):
+        # Owned signing runs in a child task but remains within the parent's
+        # lease lifetime, and cannot independently acquire the same slot.
+        assert memory.inherited_graph_lease() is not None
+        assert peer.try_acquire("transient") is None
+        return await original_sign(admission)
+
+    def commit(*args):
+        assert memory.inherited_graph_lease() is not None
+        assert peer.try_acquire("transient") is None
+        return original_commit(*args)
+
+    monkeypatch.setattr(worker, "history", history)
+    monkeypatch.setattr(worker, "sign", sign)
+    monkeypatch.setattr(worker.journal, "commit", commit)
+    with bind(provisioned):
+        task = asyncio.create_task(worker.attest(harness.raw))
+        try:
+            for _ in range(100):
+                if worker.serial.locked():
+                    break
+                await asyncio.sleep(0)
+            assert worker.serial.locked() and not entered.is_set()
+        finally:
+            busy.close()
+        vote = await asyncio.wait_for(task, 5)
+        assert entered.is_set()
+        busy = peer.try_acquire("transient")
+        assert busy is not None
+
+        async def forbidden(*args):
+            pytest.fail("committed admission accessed fresh history or signing")
+
+        monkeypatch.setattr(worker, "history", forbidden)
+        monkeypatch.setattr(worker, "sign", forbidden)
+        try:
+            assert await asyncio.wait_for(worker.attest(harness.raw), 5) == vote
+        finally:
+            busy.close()
+    assert len(harness.calls) == 1 and not worker.serial.locked()
+    assert completions == [("admission_vote", vote)]
 
 
 async def test_completed_participation_review_reuses_metadata_after_restart(harness, monkeypatch):

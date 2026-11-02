@@ -40,7 +40,7 @@ from .competition_store import (
     CompetitionStore,
     HistoricalIntakeArchiveBinding,
 )
-from .host_memory_runtime import RequestsStageASGIBinding, memory_runtime
+from .host_memory_runtime import RequestsStageASGIBinding, WorkloadASGIBinding, memory_runtime
 from .open_competition import CompetitionPolicy, Hex32, RegistrationSnapshot, digest
 from .policy import umi_source_tree_sha256
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -178,6 +178,7 @@ def create_intake_app(config, policy, *, provider_factory=None) -> FastAPI:
         owner.host_memory_admission,
         role="intake",
         protocol_policy_sha256=digest(policy),
+        evaluation_runtime_sha256=policy.evaluation_runtime_sha256,
         series_sha256=digest(service.series),
         authority_sha256=digest(service.series.recovery.authority),
         maximum_aggregate_bytes=max(
@@ -187,6 +188,8 @@ def create_intake_app(config, policy, *, provider_factory=None) -> FastAPI:
         app = _create_intake_app(config, policy, provider_factory=provider_factory)
         if controller.requests_stage:
             app.add_middleware(RequestsStageASGIBinding, controller=controller)
+        if controller.joint_execution_stage:
+            app.add_middleware(WorkloadASGIBinding, controller=controller)
         return app
 
 

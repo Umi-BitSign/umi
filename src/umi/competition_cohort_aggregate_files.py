@@ -14,7 +14,7 @@ _Model = TypeVar("_Model", bound=BaseModel)
 
 def read_aggregate_model(path: Path, model: type[_Model], *, maximum_bytes: int) -> _Model:
     raw = _read_bounded_private_bytes(
-        path, maximum_bytes=check_aggregate_evidence_bytes(maximum_bytes)
+        path, maximum_bytes=check_aggregate_evidence_bytes(maximum_bytes), workload_kind="input"
     )
     value = model.model_validate_json(raw)
     if not canonical_json_matches(value, raw):

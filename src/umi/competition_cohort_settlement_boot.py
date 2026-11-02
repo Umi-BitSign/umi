@@ -172,6 +172,10 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
                 config.host_memory_admission,
                 maximum_aggregate_bytes=config.maximum_package_bytes,
                 role="settlement",
+                protocol_policy_sha256=digest(config.policy),
+                evaluation_runtime_sha256=config.policy.evaluation_runtime_sha256,
+                series_sha256=digest(config.series),
+                authority_sha256=digest(config.series.recovery.authority),
             )
         )
         if memory is not None and {digest(p) for p in config.series.cohorts} != {

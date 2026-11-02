@@ -42,6 +42,8 @@ from .competition_model_transport_qualification import (
 )
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread, wait_for_owned
+from .host_memory_runtime import memory_operation
+from .host_productive_operation import productive_operation_completed
 from .open_competition import CompetitionPolicy, Hotkey, digest, identity
 from .private_files import Directory, publish_private_model, read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -237,6 +239,14 @@ class ModelArtifactReviewer:
 
     async def repair_transport_qualification(self, cohort, submission, *, reason: str, report=None):
         """Restore only transport metadata using original retained review inputs."""
+        async with self.serial:
+            with self.journal.locked():
+                return await self._repair_transport_pending(
+                    cohort, submission, reason=reason, report=report
+                )
+
+    @memory_operation
+    async def _repair_transport_pending(self, cohort, submission, *, reason, report):
 
         def repair():
             slot = cohort + ":" + submission
@@ -271,9 +281,7 @@ class ModelArtifactReviewer:
                 report=report,
             )
 
-        async with self.serial:
-            with self.journal.locked():
-                return await run_owned_thread(repair)
+        return await run_owned_thread(repair)
 
     async def _review_inputs(self, request, *, verified_snapshot=None):
         """Perform the original independent artifact checks without signing."""
@@ -390,22 +398,45 @@ class ModelArtifactReviewer:
                         raise ValueError("model vote lacks its original intent")
                     vote = ModelArtifactVote.model_validate(vote)
                     check_model_vote(vote, a, self.policy, signer=self.config.signer)
-                    await run_owned_thread(self._qualify_transport, a)
+                    if a.direct_artifact is not None:
+                        await self._qualify_retained_transport(a)
                     return vote
-                if saved is None:
-                    intent = await self._review_inputs(request)
-                source = await self.history(a.cohort_sha256)
-                block = execution_boundary(await self.capture()).block
-                self._validate(request, source.history, block)
-                await run_owned_thread(self._reserve, request, intent, source.history)
-                await run_owned_thread(self._qualify_transport, a, source.history)
-                signature = await wait_for_owned(
-                    self.sign(a), timeout=self.config.signing_timeout_seconds
-                )
-                vote = ModelArtifactVote(acceptance=a, signature=signature)
-                check_model_vote(vote, a, self.policy, signer=self.config.signer)
-                await run_owned_thread(self.journal.put, "model_vote", slot, vote)
-                return vote
+                return await self._attest_pending(request, slot, intent)
+
+    @memory_operation
+    async def _qualify_retained_transport(self, acceptance):
+        # A committed direct-model vote can still load its original history to
+        # qualify transport. Keep that graph inside the native transient lane.
+        await run_owned_thread(self._qualify_transport, acceptance)
+
+    @memory_operation
+    async def _attest_pending(self, request, slot, intent):
+        # The caller owns the signer lock. Acquire once for the complete native
+        # operation; owner exports have their separate lane and all child work
+        # drains before this compact vote releases the graph reservation.
+        a = request.acceptance
+        if intent is None:
+            intent = await self._review_inputs(request)
+        source = await self.history(a.cohort_sha256)
+        block = execution_boundary(await self.capture()).block
+        self._validate(request, source.history, block)
+        await run_owned_thread(self._reserve, request, intent, source.history)
+        await run_owned_thread(self._qualify_transport, a, source.history)
+        signature = await wait_for_owned(self.sign(a), timeout=self.config.signing_timeout_seconds)
+        vote = ModelArtifactVote(acceptance=a, signature=signature)
+        check_model_vote(vote, a, self.policy, signer=self.config.signer)
+        await run_owned_thread(self.journal.put, "model_vote", slot, vote)
+        productive_operation_completed(
+            "model_vote",
+            inputs=dict(
+                cohort_sha256=a.cohort_sha256,
+                slot=slot,
+                intent_kind="model_intent",
+                journal_directory=str(self.config.directory),
+            ),
+            result=vote,
+        )
+        return vote
 
     async def attest_batch(self, request):
         return await attest_model_batch(self, request)

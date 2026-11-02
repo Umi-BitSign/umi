@@ -67,6 +67,7 @@ from .config import Limits
 from .host_memory_runtime import (
     HostMemoryAdmissionSelection,
     RequestsStageASGIBinding,
+    WorkloadASGIBinding,
     memory_runtime,
     requests_stage_policy,
     selected_memory,
@@ -186,6 +187,7 @@ async def admission_owner_app(
                 c.host_memory_admission,
                 role="intake",
                 protocol_policy_sha256=digest(intake.policy),
+                evaluation_runtime_sha256=intake.policy.evaluation_runtime_sha256,
                 series_sha256=None if service_host is None else digest(service_host.config.series),
                 authority_sha256=None
                 if service_host is None
@@ -273,6 +275,8 @@ async def admission_owner_app(
             app.add_middleware(
                 RequestsStageASGIBinding, controller=selected_memory(), private_role="intake"
             )
+        elif getattr(selected_memory(), "workload_profile", None) is not None:
+            app.add_middleware(WorkloadASGIBinding, controller=selected_memory())
         operator_tokens = []
         if lifecycle is not None and lifecycle.config.request_tail_operator_token_file is not None:
             operator_token = _token(lifecycle.config.request_tail_operator_token_file)

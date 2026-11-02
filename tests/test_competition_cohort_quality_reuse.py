@@ -9,7 +9,11 @@ import pytest
 from umi import competition_cohort_quality as quality
 from umi import competition_cohort_request_terminal as terminals
 from umi.competition_cohort_quality_signing import review_quality_manifest
-from umi.competition_verification_reuse import VerificationReuse, VerificationSourceChanged
+from umi.competition_verification_reuse import (
+    VerificationReceiptUnavailable,
+    VerificationReuse,
+    VerificationSourceChanged,
+)
 from umi.competition_verification_snapshot import VerifiedPackageSnapshot
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
@@ -190,22 +194,16 @@ async def test_damaged_completed_outcome_reports_repair_and_preserves_other_item
     else:
         paths[lost].write_bytes(b"damaged")
     caplog.set_level("INFO", logger="umi.competition.progress")
-    native = quality.replay_archived_execution
-    repaired = []
-
-    def counted(job, *args, **kwargs):
-        repaired.append(digest(job.submission.submission))
-        return native(job, *args, **kwargs)
-
-    monkeypatch.setattr(quality, "replay_archived_execution", counted)
+    monkeypatch.setattr(quality, "replay_archived_execution", fail_repeat)
+    monkeypatch.setattr(quality, "quality_totals", fail_repeat)
     monkeypatch.setattr(terminals, "replay_execution_steps", fail_repeat)
     monkeypatch.setattr(terminals, "replay_shared_incumbent_steps", fail_repeat)
     with VerificationReuse(root, owner="validator").selected():
-        assert (
-            review_quality_manifest(benchmark, reviewer(b, objects=reopen().collector(MAXIMUM)))
-            == expected
-        )
-    assert set(repaired) == {lost} and paths[intact].read_bytes() == intact_bytes
+        fresh = reviewer(b, objects=reopen().collector(MAXIMUM))
+        with pytest.raises(VerificationReceiptUnavailable, match="repair"):
+            fresh.outcome(lost)
+        assert fresh.outcome(intact) == next(r for r in expected if r.submission_sha256 == intact)
+    assert paths[intact].read_bytes() == intact_bytes
     events = [
         json.loads(record.message) for record in caplog.records if record.message.startswith("{")
     ]

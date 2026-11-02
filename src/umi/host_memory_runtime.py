@@ -7,6 +7,7 @@ is no implicit reentrancy or sharing between concurrent children.
 
 from __future__ import annotations
 
+import asyncio
 import traceback
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
@@ -20,6 +21,12 @@ from .competition_cohort_public_progress import is_cached_cohort_progress_reques
 from .concurrency import run_owned_thread
 from .host_memory_admission import HostMemoryAdmission, HostMemoryLease, _absolute
 from .host_memory_request_bounds import stage_evidence_budget
+from .host_memory_workload_profile import (
+    WorkloadQualificationPending,
+    load_workload_profile,
+    workload_input_budget,
+    workload_runtime,
+)
 from .protocol import StrictProtocolModel
 
 
@@ -41,6 +48,33 @@ _selected: ContextVar[HostMemoryAdmission | None] = ContextVar(
 
 
 _active: ContextVar[HostMemoryLease | None] = ContextVar("host_memory_operation", default=None)
+_active_task: ContextVar[asyncio.Task | None] = ContextVar(
+    "host_memory_operation_task", default=None
+)
+
+
+def current_task_graph_lease():
+    """Only the task that acquired a graph lease owns its cross-kind lifetime."""
+    lease = _active.get()
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        return None
+    return lease if lease is not None and not lease.closed and task is _active_task.get() else None
+
+
+def inherited_graph_lease():
+    """A descendant cannot wait for capacity its awaiting parent still owns."""
+    lease = _active.get()
+    return lease if lease is not None and not lease.closed else None
+
+
+def _check_model_nesting(controller):
+    if getattr(controller, "joint_execution_stage", False):
+        from .host_model_execution import inherited_model_lease
+
+        if inherited_model_lease() is not None:
+            raise RuntimeError("graph operation cannot acquire its own active model capacity")
 
 
 def selected_memory() -> HostMemoryAdmission | None:
@@ -54,6 +88,7 @@ def memory_runtime(
     maximum_aggregate_bytes: int,
     role=None,
     protocol_policy_sha256=None,
+    evaluation_runtime_sha256=None,
     series_sha256=None,
     authority_sha256=None,
 ):
@@ -69,13 +104,33 @@ def memory_runtime(
         host_identity_path=Path(selection.host_identity_path),
     )
     controller.bind_runtime(role, protocol_policy_sha256, series_sha256, authority_sha256)
+    if (
+        getattr(controller, "joint_execution_stage", False)
+        and evaluation_runtime_sha256 != controller.policy.evaluation_runtime_sha256
+    ):
+        raise ValueError("host workload differs from the actual evaluation runtime")
+    controller.workload_profile = (
+        load_workload_profile(
+            controller.policy.workload_profile,
+            dict(
+                role=role,
+                protocol_policy_sha256=protocol_policy_sha256,
+                evaluation_runtime_sha256=evaluation_runtime_sha256,
+                series_sha256=series_sha256,
+                authority_sha256=authority_sha256,
+            ),
+        )
+        if getattr(controller, "joint_execution_stage", False)
+        else None
+    )
     if maximum_aggregate_bytes > controller.policy.maximum_aggregate_bytes:
         raise ValueError("host aggregate limit exceeds its qualified admission policy")
     if previous is not None and previous.policy_sha256 != controller.policy_sha256:
         raise ValueError("nested host runtime changes its selected memory policy")
     token = _selected.set(controller)
     try:
-        yield controller
+        with workload_runtime(controller.workload_profile):
+            yield controller
     finally:
         _selected.reset(token)
 
@@ -175,6 +230,7 @@ def memory_operation(function=None, *, operation=None, scope=None, requests_stag
         )
         if getattr(controller, "requests_stage", False):
             controller.authorize(operation, **selected_scope, lane="transient")
+        _check_model_nesting(controller)
         inherited = _active.get()
         if inherited is not None and not inherited.closed:
             raise RuntimeError("nested host memory operation would wait on its own capacity")
@@ -184,14 +240,16 @@ def memory_operation(function=None, *, operation=None, scope=None, requests_stag
             else controller.acquire("transient")
         )
         token = _active.set(lease)
+        task_token = _active_task.set(asyncio.current_task())
         failure = None
         try:
-            with stage_evidence_budget():
+            with stage_evidence_budget(), workload_input_budget():
                 return await function(*args, **kwargs)
         except BaseException as error:
             failure = compact_memory_error(error)
         finally:
             lease.close()
+            _active_task.reset(task_token)
             _active.reset(token)
         raise failure from None
 
@@ -214,6 +272,7 @@ async def memory_operation_context(*, operation, cohort=None, phase=None):
     selected_scope = {"cohort": cohort, "phase": phase}
     if getattr(controller, "requests_stage", False):
         controller.authorize(operation, **selected_scope, lane="transient")
+    _check_model_nesting(controller)
     inherited = _active.get()
     if inherited is not None and not inherited.closed:
         raise RuntimeError("nested host memory operation would wait on its own capacity")
@@ -223,11 +282,13 @@ async def memory_operation_context(*, operation, cohort=None, phase=None):
         else controller.acquire("transient")
     )
     token = _active.set(lease)
+    task_token = _active_task.set(asyncio.current_task())
     try:
-        with stage_evidence_budget():
+        with stage_evidence_budget(), workload_input_budget():
             yield
     finally:
         lease.close()
+        _active_task.reset(task_token)
         _active.reset(token)
 
 
@@ -281,7 +342,8 @@ def bind_memory_controller(controller):
         raise ValueError("entry point changes its selected memory policy")
     token = _selected.set(controller)
     try:
-        yield
+        with workload_runtime(getattr(controller, "workload_profile", None)):
+            yield
     finally:
         _selected.reset(token)
 
@@ -344,3 +406,101 @@ class RequestsStageASGIBinding:
                 await send({"type": "http.response.body", "body": body})
                 return
             await self.app(scope, receive, send)
+
+
+class WorkloadASGIBinding:
+    """Propagate the selected profile and bound whole request graph lifetimes.
+
+    Admission happens before the first body read. One service-wide counter covers
+    every route, including parsed requests awaiting the shared native graph slot.
+    A response keeps its reservation until the downstream app has released its
+    local graph. No request body is copied or decoded by this middleware.
+    """
+
+    def __init__(self, app, *, controller):
+        self.app, self.controller = app, controller
+        self.workload = getattr(controller, "workload_profile", None)
+        if self.workload is None:
+            raise ValueError("bounded ASGI entry requires its selected workload profile")
+        self.inflight = self.reserved = 0
+
+    @staticmethod
+    async def _pending(send):
+        body = b'{"detail":"workload_qualification_pending","retry_unchanged":true}'
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 503,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                    (b"retry-after", b"1"),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+    def _reservation(self, scope):
+        lengths = [
+            value for name, value in scope.get("headers", ()) if name.lower() == b"content-length"
+        ]
+        if not lengths:
+            return self.workload.bounds.maximum_input_bytes
+        if len(lengths) != 1 or not lengths[0].isdigit() or len(lengths[0]) > 20:
+            raise WorkloadQualificationPending("request_length_invalid")
+        value = int(lengths[0])
+        if value > self.workload.bounds.maximum_input_bytes:
+            raise WorkloadQualificationPending("request_byte_bound")
+        return value
+
+    async def __call__(self, scope, receive, send):
+        with bind_memory_controller(self.controller):
+            if scope["type"] != "http" or is_cached_cohort_progress_request(
+                scope.get("method"), scope.get("path")
+            ):
+                await self.app(scope, receive, send)
+                return
+            try:
+                reservation = self._reservation(scope)
+            except WorkloadQualificationPending:
+                await self._pending(send)
+                return
+            profile = self.workload.profile
+            # ASGI runs these counters on its owning loop; no await separates
+            # the capacity check from acquisition or release.
+            if (
+                self.inflight >= profile.maximum_http_inflight
+                or self.reserved + reservation > profile.maximum_queued_input_bytes
+            ):
+                await self._pending(send)
+                return
+            self.inflight += 1
+            self.reserved += reservation
+            received = 0
+            response_started = False
+
+            async def bounded_receive():
+                nonlocal received
+                message = await receive()
+                if message["type"] == "http.request":
+                    received += len(message.get("body", b""))
+                    if received > reservation:
+                        raise WorkloadQualificationPending("request_byte_bound")
+                return message
+
+            async def tracked_send(message):
+                nonlocal response_started
+                if message["type"] == "http.response.start":
+                    response_started = True
+                await send(message)
+
+            try:
+                with workload_input_budget():
+                    await self.app(scope, bounded_receive, tracked_send)
+            except WorkloadQualificationPending:
+                if response_started:
+                    raise
+                await self._pending(send)
+            finally:
+                self.reserved -= reservation
+                self.inflight -= 1
