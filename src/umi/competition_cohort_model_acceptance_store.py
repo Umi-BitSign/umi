@@ -477,8 +477,14 @@ class CohortModelAcceptances:
     def pending_latest_entries(self, cohort, *, limit=16, offset=0):
         """Prioritize likely seal blockers without granting roster authority.
 
-        Current native sealing still verifies the complete inventory and live
-        registration. The ordinary fair scan retains superseded/recovery work.
+        Already admitted participants can advance to independent model review.
+        Page that group first so a cursor among unadmitted entries cannot bury
+        newly certified work until the entire cohort wraps. Empty pages retain
+        the worker's ordinary offset reset; failed ready entries still rotate.
+        Certificate presence is only a scheduling hint: prepare verifies the
+        exact original admission and quorum. When none are ready, input
+        preparation for unadmitted entries continues through the same scan.
+        Native sealing and the ordinary superseded/recovery scan are unchanged.
         """
         self.intake._allowed(cohort)
         if type(limit) is not int or not 1 <= limit <= 16:
@@ -491,15 +497,24 @@ class CohortModelAcceptances:
                 return ()
             history = store.published_history(cohort)
             rows = db.execute(
-                "SELECT c.consent,c.hotkey,c.sequence,substr(c.body,1,4194305) "
+                "WITH pending AS ("
+                "SELECT c.consent,c.hotkey,c.sequence,"
+                "EXISTS (SELECT 1 FROM cohort_admission_certificates p "
+                "WHERE p.consent=c.consent) AS admitted "
                 "FROM cohort_consents c WHERE c.cohort=? AND c.track='model' "
                 "AND NOT EXISTS (SELECT 1 FROM cohort_consents newer "
                 "WHERE newer.cohort=c.cohort AND newer.hotkey=c.hotkey "
                 "AND newer.track=c.track AND newer.sequence>c.sequence) "
                 "AND NOT EXISTS (SELECT 1 FROM cohort_model_acceptances a "
                 "WHERE a.cohort=c.cohort AND a.submission="
-                "json_extract(CAST(c.body AS TEXT),'$.request.consent.consent.submission_sha256')) "
-                "ORDER BY c.hotkey,c.consent LIMIT ? OFFSET ?",
+                "json_extract(CAST(c.body AS TEXT),'$.request.consent.consent.submission_sha256'))"
+                "), selected AS ("
+                "SELECT consent,hotkey,sequence FROM pending "
+                "WHERE admitted=(SELECT MAX(admitted) FROM pending) "
+                "ORDER BY hotkey,consent LIMIT ? OFFSET ?) "
+                "SELECT s.consent,s.hotkey,s.sequence,substr(c.body,1,4194305) "
+                "FROM selected s JOIN cohort_consents c ON c.consent=s.consent "
+                "ORDER BY s.hotkey,s.consent",
                 (cohort, limit, offset),
             )
             result = []

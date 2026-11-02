@@ -620,9 +620,25 @@ def test_priority_uses_latest_sequence_and_keeps_superseded_recovery_scan(prepar
     owner, cohort, subs, _ = prepared
     sub = replace_model_submission(owner, cohort, subs[0])
     priority = {digest(s) for _, s in owner.pending_latest_entries(cohort)}
-    assert digest(sub) in priority and digest(subs[0]) not in priority
-    assert digest(subs[1]) in priority
-    assert {digest(s) for _, s in owner.entries(cohort)} == priority | {digest(subs[0])}
+    # The replacement cannot inherit its predecessor's participant certificate.
+    assert priority == {digest(subs[1])}
+    assert {digest(s) for _, s in owner.entries(cohort)} == {
+        digest(subs[0]),
+        digest(subs[1]),
+        digest(sub),
+    }
+    key, _ = next((k, s) for k, s in owner.entries(cohort) if s == sub)
+    queue = CohortAdmissionQueue(owner.intake)
+    record = acceptance_module.read_participation(queue.record(cohort, key))
+    for signature in signatures(record.proposed_admission):
+        queue.publish_vote(
+            CohortAdmissionVote(admission=record.proposed_admission, signature=signature),
+            capture_at(record.proposed_admission.admitted_at_block),
+        )
+    assert {digest(s) for _, s in owner.pending_latest_entries(cohort)} == {
+        digest(sub),
+        digest(subs[1]),
+    }
     ordered = owner.pending_latest_entries(cohort)
     assert owner.pending_latest_entries(cohort, limit=1, offset=1) == ordered[1:2]
     assert owner.pending_latest_entries(cohort, limit=1, offset=len(ordered)) == ()
@@ -630,6 +646,101 @@ def test_priority_uses_latest_sequence_and_keeps_superseded_recovery_scan(prepar
         owner.pending_latest_entries(
             cohort, limit=1, offset=owner.intake.capacity.maximum_records + 1
         )
+
+
+@pytest.mark.parametrize("offset", [1, 19])
+@pytest.mark.parametrize("restart", [False, True])
+async def test_new_participant_certificate_advances_before_unready_cursor_wrap(
+    prepared, tmp_path, offset, restart
+):
+    owner, cohort, _, inputs = prepared
+    pending = owner.pending_latest_entries(cohort)
+    key, ready_sub = pending[0]
+    with owner.intake._connection() as (db, _):
+        certificates = dict(db.execute("SELECT consent,body FROM cohort_admission_certificates"))
+        db.execute("DELETE FROM cohort_admission_certificates")
+    # Input preparation remains available while participant review is unfinished.
+    assert owner.pending_latest_entries(cohort) == pending
+    root, out = tmp_path / "inputs", tmp_path / "output"
+    publish_private_model(root / "model-reviews" / (inputs.model_sha256 + ".json"), inputs)
+
+    async def capture():
+        return capture_at(220)
+
+    worker = ModelAcceptanceWorker(owner, capture, root, out, priority_cohorts=(cohort,))
+    assert (await worker.poll_once())["entries_pending"] == 1
+    assert worker._priority_offsets[cohort] == 1
+    worker._priority_offsets[cohort] = offset
+    # Restore the exact retained certificate as if its independent review just
+    # finished. No submission, signature, history or cohort clock is rewritten.
+    with owner.intake._connection() as (db, _):
+        db.execute(
+            "INSERT INTO cohort_admission_certificates VALUES (?,?)", (key, certificates[key])
+        )
+    publication = certify(owner, cohort, ready_sub, inputs)
+    publish_private_model(
+        root / "model-acceptance-publications" / cohort / (digest(ready_sub) + ".json"),
+        publication,
+    )
+    if restart:
+        owner = CohortModelAcceptances(owner.intake, owner.archive)
+        worker = ModelAcceptanceWorker(owner, capture, root, out, priority_cohorts=(cohort,))
+    result = await worker.poll_once()
+    assert result["entries_exported"] == 1
+    assert result["entries_pending"] == 0
+    assert owner.retained(cohort, digest(ready_sub)).certificate == publication.certificate
+    assert owner.pending_latest_entries(cohort) == pending[1:]
+    with owner.intake._connection() as (db, _):
+        assert (
+            db.execute(
+                "SELECT body FROM cohort_admission_certificates WHERE consent=?", (key,)
+            ).fetchone()[0]
+            == certificates[key]
+        )
+
+
+async def test_ready_selection_rotates_failed_ready_items_without_selecting_unready(
+    prepared, tmp_path
+):
+    owner, cohort, _, _ = prepared
+    ordered = owner.pending_latest_entries(cohort)
+    worker = ModelAcceptanceWorker(owner, None, tmp_path, tmp_path, priority_cohorts=(cohort,))
+    calls = []
+
+    async def pending(_cohort, submission):
+        calls.append(digest(submission))
+        raise PendingModelArtifacts("independent artifact review is still pending")
+
+    worker._one = pending
+    for _ in range(3):
+        await worker.poll_once()
+    assert calls == [digest(ordered[i][1]) for i in (0, 1, 0)]
+
+
+def test_ready_page_is_bounded_and_does_not_authorize_invalid_certificate(prepared, monkeypatch):
+    owner, cohort, _, inputs = prepared
+    ordered = owner.pending_latest_entries(cohort)
+    key, sub = ordered[0]
+    read, reads = acceptance_module.read_participation, []
+
+    def tracked(raw):
+        reads.append(len(raw))
+        return read(raw)
+
+    monkeypatch.setattr(acceptance_module, "read_participation", tracked)
+    assert owner.pending_latest_entries(cohort, limit=1) == ordered[:1]
+    assert len(reads) == 1
+    with owner.intake._connection() as (db, _):
+        other = db.execute(
+            "SELECT body FROM cohort_admission_certificates WHERE consent=?", (ordered[1][0],)
+        ).fetchone()[0]
+        db.execute("UPDATE cohort_admission_certificates SET body=? WHERE consent=?", (other, key))
+    # Presence may select work, but exact participant/quorum checks still own
+    # the decision and cannot create an intent from mismatched signed evidence.
+    assert owner.pending_latest_entries(cohort, limit=1) == ordered[:1]
+    with pytest.raises(ValueError, match="model admission changed"):
+        owner.prepare(cohort, digest(sub), inputs, capture_at(220))
+    assert owner.intent(cohort, digest(sub)) is None
 
 
 async def test_intake_certifies_replacement_before_closure_and_reuses_after_restart(
