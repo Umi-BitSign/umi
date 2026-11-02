@@ -10,12 +10,16 @@ import pytest
 
 from umi.competition_model_training_rights import (
     CONDITIONAL_TRAINING_RIGHTS_SHA256,
+    LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256,
+    LEGACY_NC_CONTRIBUTION_TERMS_SHA256,
     NC_CONTRIBUTION_TERMS_SHA256,
     NC_MODEL_LICENSE,
     PROVENANCE_SCHEMA,
     ResearchRightsWarranty,
+    TrainingSource,
     declared_nc_training,
     validate_model_training_provenance,
+    validate_model_training_terms,
 )
 from umi.open_competition import BundleFile
 
@@ -96,11 +100,15 @@ def test_how2_research_declaration_is_bound_and_scope_is_honest(monkeypatch):
     assert result["memorisation_probe_threshold"] is None
 
 
-def test_terms_digest_matches_exact_published_bytes():
+@pytest.mark.parametrize(
+    "version,expected",
+    [(1, LEGACY_NC_CONTRIBUTION_TERMS_SHA256), (2, NC_CONTRIBUTION_TERMS_SHA256)],
+)
+def test_terms_digest_matches_exact_published_bytes(version, expected):
     root = Path(__file__).resolve().parents[1]
-    terms = root / "docs/MODEL_CONTRIBUTION_TERMS_NC_V1.md"
-    assert hashlib.sha256(terms.read_bytes()).hexdigest() == NC_CONTRIBUTION_TERMS_SHA256
-    assert NC_CONTRIBUTION_TERMS_SHA256 in terms.with_suffix(".sha256").read_text()
+    terms = root / f"docs/MODEL_CONTRIBUTION_TERMS_NC_V{version}.md"
+    assert hashlib.sha256(terms.read_bytes()).hexdigest() == expected
+    assert expected in terms.with_suffix(".sha256").read_text()
 
 
 @pytest.mark.parametrize("raw", [b"Legacy prose", b"{}", b"[]", b"not JSON", b"\xff"])
@@ -144,7 +152,7 @@ def test_evaluation_source_declaration_is_not_training_permission():
     [
         ({"additional_dataset_contract": True}, "written_permission_not_selected"),
         ({"permission_record_sha256": "ab" * 32}, "permission_record_not_selected"),
-        ({"name": "ASL STEM Wiki"}, "written_permission_not_selected"),
+        ({"name": "ASL STEM Wiki"}, "microsoft_research_source_declaration"),
         ({"name": "Example source", "license_id": "CC-BY-ND-4.0"}, "license_not_permitted"),
         ({"name": "Example source", "license_id": "unspecified"}, "license_not_permitted"),
         ({"name": "ChicagoFSWild+", "split": "dev"}, "chicago_training_requires_train_split"),
@@ -223,3 +231,149 @@ def test_duplicate_sources_and_wrong_weights_notice_fail():
     raw["LICENSE-WEIGHTS"] = b"MIT"
     with pytest.raises(ValueError, match="nc_weights_license_notice_missing"):
         review(raw)
+
+
+def stem_source(**changes):
+    return source(
+        **{
+            "name": "ASL STEM Wiki",
+            "canonical_url": "https://www.microsoft.com/en-us/research/project/asl-stem-wiki/",
+            "license_id": "LicenseRef-Microsoft-Research",
+            "additional_dataset_contract": True,
+            "accepted_access_terms": [
+                "https://www.microsoft.com/en-us/research/project/asl-stem-wiki/dataset-license/"
+            ],
+            "destruction_required": True,
+            "research_complete": False,
+        }
+        | changes
+    )
+
+
+@pytest.mark.parametrize("use", ["training", "inherited_checkpoint"])
+def test_stem_requires_new_signed_revision_and_nc_consent_route(use):
+    raw = documents([stem_source(uses=[use])])
+    assert declared_nc_training(raw, rights_policy_sha256=CONDITIONAL_TRAINING_RIGHTS_SHA256)
+    current = review(raw)
+    assert current["source_decisions"][0]["decision"] == (
+        "operator_approved_noncommercial_research_source"
+    )
+    assert current["supplemental_terms_sha256"] == NC_CONTRIBUTION_TERMS_SHA256
+    # V1 retains its rejection; a new reader does not rewrite old signed terms.
+    with pytest.raises(ValueError, match="nc_provenance_schema_invalid"):
+        validate_model_training_provenance(
+            bundle(raw), raw, rights_policy_sha256=LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256
+        )
+    old_source = stem_source(uses=[use], destruction_required=False)
+    old_source.pop("research_complete")
+    old_raw = documents([source(), old_source])
+    with pytest.raises(ValueError, match="written_permission_not_selected"):
+        validate_model_training_provenance(
+            bundle(old_raw),
+            old_raw,
+            rights_policy_sha256=LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256,
+        )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"license_id": "MIT"},
+        {"license_id": "CC-BY-NC-4.0"},
+        {"canonical_url": "https://example.test/asl-stem-wiki/"},
+        {"additional_dataset_contract": False},
+        {"accepted_access_terms": []},
+    ],
+)
+def test_stem_approval_does_not_relabel_microsoft_source_or_clear_other_contracts(changes):
+    raw = documents([stem_source(**changes)])
+    assert declared_nc_training(raw, rights_policy_sha256=CONDITIONAL_TRAINING_RIGHTS_SHA256)
+    with pytest.raises(ValueError, match="asl_stem_requires_microsoft_research_source_declaration"):
+        review(raw)
+
+
+def test_stem_source_cannot_supply_its_own_unselected_permission():
+    with pytest.raises(ValueError, match="nc_source_permission_record_not_selected"):
+        review(documents([stem_source(permission_record_sha256="ab" * 32)]))
+    with pytest.raises(ValueError, match="written_permission_not_selected"):
+        review(
+            documents(
+                [
+                    stem_source(),
+                    source(name="Other Microsoft Dataset", additional_dataset_contract=True),
+                ]
+            )
+        )
+
+
+def test_stem_approval_cannot_cover_different_additional_access_terms():
+    selected = stem_source()
+    selected["accepted_access_terms"].append("https://example.test/other-contract")
+    with pytest.raises(ValueError, match="asl_stem_access_terms_not_selected"):
+        review(documents([selected]))
+
+
+def test_stem_publisher_identity_forces_nc_even_with_a_different_display_name():
+    raw = documents([stem_source(name="Example source", license_id="MIT")])
+    assert declared_nc_training(raw, rights_policy_sha256=CONDITIONAL_TRAINING_RIGHTS_SHA256)
+    with pytest.raises(ValueError, match="asl_stem_requires_microsoft_research_source_declaration"):
+        review(raw)
+
+
+def test_legacy_how2_rights_evidence_and_exact_supplement_pair_are_preserved():
+    raw = documents()
+    legacy = validate_model_training_provenance(
+        bundle(raw), raw, rights_policy_sha256=LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256
+    )
+    current = review(raw)
+    assert (
+        legacy
+        | {
+            "training_rights_policy_sha256": CONDITIONAL_TRAINING_RIGHTS_SHA256,
+            "supplemental_terms_sha256": NC_CONTRIBUTION_TERMS_SHA256,
+        }
+        == current
+    )
+    for policy, terms in (
+        (LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256, LEGACY_NC_CONTRIBUTION_TERMS_SHA256),
+        (CONDITIONAL_TRAINING_RIGHTS_SHA256, NC_CONTRIBUTION_TERMS_SHA256),
+    ):
+        validate_model_training_terms(rights_policy_sha256=policy, supplemental_terms_sha256=terms)
+        other = (
+            NC_CONTRIBUTION_TERMS_SHA256
+            if terms == LEGACY_NC_CONTRIBUTION_TERMS_SHA256
+            else LEGACY_NC_CONTRIBUTION_TERMS_SHA256
+        )
+        with pytest.raises(ValueError, match="conditional_model_terms_not_supported"):
+            validate_model_training_terms(
+                rights_policy_sha256=policy, supplemental_terms_sha256=other
+            )
+
+
+def test_stem_destruction_trigger_is_research_completion_not_submission():
+    review(documents([stem_source()]))  # Ongoing research; deletion is not due yet.
+    review(documents([stem_source(research_complete=True, destroyed_on="2026-10-02")]))
+    with pytest.raises(ValueError, match="nc_provenance_schema_invalid"):
+        review(documents([stem_source(research_complete=True)]))
+    with pytest.raises(ValueError, match="research_completion_and_destruction_declaration"):
+        review(documents([stem_source(destruction_required=False)]))
+    missing = stem_source(destruction_required=False)
+    missing.pop("research_complete")
+    with pytest.raises(ValueError, match="research_completion_and_destruction_declaration"):
+        review(documents([missing]))
+    with pytest.raises(ValueError, match="nc_provenance_schema_invalid"):
+        review(documents([source(destruction_required=True, research_complete=False)]))
+
+
+def test_legacy_stem_permissive_signal_is_unchanged_without_prospective_selection():
+    legacy_source = source(name="ASL STEM Wiki", license_id="MIT")
+    raw = documents([legacy_source])
+    assert not declared_nc_training(raw)
+    assert declared_nc_training(raw, rights_policy_sha256=CONDITIONAL_TRAINING_RIGHTS_SHA256)
+
+
+def test_original_training_source_serialization_has_no_new_default_field():
+    original = source()
+    restored = TrainingSource.model_validate_json(json.dumps(original))
+    assert restored.model_dump(mode="json", by_alias=True) == original
+    assert "research_complete" not in restored.model_dump()

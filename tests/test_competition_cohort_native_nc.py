@@ -18,6 +18,8 @@ from umi.competition_geometric_rewards import cohort_reward_parameters
 from umi.competition_model_license import prepare_model_license_adoption
 from umi.competition_model_training_rights import (
     CONDITIONAL_TRAINING_RIGHTS_SHA256,
+    LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256,
+    LEGACY_NC_CONTRIBUTION_TERMS_SHA256,
     NC_CONTRIBUTION_TERMS_SHA256,
 )
 from umi.open_competition import (
@@ -49,7 +51,7 @@ from .test_competition_cohort_native_direct import (
 )
 from .test_competition_cohort_native_pipeline import model_request, run_pipeline
 from .test_competition_cohort_recovery import signatures
-from .test_competition_model_training_rights import documents
+from .test_competition_model_training_rights import documents, stem_source
 from .test_open_competition import wallet
 
 
@@ -68,7 +70,7 @@ def current_c7_economics(monkeypatch):
 def nc_model_request(scenario, model, **kwargs):
     request = model_request(scenario, model, **kwargs)
     body = request.signed_submission.submission.model_copy(
-        update={"accepted_terms_sha256": NC_CONTRIBUTION_TERMS_SHA256}
+        update={"accepted_terms_sha256": model.license_adoption.adoption.noncommercial_terms_sha256}
     )
     signed = request.signed_submission.model_copy(
         update={"submission": body, "signature": sign_object(body, wallet("Alice"))}
@@ -84,7 +86,13 @@ def nc_model_request(scenario, model, **kwargs):
     )
 
 
-def nc_inventory(h):
+def nc_inventory(
+    h,
+    sources=None,
+    *,
+    rights=CONDITIONAL_TRAINING_RIGHTS_SHA256,
+    terms=NC_CONTRIBUTION_TERMS_SHA256,
+):
     direct_inventory(h)
     original = h.model
     source = Path(h.intake.config.directory).parent / "model-submission"
@@ -92,7 +100,7 @@ def nc_inventory(h):
     for record in original.files:
         if record.role in ("license", "provenance"):
             (source / record.path).unlink()
-    for name, body in documents().items():
+    for name, body in documents(sources).items():
         (source / name).write_bytes(body)
         records.append(
             BundleFile(
@@ -105,8 +113,8 @@ def nc_inventory(h):
     proposal = prepare_model_license_adoption(
         policy=h.intake.policy,
         authority=h.history.authority,
-        noncommercial_terms_sha256=NC_CONTRIBUTION_TERMS_SHA256,
-        training_rights_policy_sha256=CONDITIONAL_TRAINING_RIGHTS_SHA256,
+        noncommercial_terms_sha256=terms,
+        training_rights_policy_sha256=rights,
         operator_decision_sha256="be" * 32,
         issued_at_block=200,
         reason="Synthetic C7 conditional license full native pipeline qualification",
@@ -128,7 +136,21 @@ def nc_inventory(h):
     h.request_for = lambda scenario, **kw: nc_model_request(scenario, h.model, **kw)
 
 
-@pytest.mark.parametrize("lifecycle_before_intake", [nc_inventory], indirect=True)
+def stem_inventory(h):
+    nc_inventory(h, [stem_source()])
+
+
+def legacy_nc_inventory(h):
+    nc_inventory(
+        h,
+        rights=LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256,
+        terms=LEGACY_NC_CONTRIBUTION_TERMS_SHA256,
+    )
+
+
+@pytest.mark.parametrize(
+    "lifecycle_before_intake", [legacy_nc_inventory, nc_inventory, stem_inventory], indirect=True
+)
 @pytest.mark.parametrize("scenario", [{"adopted": True}], indirect=True)
 async def test_nc_bundle_executes_certifies_and_replays_native_reward_package(
     host, scenario, runtime, tmp_path, monkeypatch, chain_config
@@ -153,7 +175,9 @@ async def test_nc_bundle_executes_certifies_and_replays_native_reward_package(
     assert set(direct.candidate_jobs) == {"Charlie", "Dave"}
     for name, job in direct.candidate_jobs.items():
         assert job.submission.submission.model_bundle == h.model
-        assert job.submission.submission.accepted_terms_sha256 == NC_CONTRIBUTION_TERMS_SHA256
+        assert job.submission.submission.accepted_terms_sha256 == (
+            h.model.license_adoption.adoption.noncommercial_terms_sha256
+        )
         assert job.incumbent.schema_ == "umi-model-bundle/1"
         assert job.incumbent.license_adoption is None
         assert digest(job.incumbent) == baseline_before

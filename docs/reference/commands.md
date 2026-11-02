@@ -251,7 +251,7 @@ for review. An eligible identifier is not a rights approval.
 For models trained on permitted non-commercial sources, use the additional
 signed route only when the target cohort publishes it. Models using the
 original permitted sources keep bundle `/1`, their original licenses and terms.
-Read the [conditional supplement](../MODEL_CONTRIBUTION_TERMS_NC_V1.md) and
+Read the [current conditional supplement](../MODEL_CONTRIBUTION_TERMS_NC_V2.md) and
 [training-source requirements](../contributors/models.md) before preparing the
 new artifact. Do not relabel an already signed submission or its baseline.
 
@@ -264,24 +264,38 @@ umi_model_client="$HOME/.local/share/umi/model-client/umi-model-client"
   --origin https://api.umi.vision --history cohort-history.json \
   --expected-tip-sha256 "$cohort_tip_sha256" --current-block "$finalized_block" \
   > model-license-adoptions.json
-jq -e '.status == "available" and (.items | length) == 1' model-license-adoptions.json
+jq -e '.status == "available"' model-license-adoptions.json
+jq -e '[.items[] | select(.terms_url | endswith("/MODEL_CONTRIBUTION_TERMS_NC_V2.md"))] |
+  if length == 1 then .[0] else error("The cohort has not published one supported V2 route; check the selected client and cohort metadata") end' \
+  model-license-adoptions.json > model-license-selection.json
 ```
 
-`not_selected` means that no optional route is published. The public endpoint is
-`GET /v1/competition/cohorts/{cohort_sha256}/model-license-adoptions`; the CLI
-also checks its signatures and scope against the selected policy and history.
-This read does not reserve admission or open intake.
+The selection above requires the V2 route used for Microsoft ASL STEM Wiki.
+It becomes available after the supported readers and signed adoption are
+published. An approved source listed in the documentation does not substitute
+for that authenticated route. Existing models retain their exact V1 adoption
+and consent; other permitted sources may still use a published V1 route by
+selecting `MODEL_CONTRIBUTION_TERMS_NC_V1.md` instead. Never choose `items[0]`
+without checking which revision it represents.
+
+`not_selected` means that no optional route was returned. Upgraded clients ask
+`GET /v1/competition/cohorts/{cohort_sha256}/model-license-adoptions?include_supported_revisions=true`
+and authenticate the returned terms/rights pairs, signatures and cohort scope.
+The endpoint without that query retains V1-compatible output for older clients;
+it does not advertise V2 to a client that cannot read it. An upgraded client also
+accepts the original V1 response from an older server. This read does not reserve
+admission or open intake.
 
 After preparing all required provenance, notices and their complete file
 inventory, attach the exact authorization to the **new** bundle:
 
 ```sh
-jq --slurpfile selected model-license-adoptions.json \
+jq --slurpfile selected model-license-selection.json \
   '.schema = "umi-model-bundle/2" |
    .license_id = "CC-BY-NC-SA-4.0" |
-   .license_adoption = $selected[0].items[0].signed_adoption' \
+   .license_adoption = $selected[0].signed_adoption' \
   prepared-model-bundle.json > model-bundle.json
-accepted_terms_sha256="$(jq -r '.items[0].terms_sha256' model-license-adoptions.json)"
+accepted_terms_sha256="$(jq -r '.terms_sha256' model-license-selection.json)"
 ```
 
 The new submission embeds that complete `model_bundle`, uses its recomputed

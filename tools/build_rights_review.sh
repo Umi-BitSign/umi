@@ -20,7 +20,7 @@ trap 'rm -rf -- "$build"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 # Stable PDF dates; update this value with the dated policy revision.
-export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-1793145600}
+export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-1793577600}
 export TZ=UTC
 start=$SECONDS
 echo 'Rights review: compiling LaTeX (1/2); planning ETA 10–120 s with cached packages, longer on first download.'

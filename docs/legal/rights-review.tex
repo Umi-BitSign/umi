@@ -15,7 +15,7 @@
 \usepackage{fancyhdr}
 \definecolor{navy}{HTML}{172A46}
 \definecolor{teal}{HTML}{126E78}
-\hypersetup{colorlinks=true,linkcolor=navy,urlcolor=teal,pdftitle={UMI Training Data and Model Licensing Policy},pdfauthor={UMI Inc.},pdfsubject={Conditional model licensing from C7 onward; policy revision October 28, 2026}}
+\hypersetup{colorlinks=true,linkcolor=navy,urlcolor=teal,pdftitle={UMI Training Data and Model Licensing Policy},pdfauthor={UMI Inc.},pdfsubject={Conditional model licensing from C7 onward; policy revision November 2, 2026}}
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{5pt plus 1pt}
 \setlength{\emergencystretch}{3em}
@@ -30,15 +30,16 @@
 \pagestyle{fancy}
 \fancyhf{}
 \fancyhead[L]{\small\sffamily UMI / TRAINING DATA AND MODEL LICENSING}
-\fancyhead[R]{\small\sffamily 28 OCT 2026}
+\fancyhead[R]{\small\sffamily 2 NOV 2026}
 \fancyfoot[C]{\small\thepage}
 \renewcommand{\headrulewidth}{0.3pt}
 \begin{document}
 {\huge\sffamily\bfseries\color{navy} UMI Training Data and\\[3pt] Model Licensing Policy\par}
 \vspace{4pt}
-Policy updated October 28, 2026 · UMI Inc.
+Policy updated November 2, 2026 · UMI Inc.
 
-Legal assessment and source records dated October 22, 2026.
+Original legal assessment and source records dated October 22, 2026;
+ASL STEM Wiki legal/operator determination dated November 2, 2026.
 
 From C7 onward, UMI uses two model licensing tracks. A model trained
 with permitted NonCommercial data, including How2Sign, or derived from
@@ -48,13 +49,14 @@ inherited components support its existing permissive release keeps the
 original contribution terms and declared license. A mixed model that
 uses a permitted NC training source follows the NC track.
 
-\textbf{Already submitted to C7? No changes are required because of this
-update.} Existing submissions under the original terms do not need
-relicensing, re-signing or resubmission. A miner may optionally submit a
-new or replacement NC-trained model while intake is open, using the
-correct declared license and fresh consent. This update does not
-retroactively rewrite accepted artifacts or excuse a false original
-rights declaration.
+\textbf{Existing submissions retain their signed terms.} This policy
+update alone requires no change to an accurately declared existing
+submission. A miner may submit a new or replacement NC-trained model
+while intake is open, using the correct declared license and fresh
+consent. This update does not retroactively rewrite accepted artifacts
+or excuse a false original rights declaration. The ASL STEM Wiki
+allowance requires the authenticated version-2 training-rights and NC
+supplement route; publication of this review does not activate it.
 
 The same two-track approach applies to C8 and later cohorts. NC training or
 an inherited NC checkpoint selects the NC track; declaring an NC source
@@ -65,9 +67,10 @@ resource limits, baseline/grace rule and reward formula; a license label
 provides no extra score or allocation. Existing content and
 score-duplicate rules apply across both tracks. The existing baseline
 and earlier certified models retain their own licenses. This revision
-incorporates UMI\textquotesingle s conditional policy decision into the
-October 22 review; the legal authorities and source records below retain
-their stated assessment date.
+incorporates UMI\textquotesingle s conditional policy decision and the
+November 2 ASL STEM Wiki determination into the October 22 review. The
+original legal authorities and source records below retain their stated
+assessment date.
 
 \section{1. The policy in brief}\label{1-the-policy-in-brief}
 
@@ -98,11 +101,12 @@ submission, terms file, cohort clock or historical result.
   Section 3 lists the license classes and the rulings for named
   datasets.
 \item
-  \textbf{You may not train on datasets with bespoke research or access
-  contracts} (for example the Microsoft Research License Terms that
-  govern ASL STEM Wiki) unless UMI has the rights
-  holder\textquotesingle s written permission on file. Section 9 lists
-  the permissions UMI is pursuing.
+  \textbf{Bespoke research or access contracts require a source-specific
+  decision.} ASL STEM Wiki is allowed on the NC track under the
+  November 2 legal/operator determination, subject to its actual
+  Microsoft Research License Terms. Other bespoke contracts still
+  require the rights holder\textquotesingle s written permission on
+  file. Sections 3 and 9 identify the decision and its scope.
 \item
   \textbf{Every submission carries a provenance declaration and a rights
   warranty} listing each dataset by name, version, URL, license and
@@ -128,9 +132,10 @@ submission, terms file, cohort clock or historical result.
   model\textquotesingle s license.
 \item
   \textbf{You delete what you must delete.} Where a
-  dataset\textquotesingle s terms require destruction after use, you
-  destroy your copy and all derived files after training and attest to
-  it.
+  dataset\textquotesingle s terms require destruction, complete it when
+  those terms require and attest to it. For ASL STEM Wiki, destruction
+  is due immediately upon completion of research; submitting a model
+  does not itself establish that research has ended.
 \item
   \textbf{No faces in publicity.} Dataset videos never appear in demos
   or marketing without blurring where the dataset asks for it, and never
@@ -146,6 +151,15 @@ publications, and the NonCommercial test is applied to that use, not to
 the people who perform it or to the money that funds it. The rules in
 section 1 are the facts that make this true, and each of them maps to a
 reason.
+
+\textbf{November 2 determination.} The operator reports that legal has
+deemed UMI\textquotesingle s public research-model use noncommercial:
+models are publicly released, and miner emissions are treated as
+grant-like research funding. On that basis the operator approved ASL
+STEM Wiki training under the conditions in section 3. This records
+UMI\textquotesingle s legal/operator determination, not a Microsoft
+reply, license amendment or waiver of the source terms. Public release
+does not remove the model\textquotesingle s NC restriction.
 
 \textbf{The test looks at the use.} The Creative Commons NonCommercial
 element permits any use that is "not primarily intended for or directed
@@ -275,7 +289,8 @@ licensor\textquotesingle s own reading
 License Terms, ELRA end-user licences, click-through academic
 agreements)}\label{bespoke-research-or-access-agreements-microsoft-research-license-terms-elra-end-user-licences-click-through-academic-agreements}
 
-\textbf{Eligible?:} No, unless UMI holds written permission
+\textbf{Eligible?:} Only under a named source-specific determination
+below, or the rights holder\textquotesingle s written permission
 
 \textbf{Why:} These are contracts with terms beyond NC, typically no
 distribution of modifications, destruction after use, named-institution
@@ -328,12 +343,27 @@ source transcripts into a model intended for any other track
 STEM Wiki} (Microsoft, Microsoft Research License
 Terms)}{ASL STEM Wiki (Microsoft, Microsoft Research License Terms)}}\label{asl-stem-wiki-microsoft-microsoft-research-license-terms}
 
-\textbf{Ruling:} Pending permission
+\textbf{Ruling:} Allowed with conditions on the NC track under the
+November 2, 2026 legal/operator determination.
 
-\textbf{Conditions:} Not permitted until Microsoft\textquotesingle s
-written confirmation is recorded in section 9; the terms forbid
-distributing modifications and require destruction after use, which the
-NC track does not satisfy on its own
+\textbf{Conditions:} Declare ASL STEM Wiki and its actual Microsoft
+Research License Terms, acquisition route and accepted access terms.
+Use the authenticated version-2 training-rights contract and NC
+supplement with fresh model-bound consent. Publish the research model
+under CC BY-NC-SA 4.0. Use the dataset solely for noncommercial,
+non-revenue-generating research consistent with the signer consent.
+Do not share or redistribute the source data, modifications, training
+clips, landmarks, captions or sentence lists. Preserve confidentiality
+and applicable destruction requirements. Declare whether research is
+ongoing or complete; on completion, destroy the required material
+immediately and attest to the date. Submitting a model does not itself
+end the research. Attribute Microsoft and ASL STEM Wiki, retain applicable
+Wikipedia text-layer notices, and reproduce the responsible-use
+request against technology purporting to replace interpreters. A public
+research result must not contain a material or substantial portion of
+the Materials. This source-specific approval does not clear other
+Microsoft datasets or different access terms. It records no Microsoft
+correspondence or permission grant.
 
 \subsection{2M-Flores-ASL, FSboard, Taskmaster-1 (UMI reference-model
 lineage)}\label{2m-flores-asl-fsboard-taskmaster-1-umi-reference-model-lineage}
@@ -484,7 +514,7 @@ impose a retrospective resubmission gate.
   ruling in section 3, or has the required rights-holder permission
   recorded in section 9, that any accepted access terms are accurately
   disclosed and any additional dataset contract has the required
-  recorded permission, that no training video, frame, landmark cache,
+  recorded source-specific determination or permission, that no training video, frame, landmark cache,
   caption or sentence list is included in the bundle, and that you grant
   UMI permission to evaluate, preserve, publish and use the exact
   submission as a research baseline under CC BY-NC-SA 4.0 as specified
@@ -507,8 +537,11 @@ impose a retrospective resubmission gate.
   notices only.
 \item
   \textbf{Destruction attestation}, where a dataset\textquotesingle s
-  terms require destruction after use: the date you deleted the dataset
-  and all derived files.
+  terms require destruction and its trigger has occurred: the date you
+  deleted the required material. For ASL STEM Wiki, an ongoing-research
+  declaration acknowledges the obligation without inventing a deletion
+  date. A declaration is a contributor attestation, not independent
+  proof of deletion.
 \item
   \textbf{NOTICE and model card} as section 4 specifies.
 \end{enumerate}
@@ -522,7 +555,7 @@ checkpoint is published.
 contribution guide},
 \href{https://github.com/Umi-BitSign/umi/blob/main/docs/reference/model-training-provenance.md}{structured
 provenance format},
-\href{https://github.com/Umi-BitSign/umi/blob/main/docs/MODEL_CONTRIBUTION_TERMS_NC_V1.md}{NC
+\href{https://github.com/Umi-BitSign/umi/blob/main/docs/MODEL_CONTRIBUTION_TERMS_NC_V2.md}{NC
 supplement}, and
 \href{https://github.com/Umi-BitSign/umi/blob/main/docs/reference/commands.md\#optional-non-commercial-model-terms}{NC
 client commands}. Update the supported model client before making an NC
@@ -794,12 +827,13 @@ UMI\textquotesingle s publication of the NC model is non-commercial, and
 section 6 keeps UMI pointers to NC models out of the app. Uses of
 permissive models remain governed by their original licenses and grants.
 
-\textbf{VI. Bespoke contracts are outside this basis.} Datasets governed
-by individual license agreements, such as ASL STEM Wiki under the
-Microsoft Research License Terms, impose obligations (no distribution of
-modifications, destruction after use, use within the data
-subjects\textquotesingle{} consent) that are contractual and do not turn
-on the analysis above. They are eligible only on the rights
+\textbf{VI. Bespoke contracts retain their obligations.} Datasets governed
+by individual license agreements impose obligations beyond a generic
+NC label, including no distribution of modifications, destruction after
+use and use within the data subjects\textquotesingle{} consent. The
+November 2 determination allows ASL STEM Wiki for the specified public
+NC research-model use while retaining these obligations. It does not
+extend to other bespoke contracts, which still require the rights
 holder\textquotesingle s written permission.
 
 \textbf{Privacy and publicity.} The datasets show
@@ -919,24 +953,29 @@ whether Art. 4 TDM covers it
 \textbf{Status on 22 Oct 2026:} AG opinion not confirmed; judgment not
 expected before 2027
 
-\section{9. Pending confirmations}\label{9-pending-confirmations}
+\section{9. Source decisions and pending confirmations}\label{9-pending-confirmations}
 
-UMI puts its characterisation to each rights holder in writing and
-records the reply here. A "Pending permission" ruling in section 3
-becomes "Allowed" or "Not permitted" when the corresponding line is
-updated.
+This section distinguishes UMI\textquotesingle s legal/operator
+determinations from planned rights-holder correspondence. A recorded
+operator decision is not evidence that a rights holder sent a reply.
 
 \subsection{\texorpdfstring{Microsoft (ASL STEM Wiki),
 ASL\_\href{mailto:Citizen@microsoft.com}{\nolinkurl{Citizen@microsoft.com}}}{Microsoft (ASL STEM Wiki), ASL\_Citizen@microsoft.com}}\label{microsoft-asl-stem-wiki-asl_citizenmicrosoftcom}
 
-\textbf{What UMI has asked:} Written confirmation that UMI cohort
+\textbf{October 22 request record (not sent):} Written confirmation that UMI cohort
 training on v1.0, with CC BY-NC-SA 4.0 public release of weights,
 destruction of the dataset and derived files after training, and no
 distribution of modifications, is within the Microsoft Research License
 Terms and the interpreter consent; or a variation permitting it
 
-\textbf{Status:} Request to be sent; ruling stays Pending permission
-until a reply is recorded
+\textbf{Current ruling, November 2:} The operator reports legal approval
+of this noncommercial public research-model use, with emissions treated
+as grant-like funding, and permits ASL STEM Wiki on the conditional NC
+track. The approval is subject to the source terms and conditions in
+section 3. No Microsoft reply or amendment is recorded. The planned
+request remains historical context; a reply is not a prerequisite to
+the operator-approved route. Other sources and materially different
+access terms require their own decision.
 
 \subsection{How2Sign consortium (UPC, BSC, CMU, Gallaudet), via the
 CORA.RDR contact and

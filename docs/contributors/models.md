@@ -189,22 +189,25 @@ summary without exposing confidential or personal material.
 ### Training data and research-model licensing
 
 The current [UMI Training Data and Model Licensing Policy](../../UMI%20Rights%20Review%20Sign-Language%20Datasets%20and%20Public%20Model%20Weights.pdf)
-incorporates conditional licensing from C7 onward, revised October 28, 2026;
-its legal assessment and source records retain their October 22 date. Permitted
+incorporates conditional licensing from C7 onward, revised November 2, 2026.
+Its original legal assessment and source records retain their October 22 date;
+the ASL STEM Wiki legal/operator determination is dated November 2. Permitted
 NC training data or inherited NC checkpoints require the NC route for that
 model; compatible permissive models retain their original terms and license.
-Existing C7 submissions need no relicensing, re-signing or resubmission because
-of this update. A new or replacement NC model uses fresh model-bound consent.
+Existing accurately declared submissions need no relicensing, re-signing or
+resubmission because of this update. A new or replacement NC model uses fresh
+model-bound consent.
 The same two-track rule applies to C8 and later cohorts.
 
 The [LaTeX source and rebuild instructions](../legal/README.md) accompany the
-PDF. The signed NC supplement and training-rights contract retain the original
-review hash; the linked historical PDF remains available for verification.
-Updating the current review does not rewrite those signed bytes, prior
+PDF. Version 1 of the signed NC supplement and training-rights contract retains
+the original review hash; the linked historical PDF remains available for
+verification. The new version-2 pair binds the updated review and source-specific
+allowance. Updating the current review does not rewrite earlier signed bytes, prior
 submissions or the baseline license. This section does not identify sources,
 references or clips used in any cohort evaluation.
 
-For an NC-trained model, the [supplemental terms](../MODEL_CONTRIBUTION_TERMS_NC_V1.md)
+For an NC-trained model, the [version-2 supplemental terms](../MODEL_CONTRIBUTION_TERMS_NC_V2.md)
 require a **public, non-commercial research-model release under CC BY-NC-SA 4.0**.
 Weights, adapters, tokenizer and label vocabularies, and the portable bundle
 carry that license. Contributor inference code and configuration may use
@@ -219,7 +222,7 @@ to NC by sharing a cohort or baseline with an NC model.
 | 2M-Flores-ASL, FSboard and Taskmaster-1 | Allowed. Retain the attribution and license entries from the reference model's `NOTICE`. |
 | UMI consented data | Allowed under the UMI contributor consent. Attribute "UMI contributors" without identifying individual contributors. |
 | ChicagoFSWild and ChicagoFSWild+ | Separately approved by the operator for **train splits only**, disclosed in provenance. Do not train on their dev/test splits. The updated review records this specific operator ruling; it does not supply a new publisher license or override an additional access contract. |
-| ASL STEM Wiki | Pending permission. The review explicitly requires Microsoft's written permission to be recorded before training is permitted; the NC research-model label alone does not satisfy its bespoke contract. |
+| ASL STEM Wiki | Allowed on the NC track under the November 2 legal/operator determination. Legal has deemed the public research-model use noncommercial, with emissions treated as grant-like funding. Declare the actual Microsoft Research License Terms and use authenticated version-2 adoption with fresh model-bound NC consent. Retain noncommercial research use, signer consent, confidentiality, no redistribution of data or modifications, required destruction and its attestation, attribution and responsible-use conditions. This records no Microsoft reply or license amendment and does not approve other Microsoft sources. |
 
 For other sources, classify the terms attached to the copy actually acquired:
 
@@ -229,7 +232,7 @@ For other sources, classify the terms attached to the copy actually acquired:
 | CC BY-NC 4.0 or CC BY-NC-SA 4.0, without additional contractual restrictions | Allowed for the documented public NC-SA research-model use. |
 | Apache-2.0, MIT, BSD, ODC-By or CDLA-Permissive | Allowed with the applicable license and notice conditions. |
 | CC BY-ND, CC BY-NC-ND or another no-derivatives term | Not permitted by the review. |
-| Bespoke research/access contracts, including Microsoft Research, ELRA end-user or click-through academic agreements | Require the rights holder's written permission on file; do not treat them as ordinary CC NonCommercial licenses. |
+| Bespoke research/access contracts, including Microsoft Research, ELRA end-user or click-through academic agreements | Require the rights holder's written permission on file except for an applicable named source-specific determination above. The ASL STEM Wiki decision retains its actual contract obligations and does not approve other bespoke sources. |
 | Scraped or unlicensed video, social-platform material or unlicensed mirrors | Not permitted by the review. A public URL alone is not a training permission. |
 
 The NC route's reviewed bundle includes `PROVENANCE.json` with every training/development

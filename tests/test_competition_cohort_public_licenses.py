@@ -6,6 +6,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from umi import competition_cohort_public_licenses as module
@@ -21,6 +22,8 @@ from umi.competition_cohort_recovery import (
 from umi.competition_model_license_client import fetch_model_license_adoptions
 from umi.competition_model_training_rights import (
     CONDITIONAL_TRAINING_RIGHTS_SHA256,
+    LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256,
+    LEGACY_NC_CONTRIBUTION_TERMS_SHA256,
     NC_CONTRIBUTION_TERMS_SHA256,
 )
 from umi.open_competition import SignedModelLicenseTermsAdoption, digest
@@ -169,7 +172,9 @@ def test_public_polling_uses_only_projection_and_refuses_output_corruption(watch
     monkeypatch.setattr(module, "CohortIntake", forbid_native)
     monkeypatch.setattr(module, "verify_model_license_selection", forbid_native)
     cohort = config.cohorts[0]
-    url = f"/v1/competition/cohorts/{cohort}/model-license-adoptions"
+    url = (
+        f"/v1/competition/cohorts/{cohort}/model-license-adoptions?include_supported_revisions=true"
+    )
     with TestClient(create_cohort_public_app(config.template.api)) as client:
         first = client.get(url)
         assert first.status_code == 200 and first.json()["status"] == "available"
@@ -266,3 +271,101 @@ def test_one_signed_selection_publishes_every_selected_future_cohort(
     monkeypatch.setattr(module, "CohortIntake", forbid_native)
     report = NativePublicCatalogWatcher(configured).poll_once()["model_license_adoptions"]
     assert report["retained"] == list(cohorts)
+
+
+def test_public_old_client_view_preserves_v1_and_new_client_can_discover_both(
+    approved_case, policy, tmp_path, monkeypatch
+):
+    current = approved_case["adoption"]
+    previous_body = current.adoption.model_copy(
+        update={
+            "training_rights_policy_sha256": LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256,
+            "noncommercial_terms_sha256": LEGACY_NC_CONTRIBUTION_TERMS_SHA256,
+        }
+    )
+    previous = SignedModelLicenseTermsAdoption(
+        adoption=previous_body, signatures=signatures(previous_body)
+    )
+    projection = module.project_model_license_adoptions(
+        approved_case["history"], policy, (previous, current)
+    )
+    legacy = module.project_model_license_adoptions(approved_case["history"], policy, (previous,))
+    assert canonical_json_bytes(module.model_license_client_view(projection)) == (
+        canonical_json_bytes(legacy)
+    )
+    root = tmp_path / "public"
+    module.publish_model_license_adoptions(root, projection)
+    monkeypatch.setattr(module, "verify_model_license_selection", forbid_native)
+    from umi.competition_cohort_public_api import CohortPublicApiConfig
+
+    config = CohortPublicApiConfig.model_validate({"results": {"directory": str(root)}})
+    url = f"/v1/competition/cohorts/{projection.cohort_sha256}/model-license-adoptions"
+    with TestClient(create_cohort_public_app(config)) as client:
+        assert client.get(url).json() == json.loads(canonical_json_bytes(legacy))
+        response = client.get(url + "?include_supported_revisions=true")
+        assert response.status_code == 200
+        assert response.json() == json.loads(canonical_json_bytes(projection))
+    assert {item.terms_url for item in projection.items} == {
+        module.NC_TERMS_URL,
+        module.NC_TERMS_V2_URL,
+    }
+
+
+def test_upgraded_client_remains_compatible_with_server_before_revision_query(
+    approved_case, policy
+):
+    history = approved_case["history"]
+    previous_body = approved_case["adoption"].adoption.model_copy(
+        update={
+            "training_rights_policy_sha256": LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256,
+            "noncommercial_terms_sha256": LEGACY_NC_CONTRIBUTION_TERMS_SHA256,
+        }
+    )
+    previous = SignedModelLicenseTermsAdoption(
+        adoption=previous_body, signatures=signatures(previous_body)
+    )
+    projection = module.project_model_license_adoptions(history, policy, (previous,))
+    old_app = FastAPI()
+
+    # This is the retained server's route signature: it accepts no revision query.
+    @old_app.get("/v1/competition/cohorts/{cohort}/model-license-adoptions")
+    def old_route(cohort: str):
+        assert cohort == projection.cohort_sha256
+        return projection.model_dump(mode="json", by_alias=True)
+
+    with TestClient(old_app) as server:
+
+        def request_old_server(request):
+            assert request.url.params["include_supported_revisions"] == "true"
+            response = server.get(str(request.url))
+            return httpx.Response(response.status_code, json=response.json())
+
+        result = fetch_model_license_adoptions(
+            origin="https://intake.example",
+            history=history,
+            policy=policy,
+            expected_tip_sha256=digest(history.genesis),
+            current_block=210,
+            transport=httpx.MockTransport(request_old_server),
+        )
+    assert result == projection
+
+
+def test_legacy_discovery_does_not_advertise_unreadable_v2_when_no_v1_selected(
+    approved_case, policy
+):
+    current = module.project_model_license_adoptions(
+        approved_case["history"], policy, (approved_case["adoption"],)
+    )
+    legacy = module.model_license_client_view(current)
+    assert legacy.status == "not_selected" and legacy.items == ()
+    assert module.model_license_client_view(current, include_supported_revisions=True) == current
+
+
+def test_public_metadata_cannot_cross_rights_and_supplement_revisions(approved_case, policy):
+    body = approved_case["adoption"].adoption.model_copy(
+        update={"noncommercial_terms_sha256": LEGACY_NC_CONTRIBUTION_TERMS_SHA256}
+    )
+    signed = SignedModelLicenseTermsAdoption(adoption=body, signatures=signatures(body))
+    with pytest.raises(ValueError, match="conditional_model_terms_not_supported"):
+        module.project_model_license_adoptions(approved_case["history"], policy, (signed,))

@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_artifacts import _artifact, _directory, verify_preserved_bundle
 from .competition_cohort_model_acceptance import ModelArtifactReviewInputs
@@ -35,6 +35,7 @@ class StandingModelReviewPolicy(StrictProtocolModel):
         str,
         Field(pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"),
     ]
+    training_rights_policy_sha256: Hex32 | None = None
     maximum_document_bytes: Annotated[int, Field(ge=1, le=4 * 1024**2)] = 2 * 1024**2
     maximum_total_document_bytes: Annotated[int, Field(ge=1, le=12 * 1024**2)] = 8 * 1024**2
     complete_declared_bundle_rights_approved: Literal[True]
@@ -45,7 +46,18 @@ class StandingModelReviewPolicy(StrictProtocolModel):
     def bounded_documents(self):
         if self.maximum_document_bytes > self.maximum_total_document_bytes:
             raise ValueError("per-document review limit exceeds the total limit")
+        if self.training_rights_policy_sha256 is not None:
+            from .competition_model_training_rights import training_rights_policy
+
+            training_rights_policy(self.training_rights_policy_sha256)
         return self
+
+    @model_serializer(mode="wrap")
+    def preserve_original_policy(self, handler):
+        value = handler(self)
+        if self.training_rights_policy_sha256 is None:
+            value.pop("training_rights_policy_sha256", None)
+        return value
 
 
 class StaticModelReviewHeld(ValueError):
@@ -161,23 +173,31 @@ def _review_from_documents(
         raise StaticModelReviewHeld("declared_provenance_document_missing")
 
     from .competition_model_training_rights import (
-        NC_CONTRIBUTION_TERMS_SHA256,
+        LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256,
         declared_nc_training,
         validate_model_training_provenance,
+        validate_model_training_terms,
     )
 
     license_adoption, training_review = None, None
     try:
         if bundle.license_adoption is not None:
             license_adoption = verify_model_license_adoption(bundle, policy)
-            if license_adoption.noncommercial_terms_sha256 != NC_CONTRIBUTION_TERMS_SHA256:
-                raise StaticModelReviewHeld("conditional_model_terms_not_supported")
+            validate_model_training_terms(
+                rights_policy_sha256=license_adoption.training_rights_policy_sha256,
+                supplemental_terms_sha256=license_adoption.noncommercial_terms_sha256,
+            )
             training_review = validate_model_training_provenance(
                 bundle,
                 raw_documents,
                 rights_policy_sha256=license_adoption.training_rights_policy_sha256,
             )
-        elif declared_nc_training(raw_documents):
+        elif declared_nc_training(
+            raw_documents,
+            rights_policy_sha256=(
+                standing.training_rights_policy_sha256 or LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256
+            ),
+        ):
             raise StaticModelReviewHeld("declared_nc_training_requires_authenticated_nc_route")
     except ValueError as error:
         raise StaticModelReviewHeld(str(error)) from error

@@ -20,7 +20,10 @@ def fetch_model_license_adoptions(
     )
     origin = validate_intake_origin(origin)
     url = (
-        origin + "/v1/competition/cohorts/" + view.state.cohort_sha256 + "/model-license-adoptions"
+        origin
+        + "/v1/competition/cohorts/"
+        + view.state.cohort_sha256
+        + "/model-license-adoptions?include_supported_revisions=true"
     )
     try:
         with (

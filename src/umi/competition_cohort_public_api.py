@@ -17,7 +17,10 @@ from starlette.responses import JSONResponse
 
 from .competition_cohort_model_scores import PublicModelScoreCache
 from .competition_cohort_public_downloads import PublicModelDownload
-from .competition_cohort_public_licenses import read_model_license_adoptions
+from .competition_cohort_public_licenses import (
+    model_license_client_view,
+    read_model_license_adoptions,
+)
 from .competition_cohort_public_results import PublicModelCatalog, PublicPaidResults
 from .competition_public_results_directory import (
     PublicResultsDirectory,
@@ -250,11 +253,15 @@ def cohort_public_routes(
         }
 
     @router.get("/v1/competition/cohorts/{cohort}/model-license-adoptions")
-    async def model_license_adoptions(cohort: Annotated[str, ApiPath(pattern=_ID)]):
+    async def model_license_adoptions(
+        cohort: Annotated[str, ApiPath(pattern=_ID)],
+        include_supported_revisions: bool = False,
+    ):
         return await bounded(
-            lambda: read_model_license_adoptions(root, cohort).model_dump(
-                mode="json", by_alias=True
-            )
+            lambda: model_license_client_view(
+                read_model_license_adoptions(root, cohort),
+                include_supported_revisions=include_supported_revisions,
+            ).model_dump(mode="json", by_alias=True)
         )
 
     @router.get("/v1/competition/cohorts/{cohort}/model-results")
