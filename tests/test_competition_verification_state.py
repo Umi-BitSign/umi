@@ -1,13 +1,14 @@
 """Durability, explicit loss repair and shared authority scope lifecycle."""
 
 import json
-from concurrent.futures import ThreadPoolExecutor
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from umi import competition_verification_reuse as reuse_module
 from umi.competition_verification_reuse import VerificationReuse, verified_replay
-from umi.private_files import PrivateStateBusyError
 from umi.protocol import StrictProtocolModel
 
 from .test_open_competition import policy as policy
@@ -66,20 +67,41 @@ def test_missing_completed_receipt_is_explicit_repair(tmp_path, policy, caplog):
     assert any(e.get("state") == "repair_required" for e in events)
 
 
-def test_other_worker_cannot_repeat_in_progress_native_work(tmp_path):
+def test_other_process_cannot_repeat_in_progress_native_work(tmp_path):
     first = VerificationReuse(tmp_path / "owner", owner="one")
     second = VerificationReuse(tmp_path / "owner", owner="one")
-
-    def other():
-        with second.exclusive():
-            pytest.fail("another worker borrowed an in-progress native scope")
-
-    with (
-        first.exclusive(),
-        ThreadPoolExecutor(max_workers=1) as pool,
-        pytest.raises(PrivateStateBusyError),
-    ):
-        pool.submit(other).result()
+    # Independent processes fail fast on the file lock. Same-process threads
+    # intentionally serialize and reuse completed work (covered by throughput
+    # tests), so waiting for such a thread while retaining its lock deadlocks.
+    code = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from umi.competition_verification_reuse import VerificationReuse
+from umi.private_files import PrivateStateBusyError
+try:
+    with VerificationReuse(Path(sys.argv[2]), owner="one").exclusive():
+        raise AssertionError("another process borrowed an in-progress native scope")
+except PrivateStateBusyError:
+    print("busy")
+"""
+    with first.exclusive():
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                "-c",
+                code,
+                str(Path(__file__).parents[1] / "src"),
+                str(tmp_path / "owner"),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=15,
+        )
+    assert result.stdout.strip() == "busy"
     with second.exclusive():
         pass
 

@@ -90,9 +90,37 @@ async def test_original_lock_ofd_remains_exclusive_after_sender_closes(channels,
     os.close(probe)
 
 
-async def test_drain_owns_native_descendant_that_created_a_separate_session(tmp_path):
+def test_drain_owns_native_descendant_that_created_a_separate_session():
     import subprocess
     import sys
+    from pathlib import Path
+
+    # The native broker owns a fresh process. Pytest can already own unrelated
+    # multiprocessing trackers which intentionally ignore SIGTERM.
+    root = Path(__file__).parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            "import asyncio,sys;sys.path[:0]=[sys.argv[1],sys.argv[2]];"
+            "from tests.test_competition_reward_writer_broker_channel "
+            "import _drain_descendant_case;asyncio.run(_drain_descendant_case())",
+            str(root),
+            str(root / "src"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+async def _drain_descendant_case():
+    import subprocess
+    import sys
+    import time
 
     from umi.competition_reward_writer_broker import _drain_child, _own_child_tree
 
@@ -103,7 +131,7 @@ async def test_drain_owns_native_descendant_that_created_a_separate_session(tmp_
             sys.executable,
             "-c",
             "import os,subprocess,sys;"
-            "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(300)'],"
+            "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(15)'],"
             "start_new_session=True);"
             "print(p.pid,flush=True);os._exit(7)",
         ],
@@ -113,7 +141,9 @@ async def test_drain_owns_native_descendant_that_created_a_separate_session(tmp_
     assert child.stdout is not None
     descendant = int(await asyncio.to_thread(child.stdout.readline))
     try:
+        started = time.monotonic()
         await asyncio.wait_for(_drain_child(child, left, cancel=False), 10)
+        assert time.monotonic() - started < 10, "native drain waited for natural child expiry"
         assert child.returncode == 7
         with pytest.raises(ProcessLookupError):
             os.kill(descendant, 0)
