@@ -515,11 +515,14 @@ def test_miner_failures_score_zero_but_infrastructure_voids(policy):
 
 
 @pytest.fixture
-def scenario(policy, tmp_path):
+def scenario(policy, tmp_path, request):
     archive = tmp_path / "archive"
     baseline = bundle_at(tmp_path / "baseline")
     preserve_bundle(baseline, tmp_path / "baseline", archive, policy)
-    candidate = bundle_at(tmp_path / "candidate", "candidate", digest(baseline))
+    parent = getattr(request, "param", "current")
+    if parent == "current":
+        parent = digest(baseline)
+    candidate = bundle_at(tmp_path / "candidate", "candidate", parent)
     preserve_bundle(candidate, tmp_path / "candidate", archive, policy)
     store = CompetitionStore(tmp_path / "state", policy)
     store.initialize_baseline(baseline, archive)

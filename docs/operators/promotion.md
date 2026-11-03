@@ -6,6 +6,18 @@
 - [Model promotion agreement](#open-competition-promotion-agreement)
 - [Reviewed promotion delivery](#open-competition-promotion-delivery)
 
+The model bundle's `parent_baseline_sha256` records training provenance. It may
+be absent for a model trained from scratch or name another permitted checkpoint.
+It need not match the incumbent used for paired quality measurement. Promotion
+still requires the applicable quality gates, rights/reconstruction review and
+the current history head. `previous_promotion_sha256` binds that history head;
+it does not change the model's training parent. Preserve signed submissions and
+bundles when the evaluation reference advances. Reward eligibility grace never
+authorizes promotion of a weaker reference.
+
+An explicitly reviewed runtime-only port still binds its declared parent to the
+model being transformed; that binding authenticates the port itself.
+
 ## Cohort winner baseline publication
 
 Use `apply-cohort-baseline` to publish an already quorum-certified cohort winner
@@ -201,6 +213,17 @@ earlier local evaluation evidence.
 The v1 review and `umi-model-baseline/1` history remain supported with their
 original bytes and observation semantics. A v2 review does not rewrite a model
 already promoted through v1 or transfer its contributor attribution.
+
+Before a direct-promotion writer accepts a model with a different training
+parent, update every consuming promotion reader through its supported signed
+source or host update path. Older writers reject that case, and older v1 readers
+reject its retained receipt on restart. Include coordinator, independent
+evaluator, validator/settlement and reference-publication histories in the
+installed-version check. Keep a compatible reader available for rollback;
+do not rewrite or discard history. This compatibility step remains necessary
+while any selected reader enforces the former training-parent equality. Model
+upload clients do not need a changed manifest or renewed submission solely
+because the incumbent advanced.
 
 <a id="open-competition-promotion-agreement--verification-boundary"></a>
 

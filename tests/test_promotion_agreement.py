@@ -125,6 +125,65 @@ def receipt(store):
         ).fetchone()
 
 
+@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize(
+    "scenario",
+    [None, "current", "89" * 32],
+    indirect=True,
+    ids=["from-scratch", "current-parent", "other-parent"],
+)
+def test_training_parent_is_preserved_through_promotion_and_replay(scenario, tmp_path, version):
+    s = scenario
+    signed_bytes = canonical_json_bytes(s.model)
+    bundle_bytes = canonical_json_bytes(s.candidate)
+    initial = s.store.baseline()
+    review = s.review if version == 1 else agreed_review(s)
+    other = independent_store(s, tmp_path / "independent")
+    record = promote(s, s.store, review, 150)
+    assert record["schema"] == f"umi-model-baseline/{version}"
+    assert record["previous_promotion_sha256"] == _record_digest(initial)
+    assert promote(s, other, review, 150) == record
+
+    def retained(store):
+        with store._connection() as connection:
+            return {
+                table: connection.execute(f"SELECT * FROM {table}").fetchall()
+                for table in ("submissions", "promotions", "promotion_receipts")
+            }
+
+    before = retained(s.store)
+    reopened = CompetitionStore(s.store.directory, s.policy)
+    assert reopened.baseline() == record
+    assert promote(s, reopened, review, 154) == record
+    round_id = digest(s.round)
+    head = reopened.reviewed_promotion_head(round_id, maximum_bytes=1_000_000)
+    assert head.promotion_sha256 == _record_digest(record)
+    assert (
+        reopened.reviewed_promotion_at(round_id, head.promotion_sha256, maximum_bytes=1_000_000)
+        == head
+    )
+    with pytest.raises(ValueError, match=r"exceeds|oversized"):
+        reopened.reviewed_promotion_head(round_id, maximum_bytes=1)
+    row = reopened.project(
+        round_=s.round,
+        suite=s.suite,
+        evaluations=(
+            (s.model, s.evaluation),
+            (s.endpoint, test_open_competition.result_for(s.endpoint, s.round, s.suite)),
+        ),
+        snapshot=snapshot(154),
+        current_block=154,
+    )
+    assert sum(row.weights) == 65535
+    assert retained(reopened) == before
+    with reopened._connection() as connection:
+        assert connection.execute(
+            "SELECT body FROM submissions WHERE digest=?", (digest(s.model.submission),)
+        ).fetchone() == (signed_bytes,)
+    assert canonical_json_bytes(s.model) == signed_bytes
+    assert canonical_json_bytes(s.candidate) == bundle_bytes
+
+
 def test_separate_receipt_blocks_and_certificate_sets_agree(scenario, tmp_path):
     s = scenario
     review = agreed_review(s)
