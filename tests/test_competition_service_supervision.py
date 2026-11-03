@@ -3,7 +3,6 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-
 from umi.competition_chain import FinalizedRegistrationProvider
 from umi.competition_service_supervision import run_supervised_server
 
@@ -26,6 +25,39 @@ class Server:
             for task in self.server_state.tasks:
                 task.cancel()
             self.closed = True
+
+
+async def test_shutdown_closes_queued_admission_once_before_owned_request_drain():
+    closing, drained = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    class WaitingServer(Server):
+        async def serve(self):
+            self.started = True
+            while not self.should_exit:
+                await asyncio.sleep(0)
+            await closing.wait()
+            drained.set()
+
+    def begin_shutdown():
+        calls.append(True)
+        assert not drained.is_set()
+        closing.set()
+
+    server = WaitingServer()
+    running = asyncio.create_task(
+        run_supervised_server(
+            server,
+            (),
+            poll_seconds=0.001,
+            begin_shutdown=begin_shutdown,
+        )
+    )
+    while not server.started:
+        await asyncio.sleep(0)
+    server.should_exit = True
+    await asyncio.wait_for(running, 2)
+    assert calls == [True] and drained.is_set()
 
 
 async def test_shutdown_grace_does_not_replace_original_owned_failure(monkeypatch):
