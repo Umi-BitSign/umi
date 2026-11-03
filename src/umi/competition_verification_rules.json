@@ -120,7 +120,7 @@
     "competition_cohort_miner_contracts.py": "eb08376f378ba1105dedc1b00eb2f4cceff11db315e65d2cc7d52835830002d5",
     "competition_cohort_miner_startup.py": "7511a633c1530da5c378b54ac74e8ff95314c11fda2c3c0c8438284271666c4d",
     "competition_cohort_model_acceptance.py": "3ae5606c218a62f85df5cc34722ca983abce41d85a3152bafad91aaefa4ffdd4",
-    "competition_cohort_model_acceptance_store.py": "b183bf455b215b5943d7b9bed8982b2c1d7f58acd389aa84cd99f5c3181cddef",
+    "competition_cohort_model_acceptance_store.py": "8f3838c5d4b3ca21b57bd7ee866f9ac2adb8c02546c0bdb99e6e8ab71a722c95",
     "competition_cohort_model_acceptance_worker.py": "a163b2ad7546f626fd755fd2ef4bebcc24969ab9058cd12f5a222a4f44e14211",
     "competition_cohort_model_award.py": "b9eda0c822e509c040a9d752a034de5548bcf374aa495efac6bbed4c22613eee",
     "competition_cohort_model_batch.py": "286387095a8eaa0d45f34cae3c824add3a5303ced2d5c53e0397815c7eeeeba5",

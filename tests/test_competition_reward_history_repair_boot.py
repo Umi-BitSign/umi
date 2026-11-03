@@ -228,7 +228,9 @@ async def test_repair_uses_original_bindings_no_keys_and_closes_provider(
     with owned_reward_state(config):
         pass
     events = [
-        json.loads(record.args[0]) for record in caplog.records if record.name == repair.__name__
+        json.loads(record.getMessage().removeprefix("reward_history_repair "))
+        for record in caplog.records
+        if record.name == repair.__name__
     ]
     assert events[0]["planning_eta_seconds"] == [5, 120]
     assert "planning_assumption" in events[0]["eta_basis"]

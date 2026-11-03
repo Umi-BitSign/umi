@@ -1,5 +1,6 @@
 """Resume telemetry must not mistake fast restored rows for fresh work rate."""
 
+import ast
 import logging
 
 from umi import competition_reward_history_origin_migration as migration
@@ -9,7 +10,9 @@ def report(monkeypatch, caplog, **values):
     monkeypatch.setattr(migration.time, "monotonic", lambda: 100.0)
     caplog.set_level(logging.INFO)
     migration._report(total=100, started=0.0, last_changed=99.0, **values)
-    return caplog.records[-1].args
+    event, payload = caplog.records[-1].getMessage().split(" ", 1)
+    assert event == "reward_history_origin_migration_progress"
+    return ast.literal_eval(payload)
 
 
 def test_restore_does_not_create_optimistic_new_work_eta(monkeypatch, caplog):
