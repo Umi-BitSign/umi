@@ -240,16 +240,34 @@ class Signature(StrictProtocolModel):
 
 def sign_object(value: StrictProtocolModel, wallet: Any) -> Signature:
     """Sign with the caller's explicitly supplied hotkey; never open a wallet."""
+    return sign_competition_digest(digest(value), wallet)
+
+
+def sign_competition_digest(value_sha256: str, wallet: Any) -> Signature:
+    """Sign a locally prepared competition digest; this confers no validation.
+
+    Callers must derive it from the exact canonical object they own. This lower
+    level primitive permits a large exporter to count, hash and serialize once.
+    """
     import bittensor as bt
 
+    if not isinstance(value_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", value_sha256):
+        raise ValueError("invalid prepared competition digest")
     signer = bt.resolve_signer(wallet, role="hotkey")
-    scheme, signature = sign_response_digest(wallet, digest(value))
+    scheme, signature = sign_response_digest(wallet, value_sha256)
     return Signature(hotkey=signer.ss58_address, scheme=scheme, signature=signature)
 
 
 def verify_signature(value: StrictProtocolModel, signature: Signature) -> None:
+    verify_competition_digest(digest(value), signature)
+
+
+def verify_competition_digest(value_sha256: str, signature: Signature) -> None:
+    """Verify the signature of locally prepared exact competition bytes."""
+    if not isinstance(value_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", value_sha256):
+        raise ValueError("invalid prepared competition digest")
     if not verify_response_signature(
-        digest(value),
+        value_sha256,
         hotkey_ss58=signature.hotkey,
         scheme=signature.scheme,
         signature=signature.signature,

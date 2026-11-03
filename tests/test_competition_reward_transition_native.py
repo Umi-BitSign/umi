@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from umi import competition_reward_control as control_module
 from umi import competition_reward_control_archive as historical
 from umi import competition_reward_transition_native as native
 from umi.competition_reward_adoption import prepare_initial_reward_adoption
@@ -225,6 +226,114 @@ async def test_completed_semantics_survive_final_current_fence_failure(
         == args["proposal"]
     )
     reads.check()
+
+
+@pytest.mark.parametrize("changed_predecessor", [False, True])
+async def test_long_review_refreshes_only_current_proof_after_package(
+    transition_case, monkeypatch, changed_predecessor
+):
+    c = transition_case
+    original = c.args["observation"]
+    next_observation = await c.p.control(c.p.active) if changed_predecessor else original
+    clock = SimpleNamespace(now=original.captured_monotonic_ns)
+    renewed = replace(
+        next_observation,
+        captured_monotonic_ns=original.expires_monotonic_ns + 1,
+        expires_monotonic_ns=original.expires_monotonic_ns + 300_000_000_001,
+    )
+    # Substitute only the already authenticated current-proof adapter and its
+    # clock; the package/receipt review and both control fences remain native.
+    renewed = replace(renewed, _binding=control_module._binding(renewed))
+    monkeypatch.setattr(control_module, "time", SimpleNamespace(monotonic_ns=lambda: clock.now))
+    package = c.owner._package
+    package_calls, collections = [], []
+
+    async def slow_package(*args):
+        package_calls.append(args)
+        await package(*args)
+        clock.now = original.expires_monotonic_ns + 1
+
+    async def collect(hotkey):
+        assert len(package_calls) == 1
+        assert hotkey == c.reviewer.reader.series.control_hotkey
+        collections.append(hotkey)
+        return renewed
+
+    monkeypatch.setattr(c.owner, "_package", slow_package)
+    c.reviewer.provider = SimpleNamespace(collect_control=collect)
+    if changed_predecessor:
+        with pytest.raises(ValueError, match="no longer selected"):
+            await c.owner.review(**c.args)
+    else:
+        result = await c.owner.review(**c.args)
+        intent = native.validate_reward_adoption_review(result)
+        assert result.current_observation is renewed
+        assert intent.proposal == c.args["proposal"]
+        assert intent.control_evidence_sha256 == original.evidence_sha256
+        assert intent.control_metadata_sha256 == original.runtime.metadata_sha256
+        assert (
+            await c.owner.current_control(
+                renewed,
+                c.args["predecessor"].decision,
+                not_before_block=c.args["proposal"].issued_at_block,
+            )
+            is renewed
+        )
+    assert len(package_calls) == len(collections) == 1
+
+
+@pytest.mark.parametrize("fault", ["binding", "predecessor"])
+async def test_expired_invalid_control_cannot_trigger_refresh(transition_case, monkeypatch, fault):
+    c = transition_case
+    observed = c.args["observation"]
+    if fault == "binding":
+        observed = replace(observed, _binding="00" * 32)
+    else:
+        observed = await c.p.control(c.p.active)
+    monkeypatch.setattr(
+        control_module,
+        "time",
+        SimpleNamespace(monotonic_ns=lambda: observed.expires_monotonic_ns + 1),
+    )
+
+    async def unexpected(*args):
+        pytest.fail("invalid control must refuse without collecting a substitute")
+
+    c.reviewer.provider = SimpleNamespace(collect_control=unexpected)
+    with pytest.raises(ValueError) as refused:
+        await c.owner.current_control(
+            observed,
+            c.args["predecessor"].decision,
+            not_before_block=c.args["proposal"].issued_at_block,
+        )
+    assert not isinstance(refused.value, control_module.RewardControlExpired)
+
+
+async def test_refreshed_current_control_cannot_precede_pinned_issuance(
+    transition_case, monkeypatch
+):
+    c = transition_case
+    original = c.args["observation"]
+    now = original.expires_monotonic_ns + 1
+    renewed = replace(
+        original, captured_monotonic_ns=now, expires_monotonic_ns=now + 300_000_000_000
+    )
+    renewed = replace(renewed, _binding=control_module._binding(renewed))
+    monkeypatch.setattr(control_module, "time", SimpleNamespace(monotonic_ns=lambda: now))
+    collections = []
+
+    async def collect(hotkey):
+        collections.append(hotkey)
+        return renewed
+
+    c.reviewer.provider = SimpleNamespace(collect_control=collect)
+    with pytest.raises(ValueError, match="precedes pinned adoption issuance"):
+        await c.owner.current_control(
+            original,
+            c.args["predecessor"].decision,
+            not_before_block=original.snapshot.block_number + 1,
+        )
+    assert len(collections) == 1
 
 
 @pytest.mark.parametrize("kind", ["unsigned", "missing_quorum", "changed_signature"])

@@ -4,28 +4,34 @@ import logging
 
 from umi import competition_reward_history_origin_migration as migration
 
+from .logging_helpers import progress_payloads
+
 
 def report(monkeypatch, caplog, **values):
     monkeypatch.setattr(migration.time, "monotonic", lambda: 100.0)
     caplog.set_level(logging.INFO)
     migration._report(total=100, started=0.0, last_changed=99.0, **values)
-    return caplog.records[-1].args
+    return progress_payloads(
+        caplog.records,
+        logger=migration.__name__,
+        event="reward_history_origin_migration_progress",
+    )[-1]
 
 
-def test_restore_does_not_create_optimistic_new_work_eta(monkeypatch, caplog):
+def test_restore_does_not_create_optimistic_new_work_eta(monkeypatch, caplog, http_log_redaction):
     value = report(monkeypatch, caplog, done=90, restored=89, state="running")
     assert value["percent"] == 90
     assert value["eta_seconds"] is None
     assert value["planning_eta_seconds"] == [0.4, 2.5]
 
 
-def test_measured_rate_uses_only_new_completed_work(monkeypatch, caplog):
+def test_measured_rate_uses_only_new_completed_work(monkeypatch, caplog, http_log_redaction):
     value = report(monkeypatch, caplog, done=90, restored=80, state="running")
     assert value["eta_seconds"] == 100
     assert "new_blocks" in value["eta_basis"]
 
 
-def test_stalled_eta_withdrawn_and_completed_eta_zero(monkeypatch, caplog):
+def test_stalled_eta_withdrawn_and_completed_eta_zero(monkeypatch, caplog, http_log_redaction):
     value = report(monkeypatch, caplog, done=90, restored=80, state="stalled")
     assert value["eta_seconds"] is None
     assert value["planning_eta_seconds"] is None

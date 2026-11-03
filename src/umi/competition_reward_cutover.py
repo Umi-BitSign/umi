@@ -38,6 +38,7 @@ from .competition_reward_files import StandingRewardFiles
 from .competition_reward_history import RewardControlHistoryReader, validate_control_history
 from .competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
 from .competition_reward_signing import RewardDecisionJournal
+from .competition_reward_timing import activation_delay_blocks
 from .competition_reward_timing_review import review_activation_age
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread
@@ -474,17 +475,12 @@ class NativeRewardCutoverReview:
                 else activation_age.model_dump(mode="json", by_alias=True),
                 "signed_delay_blocks": self.config.series.maximum_proof_lag_blocks
                 + self.config.series.maximum_transaction_lifetime_blocks,
-                "selected_activation_delay_blocks": (
-                    0
-                    if self.config.reward_adoptions is not None
-                    and self.config.reward_adoptions.latest(cohort) is not None
-                    and self.config.reward_adoptions.latest(cohort).adoption.activation_age
-                    is not None
-                    and self.config.reward_adoptions.latest(
-                        cohort
-                    ).adoption.activation_age.skips_activation_delay
-                    else self.config.series.maximum_proof_lag_blocks
-                    + self.config.series.maximum_transaction_lifetime_blocks
+                "selected_activation_delay_blocks": activation_delay_blocks(
+                    self.config.series,
+                    None
+                    if self.config.reward_adoptions is None
+                    or self.config.reward_adoptions.latest(cohort) is None
+                    else self.config.reward_adoptions.latest(cohort).adoption,
                 ),
                 "current_activation_delay_remaining_blocks": (
                     None

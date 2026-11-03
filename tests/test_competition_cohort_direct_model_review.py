@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import shutil
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -291,6 +292,32 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(
         await durable.materialize(direct_request, durable_cache)
         assert await durable.materialized(direct_request, durable_cache)
     after_materialization = source.ranges_read
+    after_heads = source.heads_read
+    facts = durable.completed_cache_retirement(direct_request, durable_cache)
+    assert facts["model_sha256"] == digest(bundle) and facts["payload_bytes"] == len(body)
+    assert source.ranges_read == after_materialization and source.heads_read == after_heads
+    completion = next(Path(p) for p in facts["remote_records"] if p.endswith(".complete"))
+    original_completion = completion.read_bytes()
+    completion.unlink()
+    with pytest.raises(FileNotFoundError):
+        durable.completed_cache_retirement(direct_request, durable_cache)
+    assert not completion.exists()  # Cleanup must not repair its own prerequisites.
+    completion.write_bytes(original_completion)
+    completion.chmod(0o600)
+    assert source.ranges_read == after_materialization and source.heads_read == after_heads
+    native_read = direct_review._read_bounded_private_bytes
+
+    def replace_result_after_read(path, *, maximum_bytes):
+        raw = native_read(path, maximum_bytes=maximum_bytes)
+        if path.name == "result.json":
+            path.write_bytes(raw)
+        return raw
+
+    with monkeypatch.context() as patch:
+        patch.setattr(direct_review, "_read_bounded_private_bytes", replace_result_after_read)
+        with pytest.raises(ValueError, match="durable byte facts require repair"):
+            durable.completed_cache_retirement(direct_request, durable_cache)
+    assert source.ranges_read == after_materialization and source.heads_read == after_heads
     await durable.verify(direct_request, preserved=True)
     assert source.ranges_read == after_materialization
     # A separately booted downstream consumer reuses the account's completed

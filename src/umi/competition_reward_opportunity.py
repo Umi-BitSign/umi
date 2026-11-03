@@ -37,6 +37,7 @@ from .competition_reward_manifest import (
     StandingRewardOpportunityManifest,
     verify_reward_manifest,
 )
+from .competition_reward_timing import RewardActivationRule
 from .competition_reward_transition_timing import RewardPredecessorLiveAge
 from .competition_verification_snapshot import VerifiedPackageSnapshot
 from .open_competition import CompetitionPolicy, digest, identity
@@ -250,6 +251,7 @@ def prepare_early_release_revision(
     issued_at_block: int,
     reason: str,
     live_age: RewardPredecessorLiveAge | None = None,
+    activation_rule: RewardActivationRule | None = None,
 ) -> RewardModelAdoption:
     """Build an unsigned, exact-package operator proposal for quorum review.
 
@@ -302,13 +304,16 @@ def prepare_early_release_revision(
         canonical_json_bytes(
             latest.adoption.model_copy(
                 update={
-                    "schema_": "umi-standing-model-reward-adoption/5"
+                    "schema_": "umi-standing-model-reward-adoption/7"
+                    if activation_rule is not None
+                    else "umi-standing-model-reward-adoption/5"
                     if live_age is None
                     else "umi-standing-model-reward-adoption/6",
                     "revision": latest.adoption.revision + 1,
                     "predecessor_adoption_sha256": digest(latest.adoption),
                     "issued_at_block": issued_at_block,
                     "early_release": release,
+                    "activation_rule": activation_rule,
                 }
             )
         )
@@ -327,6 +332,7 @@ def prepare_initial_early_release_adoption(
     issued_at_block: int,
     reason: str,
     live_age: RewardPredecessorLiveAge | None = None,
+    activation_rule: RewardActivationRule | None = None,
 ) -> RewardModelAdoption:
     """Include the ordinary operator release in a future cohort's first vote."""
     verify_reward_manifest(canonical_json_bytes(manifest), series, policy)
@@ -373,10 +379,13 @@ def prepare_initial_early_release_adoption(
         canonical_json_bytes(
             initial.model_copy(
                 update={
-                    "schema_": "umi-standing-model-reward-adoption/5"
+                    "schema_": "umi-standing-model-reward-adoption/7"
+                    if activation_rule is not None
+                    else "umi-standing-model-reward-adoption/5"
                     if live_age is None
                     else "umi-standing-model-reward-adoption/6",
                     "early_release": release,
+                    "activation_rule": activation_rule,
                 }
             )
         )
@@ -413,6 +422,7 @@ def select_signed_early_release_revision(
         issued_at_block=signed.adoption.issued_at_block,
         reason=release.reason,
         live_age=release.live_age if isinstance(release, RewardAutomaticRelease) else None,
+        activation_rule=signed.adoption.activation_rule,
     )
     if signed.adoption != expected:
         raise ValueError("signed early release differs from its qualified proposal")

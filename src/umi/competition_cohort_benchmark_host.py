@@ -13,6 +13,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_serializer, model_validator
 
+from .competition_cohort_cache_retirement import TerminalModelCacheRetirement
 from .competition_cohort_execution_journal import CohortExecutionConfig, CohortExecutionJournal
 from .competition_cohort_executor import CohortExecutionWorker, CohortExecutor
 from .competition_cohort_history_http import CohortHistoryHTTPClient, CohortHistoryReader
@@ -241,6 +242,10 @@ class BenchmarkHost:
             maximum_rounds=65536,
             maximum_bytes=c.maximum_state_bytes,
         )
+        if isinstance(self.sandbox, DirectCohortCpuSandbox):
+            self.worker.maintenance = TerminalModelCacheRetirement(
+                self.worker, self.journal, promotion_store
+            )
         self.files = RequestCompletionFiles(
             Path(c.request_export_directory), maximum_bytes=config.request_replay_bytes
         )

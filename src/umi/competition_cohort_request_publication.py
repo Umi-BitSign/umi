@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from threading import Event
 
@@ -18,6 +19,7 @@ from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_d
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
 from .competition_cohort_intake import CohortIntakePublisher, history_tip
 from .competition_cohort_order_signer import CohortOrderHistory
+from .competition_cohort_publication_completion import RequestPublicationCompletion
 from .competition_cohort_publication_objects import PublicationObjects
 from .competition_cohort_request_binding import retain_request_binding
 from .competition_cohort_request_closure import CohortRequestClosure
@@ -26,21 +28,24 @@ from .competition_cohort_request_phase import (
     RequestProgressReviewRecord,
     replay_request_completion,
 )
-from .competition_cohort_request_progress import request_closure_progress
+from .competition_cohort_request_progress import certified_request_prefix, request_closure_progress
 from .competition_cohort_reward_package import MAX_PACKAGE_OBJECTS, ReplayObjectCollector
-from .competition_cohort_service_closure import (
-    CohortServiceRequestClosure,
-    verify_certified_service_request_closure,
-)
+from .competition_cohort_seal_reuse import IntakeSealReuse
+from .competition_cohort_service_closure import CohortServiceRequestClosure
 from .competition_cohort_service_seal import ServiceWorkSeal
 from .competition_cohort_settlement_config import SettlementOriginalSources
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from .competition_execution import ExecutionBoundary
 from .competition_forecast import forecast_subscope
-from .competition_verification_reuse import VerificationReuse, verification_owner_operation
+from .competition_verification_reuse import (
+    VerificationReuse,
+    VerificationSourceChanged,
+    verification_owner_operation,
+)
+from .competition_verification_snapshot import _stamp
 from .competition_work_progress import cancellable_work, check_work_cancelled, progress_items
 from .concurrency import run_owned_thread
-from .host_memory_runtime import memory_operation
+from .host_memory_runtime import authorize_memory, memory_operation
 from .open_competition import digest
 from .private_files import private_path, publish_private_model
 from .protocol import canonical_json_bytes
@@ -52,6 +57,7 @@ class CertifiedRequestExport:
     objects: Mapping[str, bytes]
     observations: tuple[ExecutionBoundary, ...]
     seals: tuple[ServiceWorkSeal, ...]
+    completion: object | None = None
 
 
 class CohortRequestSettlementPublisher:
@@ -64,8 +70,10 @@ class CohortRequestSettlementPublisher:
         *,
         sources: SettlementOriginalSources,
         history_directory: Path,
+        proof_completed: Callable[[ExecutionBoundary], Awaitable[bool]] | None = None,
     ):
         self.source, self.capture, self.publish_proof = source, capture, publish_proof
+        self.proof_completed = proof_completed
         if (
             sources.intake != source.intake.config
             or sources.eligible_tracks != source.intake.tracks
@@ -108,24 +116,67 @@ class CohortRequestSettlementPublisher:
                 },
             )
         )
+        self.completion = RequestPublicationCompletion(self)
 
     @verification_owner_operation
-    @memory_operation(
-        operation="requests_publish", scope=lambda self, history: (digest(history.plan), "requests")
-    )
     async def __call__(self, history: CohortRecoveryHistory) -> None:
         if digest(history.plan) != self.source.cohort:
             raise ValueError("request publication belongs to another cohort")
-        await self.intake(history)
-        observed = await self.capture()
+        authorize_memory("requests_publish", self.source.cohort, "requests", lane="transient")
+        completed = await run_owned_thread(self.completion.load)
+        if completed is not None:
+            published = await run_owned_thread(self.source.intake.history, self.source.cohort)
+            if published != history:
+                await self._publish_pending(history, completed)
+                return
+            observed = await self.capture()
+            proofs_current = self.proof_completed is not None
+            if self.proof_completed is not None:
+                for observation in completed.observations:
+                    proofs_current = await self.proof_completed(observation) and proofs_current
+            # The final cheap authority/source/output check follows asynchronous
+            # proof checks. An unchanged completed call never acquires the
+            # aggregate publication lane or walks native receipt dependencies.
+            changed, history_current = await run_owned_thread(
+                self.completion.check, completed, observed.snapshot.block
+            )
+            if proofs_current and not changed and history_current:
+                return
+            await self._resume(completed)
+            return
+        await self._publish_pending(history)
+
+    @memory_operation(
+        operation="requests_publish",
+        scope=lambda self, history, completed=None: (self.source.cohort, "requests"),
+    )
+    async def _publish_pending(self, history, completed=None):
         cancel = Event()
         with cancellable_work(cancel):
-            exported = await run_owned_thread(
-                self._export, observed.snapshot.block, on_cancel=cancel.set
-            )
+            await self.intake(history)
+            if completed is not None:
+                await self._resume_owned(completed)
+                return
+            observed = await self.capture()
+            block = observed.snapshot.block
+            if self.completion.path.exists():
+                completed = await run_owned_thread(
+                    self.completion._migrate, block, on_cancel=cancel.set
+                )
+                await self._resume_owned(completed)
+                return
+            exported = await run_owned_thread(self._export, block, on_cancel=cancel.set)
             if exported is None:
                 return
-            await run_owned_thread(self._objects, exported, on_cancel=cancel.set)
+            outputs = await run_owned_thread(self._objects, exported, on_cancel=cancel.set)
+            if exported.completion is not None:
+                exported = CertifiedRequestExport(
+                    exported.history,
+                    exported.objects,
+                    exported.observations,
+                    exported.seals,
+                    exported.completion.model_copy(update={"outputs": outputs}),
+                )
             for observation in exported.observations:
                 await self.publish_proof(observation)
             # Recheck the selected authority after asynchronous proof delivery.
@@ -134,7 +185,41 @@ class CohortRequestSettlementPublisher:
                 self._commit, exported, observed.snapshot.block, on_cancel=cancel.set
             )
 
-    def _capture(self, current_block: int, *, connection=None):
+    @memory_operation(
+        operation="requests_publish",
+        scope=lambda self, completion: (self.source.cohort, "requests"),
+    )
+    async def _resume(self, completion):
+        await self._resume_owned(completion)
+
+    async def _resume_owned(self, completion):
+        cancel = Event()
+        with cancellable_work(cancel):
+            observed = await self.capture()
+            changed, _history_current = await run_owned_thread(
+                self.completion.check, completion, observed.snapshot.block, on_cancel=cancel.set
+            )
+            if changed:
+                completion = await run_owned_thread(
+                    self.completion.repair_outputs, completion, changed, on_cancel=cancel.set
+                )
+            for observation in completion.observations:
+                await self.publish_proof(observation)
+            observed = await self.capture()
+            captured = await run_owned_thread(
+                partial(self._capture, observed.snapshot.block, include_records=False),
+                on_cancel=cancel.set,
+            )
+            if captured is None:
+                self.completion.repair_required("completed_publication_lost_its_closure")
+            exported = CertifiedRequestExport(
+                completion.history, {}, completion.observations, captured[6], completion
+            )
+            await run_owned_thread(
+                self._commit, exported, observed.snapshot.block, on_cancel=cancel.set
+            )
+
+    def _capture(self, current_block: int, *, connection=None, include_records=True):
         owner = self.source
         check_work_cancelled()
         selected = owner.intake._connection() if connection is None else nullcontext(connection)
@@ -185,24 +270,34 @@ class CohortRequestSettlementPublisher:
                 or any(s is None for s in seals)
             ):
                 raise ValueError("request publication changed an owner queue fence")
-            records = tuple(owner.intake._records(db, history))
+            reuse = IntakeSealReuse(owner.intake, db)
+            tips = {digest(history.genesis), *(digest(t.transition) for t in history.transitions)}
+            intake_fence = dict(
+                files=reuse.files,
+                consents={
+                    key: value
+                    for key, value in reuse.sources("consent", owner.cohort).items()
+                    if value[1][-1] in tips
+                },
+            )
+            records = tuple(owner.intake._records(db, history)) if include_records else ()
             if (
                 len(records) > MAX_PACKAGE_OBJECTS
                 or sum(len(raw) for _, raw in records) > owner.replay_bytes
             ):
                 raise ValueError("request publication intake export exceeds its bound")
-            return history, prefix, decisions, record, index, state, seals, records
+            return history, prefix, decisions, record, index, state, seals, records, intake_fence
 
     def _export(self, current_block: int) -> CertifiedRequestExport | None:
         owner = self.source
         captured = self._capture(current_block)
         if captured is None:
             return None
-        history, prefix, decisions, record, index, state, seals, records = captured
+        history, prefix, decisions, record, index, state, seals, records, _intake = captured
         progress = record.progress
         # Only bounded metadata capture owns the intake writer fence. Immutable
         # evidence verification and its checkpoint writes run outside that fence.
-        with self.verification_reuse.exclusive():
+        with self.verification_reuse.selected(), self.verification_reuse.exclusive():
             objects = ReplayObjectCollector(self.objects, owner.replay_bytes)
             closure = CohortServiceRequestClosure.model_validate_json(
                 objects(progress.phase_result_sha256)
@@ -231,46 +326,54 @@ class CohortRequestSettlementPublisher:
                 intake_records=records,
                 objects=objects,
             )
-            verify_certified_service_request_closure(
+            certified_prefix = certified_request_prefix(
                 closure,
-                owner.roster,
                 objects,
                 owner.intake.policy,
                 history,
-                owner.transport,
-                expected_catalogs=owner.catalogs,
-                expected_seals=seals,
                 decision_source=decisions.__getitem__,
-                intake_records=records,
                 expected_tip_sha256=history_tip(history),
                 current_block=current_block,
+                tail=benchmark.tail,
             )
+            # replay_request_completion already reviewed this exact closure,
+            # roster, seals and original prefix. Keep the current certified
+            # authority check, without traversing its receipt a second time.
+            if certified_prefix != prefix:
+                raise ValueError("request publication changed its reviewed closure prefix")
             for seal in seals:
                 objects.retain(seal)
-            initial = history.model_copy(update={"transitions": history.transitions[: index + 1]})
-            observations = [
-                decisions[t.transition.evidence_sha256].observation
-                for t in initial.transitions
-                if t.transition.requires_progress_evidence
-            ]
-            observations.extend(reviewed.inventory_observations)
-            if benchmark.tail is not None and benchmark.tail.selected_observation is not None:
-                observations.append(benchmark.tail.selected_observation)
+            handoff = self._handoff(history, decisions, index)
+            observations = self._observations(handoff, benchmark, reviewed.inventory_observations)
             return CertifiedRequestExport(
-                CohortOrderHistory(
-                    history=initial,
-                    decisions=tuple(
-                        decisions[t.transition.evidence_sha256]
-                        for t in initial.transitions
-                        if t.transition.requires_progress_evidence
-                    ),
-                ),
+                handoff,
                 objects.values,
-                tuple({digest(value): value for value in observations}.values()),
+                observations,
                 seals,
+                self.completion.draft(captured, closure, benchmark, handoff, observations),
             )
 
-    def _objects(self, exported: CertifiedRequestExport) -> None:
+    @staticmethod
+    def _handoff(history, decisions, index):
+        initial = history.model_copy(update={"transitions": history.transitions[: index + 1]})
+        return CohortOrderHistory(
+            history=initial,
+            decisions=tuple(
+                decisions[t.transition.evidence_sha256]
+                for t in initial.transitions
+                if t.transition.requires_progress_evidence
+            ),
+        )
+
+    @staticmethod
+    def _observations(handoff, benchmark, inventory):
+        observations = [decision.observation for decision in handoff.decisions]
+        observations.extend(inventory)
+        if benchmark.tail is not None and benchmark.tail.selected_observation is not None:
+            observations.append(benchmark.tail.selected_observation)
+        return tuple({digest(value): value for value in observations}.values())
+
+    def _objects(self, exported: CertifiedRequestExport):
         seals = {digest(seal) for seal in exported.seals}
         keys = sorted(exported.objects)
         # Native export already authenticates these immutable object identities.
@@ -287,13 +390,7 @@ class CohortRequestSettlementPublisher:
             ),
             operation="request_object_delivery",
         ):
-            for key in progress_items(
-                keys,
-                stage="request_publication_delivery",
-                unit="objects",
-                cohort=self.source.cohort,
-            ):
-                self.objects.ensure(key, exported.objects.__getitem__, derived=key in seals)
+            return self.completion.snapshot(keys, exported.seals)
 
     def _commit(self, exported: CertifiedRequestExport, current_block: int) -> None:
         owner, initial = self.source, exported.history.history
@@ -317,14 +414,35 @@ class CohortRequestSettlementPublisher:
                 raise ValueError("request publication authority changed during delivery")
             # Capture and final publication share the same intake fence; there
             # is no unlocked gap after checking service/queue authority.
-            captured = self._capture(current_block, connection=connection)
+            captured = self._capture(current_block, connection=connection, include_records=False)
             if captured is None:
                 raise ValueError("request publication lost its original closure")
             if captured[6] != exported.seals:
                 raise ValueError("request publication changed its selected queue seals")
+            if (
+                exported.completion is not None
+                and self.completion.context(
+                    captured,
+                    exported.completion.native_identity,
+                    exported.completion.native_checksum,
+                )
+                != exported.completion.context
+            ):
+                self.completion.repair_required("publication_context_changed_during_delivery")
+            if exported.completion is not None:
+                self.completion.native_current(exported.completion)
+                changed, _ = self.completion.output_fences(exported.completion)
+                if changed:
+                    raise VerificationSourceChanged("publication outputs changed during delivery")
             check_work_cancelled()
             publish_private_model(
                 self.history_directory / (owner.cohort + ".json"),
                 exported.history,
                 maximum_bytes=8 * 1024**2,
             )
+            if exported.completion is not None:
+                self.completion.remember(
+                    exported.completion.model_copy(
+                        update={"history_stamp": _stamp(self.completion.path)}
+                    )
+                )

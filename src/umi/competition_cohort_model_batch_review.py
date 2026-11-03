@@ -27,6 +27,8 @@ from .competition_cohort_model_batch import (
 from .competition_execution import execution_boundary
 from .competition_work_progress import WorkProgress, work_heartbeats
 from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
+from .host_memory_runtime import compact_memory_error, memory_operation
+from .host_memory_workload_profile import selected_workload
 from .open_competition import Signature, digest, identity, verify_signature
 from .private_files import read_private_model
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -133,6 +135,9 @@ async def _prepare_all(reviewer, request, history, block):
     remaining = iter(request.requests)
     errors = []
     workers = min(reviewer.config.preparation_concurrency, len(request.requests))
+    workload = selected_workload()
+    if workload is not None:
+        workers = min(workers, workload.profile.maximum_preparation_workers)
     with (
         work_heartbeats(),
         WorkProgress(
@@ -150,7 +155,9 @@ async def _prepare_all(reviewer, request, history, block):
                 try:
                     await _prepare_entry(reviewer, item, history, block)
                 except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
-                    errors.append(error)
+                    # A failed item must not retain its input graph while later
+                    # items finish, including when preparation is serial.
+                    errors.append(compact_memory_error(error))
                 else:
                     progress.advance()
 
@@ -211,84 +218,88 @@ async def attest_model_batch(reviewer, request):
                     vote, request, reviewer.policy, signer=reviewer.config.signer
                 )
                 return vote
-            source = await reviewer.history(cohort)
-            history = source.history
-            block = execution_boundary(await reviewer.capture()).block
-            view = verify_cohort_history(
-                history,
-                reviewer.policy,
-                expected_tip_sha256=history_tip(history),
-                current_block=block,
-            )
-            if view.state.phase != "intake":
-                raise ValueError("model batch signing requires open native intake")
-            verify_model_acceptance_batch_body(
-                batch,
-                approved,
-                history,
-                reviewer.policy,
-                maximum_block=block,
-            )
-            if identity(reviewer.config.signer) in {
-                identity(item.acceptance.recipient_hotkey) for item in request.requests
-            }:
-                raise ValueError("model submitters cannot review their own artifacts")
-            # A selected cohort/adoption has one final signing candidate. Retain
-            # it before external work so a restart cannot sign a conflicting
-            # replacement header while old signatures are still in flight.
-            await run_owned_thread(
-                reviewer.journal.put,
-                "model_batch_selected_candidate",
-                cohort + ":" + digest(approved.adoption),
-                batch,
-            )
-            await _prepare_all(reviewer, request, history, block)
-            # Artifact I/O can take minutes. Check the mutable owner head once
-            # before signing; completed immutable model checks remain retained
-            # if an authenticated transition changed the signing context.
-            current = await reviewer.history(cohort)
-            final_block = execution_boundary(await reviewer.capture()).block
-            if current.history != history:
-                current_view = verify_cohort_history(
-                    current.history,
-                    reviewer.policy,
-                    expected_tip_sha256=history_tip(current.history),
-                    current_block=final_block,
-                )
-                if current_view.state.phase != "intake":
-                    raise OSError("model batch intake closed during preparation")
-            verify_model_acceptance_batch_body(
-                batch,
-                approved,
-                current.history,
-                reviewer.policy,
-                maximum_block=final_block,
-            )
-            await run_owned_thread(
-                reviewer.journal.put_many,
-                (
-                    ("model_batch_request", key, {"request_sha256": request_sha}),
-                    ("model_batch_adoption", cohort, approved),
-                    ("model_batch_candidate", batch.candidate_snapshot_sha256, batch),
-                ),
-            )
-            with WorkProgress(
-                "model_batch_signing",
-                1,
-                unit="certificates",
-                cohort=cohort,
-                estimate=False,
-                planning_range_seconds=(0, reviewer.config.signing_timeout_seconds),
-                planning_basis="planning_configured_signer_response_budget",
-            ) as progress:
-                signature = await wait_for_owned(
-                    reviewer.sign(batch),
-                    timeout=reviewer.config.signing_timeout_seconds,
-                )
-                vote = ModelBatchArtifactVote(batch=batch, signature=signature)
-                check_model_batch_vote(
-                    vote, request, reviewer.policy, signer=reviewer.config.signer
-                )
-                await run_owned_thread(reviewer.journal.put, "model_batch_vote", key, vote)
-                progress.advance()
-            return vote
+            return await _attest_model_batch_pending(reviewer, request, approved, key, request_sha)
+
+
+@memory_operation
+async def _attest_model_batch_pending(reviewer, request, approved, key, request_sha):
+    batch, cohort = request.batch, request.batch.cohort_sha256
+    source = await reviewer.history(cohort)
+    history = source.history
+    block = execution_boundary(await reviewer.capture()).block
+    view = verify_cohort_history(
+        history,
+        reviewer.policy,
+        expected_tip_sha256=history_tip(history),
+        current_block=block,
+    )
+    if view.state.phase != "intake":
+        raise ValueError("model batch signing requires open native intake")
+    verify_model_acceptance_batch_body(
+        batch,
+        approved,
+        history,
+        reviewer.policy,
+        maximum_block=block,
+    )
+    if identity(reviewer.config.signer) in {
+        identity(item.acceptance.recipient_hotkey) for item in request.requests
+    }:
+        raise ValueError("model submitters cannot review their own artifacts")
+    # A selected cohort/adoption has one final signing candidate. Retain
+    # it before external work so a restart cannot sign a conflicting
+    # replacement header while old signatures are still in flight.
+    await run_owned_thread(
+        reviewer.journal.put,
+        "model_batch_selected_candidate",
+        cohort + ":" + digest(approved.adoption),
+        batch,
+    )
+    await _prepare_all(reviewer, request, history, block)
+    # Artifact I/O can take minutes. Check the mutable owner head once
+    # before signing; completed immutable model checks remain retained
+    # if an authenticated transition changed the signing context.
+    current = await reviewer.history(cohort)
+    final_block = execution_boundary(await reviewer.capture()).block
+    if current.history != history:
+        current_view = verify_cohort_history(
+            current.history,
+            reviewer.policy,
+            expected_tip_sha256=history_tip(current.history),
+            current_block=final_block,
+        )
+        if current_view.state.phase != "intake":
+            raise OSError("model batch intake closed during preparation")
+    verify_model_acceptance_batch_body(
+        batch,
+        approved,
+        current.history,
+        reviewer.policy,
+        maximum_block=final_block,
+    )
+    await run_owned_thread(
+        reviewer.journal.put_many,
+        (
+            ("model_batch_request", key, {"request_sha256": request_sha}),
+            ("model_batch_adoption", cohort, approved),
+            ("model_batch_candidate", batch.candidate_snapshot_sha256, batch),
+        ),
+    )
+    with WorkProgress(
+        "model_batch_signing",
+        1,
+        unit="certificates",
+        cohort=cohort,
+        estimate=False,
+        planning_range_seconds=(0, reviewer.config.signing_timeout_seconds),
+        planning_basis="planning_configured_signer_response_budget",
+    ) as progress:
+        signature = await wait_for_owned(
+            reviewer.sign(batch),
+            timeout=reviewer.config.signing_timeout_seconds,
+        )
+        vote = ModelBatchArtifactVote(batch=batch, signature=signature)
+        check_model_batch_vote(vote, request, reviewer.policy, signer=reviewer.config.signer)
+        await run_owned_thread(reviewer.journal.put, "model_batch_vote", key, vote)
+        progress.advance()
+    return vote

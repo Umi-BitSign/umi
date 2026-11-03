@@ -10,10 +10,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 from bisect import bisect_right
 from collections.abc import Mapping
 from contextlib import suppress
-from functools import partial
 from pathlib import Path
 
 from .competition_artifacts import verify_preserved_bundle
@@ -31,7 +31,12 @@ from .competition_store import CompetitionStore
 from .concurrency import run_owned_thread
 from .host_memory_runtime import memory_operation
 from .open_competition import ModelBundle, digest, identity, model_content_digest, verify_signature
-from .private_files import ensure_private_directory, private_path, read_private_model
+from .private_files import (
+    ensure_private_directory,
+    lock_private_file,
+    private_path,
+    read_private_model,
+)
 
 logger = logging.getLogger(__name__)
 MAX_PREPARATION_BYTES = 16 * 1024**2
@@ -168,17 +173,22 @@ class SettlementArtifactPreparation:
     @memory_operation
     async def _prepare(self, key: str, path: Path) -> None:
         if key.startswith("local/"):
-            bundle = await run_owned_thread(
-                partial(
-                    read_private_model,
-                    path / "manifest.json",
-                    ModelBundle,
-                    maximum_bytes=MAX_PREPARATION_BYTES,
-                )
-            )
-            if digest(bundle) != path.name:
-                raise ValueError("settlement preparation manifest changed its identity")
-            await run_owned_thread(verify_preserved_bundle, bundle, self.archive, self.policy)
+
+            def prepare_local():
+                lock = self.archive / ".reference-working-set" / (path.name + ".lock")
+                lease = lock_private_file(lock, shared=True) if lock.exists() else None
+                try:
+                    bundle = read_private_model(
+                        path / "manifest.json", ModelBundle, maximum_bytes=MAX_PREPARATION_BYTES
+                    )
+                    if digest(bundle) != path.name:
+                        raise ValueError("settlement preparation manifest changed its identity")
+                    verify_preserved_bundle(bundle, self.archive, self.policy)
+                finally:
+                    if lease is not None:
+                        os.close(lease)
+
+            await run_owned_thread(prepare_local)
             return
         participant, certificate = await run_owned_thread(self._accepted, key, path)
         a = certificate.acceptance
@@ -218,6 +228,13 @@ class SettlementArtifactPreparation:
                 except (OSError, ValueError, RuntimeError) as error:
                     pending += 1
                     failures.append({"entry": key, "error_type": type(error).__name__})
+            reclaimed_archives = set()
+            for verifier in self.direct.values():
+                if stop.is_set():
+                    break
+                if verifier.archive not in reclaimed_archives:
+                    reclaimed_archives.add(verifier.archive)
+                    await verifier.reclaim_released_references()
             return {
                 "status": "settlement_artifacts_prepared"
                 if not pending

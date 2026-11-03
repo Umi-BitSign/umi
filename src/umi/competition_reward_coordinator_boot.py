@@ -432,6 +432,8 @@ async def run_reward_coordinator(
                 direct_artifacts,
                 store.directory / "model-reward-artifacts",
                 root / "direct-model-reward-receipts",
+                promotion=store,
+                maximum_promotion_bytes=config.maximum_promotion_bytes,
                 legacy_readers=selected_legacy_model_readers(
                     legacy_sources,
                     multipart=direct_artifacts.multipart,
@@ -439,6 +441,8 @@ async def run_reward_coordinator(
                 ),
             )
         )
+        if model_artifacts is not None:
+            resources.callback(model_artifacts.release_frozen_reference)
         preparation = StandingRewardPreparation(
             reader,
             store,

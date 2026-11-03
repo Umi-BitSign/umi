@@ -15,6 +15,7 @@ from pydantic import Field, model_serializer, model_validator
 
 from .competition_artifacts import (
     _directory,
+    _file_identity,
     _preserved_verification_record,
     _remember_preserved_verification,
     verify_preserved_bundle,
@@ -44,6 +45,7 @@ from .competition_model_cache_space import (
 )
 from .competition_model_materialization import materialize_model_files, pending_materialization
 from .competition_remote_model_verification import (
+    RemoteModelBytes,
     model_byte_store,
     remember_model_bytes,
     remote_identity,
@@ -54,6 +56,7 @@ from .concurrency import run_owned_thread
 from .open_competition import CompetitionPolicy, Hotkey, digest, identity, validate_bundle_policy
 from .private_files import (
     Directory,
+    _read_bounded_private_bytes,
     ensure_private_directory,
     private_path,
     publish_private_model,
@@ -89,12 +92,18 @@ class DirectModelReviewSourceConfig(StrictProtocolModel):
     ]
     materialization_concurrency: Literal[1] = 1
     materialization_boot_disk_cache: BootDiskModelCacheConfig | None = None
+    reference_working_set_reclamation: bool = False
+    reference_preservation_directory: Directory | None = None
 
     @model_serializer(mode="wrap")
     def preserve_legacy(self, handler):
         value = handler(self)
         if self.materialization_boot_disk_cache is None:
             value.pop("materialization_boot_disk_cache", None)
+        if not self.reference_working_set_reclamation:
+            value.pop("reference_working_set_reclamation", None)
+        if self.reference_preservation_directory is None:
+            value.pop("reference_preservation_directory", None)
         if self.verification_directory is None:
             value.pop("verification_directory", None)
         if "verification_concurrency" not in self.model_fields_set:
@@ -555,6 +564,74 @@ class DirectModelArtifactReviewer:
             total_bytes=payload.total_bytes,
         )
 
+    def completed_cache_retirement(self, request, archive):
+        """Require retained restore completion; never repair or read model payloads.
+
+        The execution owner supplies terminal authority and consumer release.
+        These byte facts alone do not authorize retirement or model admission.
+        """
+        archive = Path(archive)
+        bundle, payload, key = self._source(request, preserved=True)
+        retained = read_private_model(archive / "materialization.json", DirectModelMaterialization)
+        if retained != self._materialization_record(request):
+            raise ValueError("cache retirement changed its materialization")
+        expected = _preserved_verification_record(bundle, archive)
+        local = archive / (".verified-" + digest(bundle) + ".json")
+        documents = tuple(f.path for f in bundle.files if f.role in {"license", "provenance"})
+        with TransferProgress("model_cache_retirement_verification", 1, unit="models") as progress:
+            saved = model_byte_store(
+                self.verification_root,
+                key,
+                bundle,
+                payload,
+                self._verification_context(request),
+                documents,
+                progress,
+            )
+            if self.verification_root is None:
+                raise ValueError("cache retirement requires durable remote completion")
+            # Reading these private records takes no writer lease and cannot
+            # create a missing marker or silently redo original byte work.
+            if _read_bounded_private_bytes(local, maximum_bytes=4 * 1024**2) != expected:
+                raise ValueError("cache retirement local identity requires repair")
+            path = saved.path("object")
+            marker, result_path = path.with_suffix(".complete"), saved.root / "result.json"
+            stamps = {str(p): _file_identity(p.lstat()) for p in (path, marker, result_path)}
+            record = saved._validated_record(
+                _read_bounded_private_bytes(path, maximum_bytes=64 * 1024)
+            )
+            source = record["identity"]
+            if (
+                not isinstance(source, dict)
+                or set(source) != {"endpoint", "bucket", "key_sha256", "etag", "size_bytes"}
+                or source["endpoint"] != self.multipart.signer.endpoint
+                or source["bucket"] != self.multipart.signer.bucket
+                or source["key_sha256"] != sha256_hex(key.encode())
+                or source["size_bytes"] != payload.total_bytes
+                or _read_bounded_private_bytes(marker, maximum_bytes=64) != path.stem.encode()
+                or record["context"] != saved.context
+            ):
+                raise ValueError("cache retirement remote completion requires repair")
+            raw = _read_bounded_private_bytes(result_path, maximum_bytes=64 * 1024**2)
+            result = RemoteModelBytes.model_validate_json(raw)
+            if (
+                canonical_json_bytes(result) != raw
+                or record["result"] != digest(result)
+                or result.payload_sha256 != payload.payload_sha256
+                or set(result.documents) != set(documents)
+                or any(
+                    _file_identity(Path(name).lstat()) != stamp for name, stamp in stamps.items()
+                )
+            ):
+                raise ValueError("cache retirement durable byte facts require repair")
+            progress.advance(1, restored=True)
+            return {
+                "request_sha256": digest(request),
+                "model_sha256": digest(bundle),
+                "payload_bytes": payload.total_bytes,
+                "remote_records": stamps,
+            }
+
     async def _materialized(self, request, archive):
         request = ModelReviewRequest.model_validate_json(canonical_json_bytes(request))
         bundle = request.record.request.signed_submission.submission.model_bundle
@@ -585,6 +662,8 @@ class DirectModelSettlementVerifier:
         legacy_storage: LegacyModelSettlementStorage | None = None,
         legacy_readers: LegacyModelStorageReaders | None = None,
         certification_history=None,
+        promotion=None,
+        maximum_promotion_bytes=16 * 1024**2,
     ) -> None:
         self.artifacts = artifacts
         if legacy_storage is not None and legacy_readers is not None:
@@ -607,6 +686,7 @@ class DirectModelSettlementVerifier:
                 "legacy settlement storage differs from its selected policy, namespace or cache"
             )
         self.serial = asyncio.Lock()
+        self.references = None
         private_path(str(self.archive))
         ensure_private_directory(self.receipts)
         if (
@@ -615,6 +695,36 @@ class DirectModelSettlementVerifier:
             or self.receipts in self.archive.parents
         ):
             raise ValueError("direct settlement receipts and legacy archive must be disjoint")
+        if promotion is not None:
+            from .competition_cohort_reference_preparation import SettlementReferencePreparation
+
+            self.references = SettlementReferencePreparation(
+                artifacts,
+                self.archive,
+                promotion,
+                legacy=sources,
+                maximum_bytes=maximum_promotion_bytes,
+            )
+
+    async def ensure_frozen_reference(self, prepared):
+        if self.references is not None:
+            await self.references.ensure(prepared)
+
+    @asynccontextmanager
+    async def frozen_reference_scope(self, prepared):
+        if self.references is None or prepared is None:
+            yield
+        else:
+            async with self.references.scope(prepared):
+                yield
+
+    def release_frozen_reference(self):
+        if self.references is not None:
+            self.references.close()
+
+    async def reclaim_released_references(self):
+        if self.references is not None:
+            await self.references.reclaim_released()
 
     def legacy_for(self, cohort, *, certification_history=None):
         """Choose by the original certificate cohort; other cohorts keep native storage."""

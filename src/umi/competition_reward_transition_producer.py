@@ -1,7 +1,8 @@
 """Recurring operator-or-timeout adoption using the existing reward owners.
 
-Package discovery precedes the economics gate. A native-reviewed original is
-retained before signing, so a restart resumes the same issuance and quorum.
+Package discovery precedes the economics gate. The exact prepared original is
+retained before expensive review, so interruption preserves issuance and receipt
+reuse. Only completed native review can authorize its signatures or publication.
 Explicit lifecycle/settlement holds always take precedence over either trigger.
 """
 
@@ -23,6 +24,7 @@ from .competition_reward_opportunity import (
     prepare_initial_early_release_adoption,
 )
 from .competition_reward_signing import RewardQuorumPending
+from .competition_reward_timing import IMMEDIATE_ACTIVATION_RULE
 from .competition_reward_transition_anchor import RewardLiveAnchorMissing
 from .competition_reward_transition_native import NativeRewardTransitionReviewer
 from .competition_reward_transition_review import predecessor_live_age_from_owned_control
@@ -197,6 +199,11 @@ class StandingRewardTransitionProducer:
                 issued_at_block=current.snapshot.block_number,
                 reason=reason,
                 live_age=age,
+                activation_rule=(
+                    IMMEDIATE_ACTIVATION_RULE
+                    if approval is None
+                    else approval.approval.activation_rule
+                ),
             )
             if latest is None:
                 proposal = await run_memory_thread(
@@ -233,6 +240,13 @@ class StandingRewardTransitionProducer:
                 raise ValueError("operator-approved transition lost its exact approval")
             if approval is not None and proposal.early_release.reason != approval.approval.reason:
                 raise ValueError("operator-approved transition changed its retained reason")
+            if (
+                approval is not None
+                and proposal.activation_rule != approval.approval.activation_rule
+            ):
+                raise ValueError(
+                    "operator-approved transition changed its retained activation rule"
+                )
             observation = None
         with WorkProgress(
             "reward_transition_producer",
@@ -246,6 +260,12 @@ class StandingRewardTransitionProducer:
                 "missing delivery remains pending"
             ),
         ) as progress:
+            # This retains the prepared input, not a review or signing authority.
+            # A failed/restarted first review must keep its exact issuance so
+            # completed native receipts remain valid on the next attempt.
+            if self._original != saved:
+                await run_owned_thread(self.originals.put, "transition_original", slot, saved)
+                self._original = saved
             review = self._reviewed
             if review is None or review.intent.proposal != proposal:
                 if observation is None:
@@ -264,12 +284,14 @@ class StandingRewardTransitionProducer:
                     current_observation=current,
                     live_endpoint=live,
                 )
-                await run_owned_thread(self.originals.put, "transition_original", slot, saved)
-                self._original, self._reviewed = saved, review
-            else:
-                # Original package semantics remain reusable; current authority
-                # must still match before any new signatures or publication.
-                self.reviewer._control(current, predecessor, current=True)
+                self._reviewed = review
+                if review.current_observation is not None:
+                    current = review.current_observation
+            # Original package semantics remain reusable; the current signing
+            # fence still checks the returned or already collected observation.
+            current = await self.reviewer.current_control(
+                current, predecessor, not_before_block=proposal.issued_at_block
+            )
             progress.advance()
             if await run_owned_thread(self.controls.held, cohort):
                 return RewardTransitionProgress("progression_held", current)
@@ -311,9 +333,11 @@ class StandingRewardTransitionProducer:
                 progress.emit("waiting")
                 return RewardTransitionProgress("adoption_quorum_pending", current)
             progress.advance()
-            # The current observation must still be within its native validity
-            # interval after signing/delivery. Expiry retries the same intent.
-            self.reviewer._control(current, predecessor, current=True)
+            # Signing/delivery can outlive current proof too. Refresh only that
+            # fence, preserving the pinned intent and rejecting changed control.
+            current = await self.reviewer.current_control(
+                current, predecessor, not_before_block=proposal.issued_at_block
+            )
             if await run_owned_thread(self.controls.held, cohort):
                 return RewardTransitionProgress("progression_held", current)
             await self.signer.publish(slot, self.feed)

@@ -23,6 +23,7 @@ from .competition_cohort_endpoint_quality import replay_endpoint_archive_quality
 from .competition_cohort_execution_journal import CohortExecutionAssignment
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
 from .competition_cohort_orders import recoverable_order_job
+from .competition_cohort_quality_migration import restore_closed_participant_quality
 from .competition_cohort_recovery import ModelRewardCohortAuthority
 from .competition_cohort_request_closure import (
     CohortRequestClosure,
@@ -49,6 +50,7 @@ from .competition_cpu_efficiency_evidence import (
 from .competition_cpu_efficiency_policy import round_cpu_efficiency_authorization
 from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_exact_quality import ExactQuality
+from .competition_verification_reuse import verified_replay
 from .open_competition import (
     CaseOutput,
     CompetitionPolicy,
@@ -316,6 +318,12 @@ class ClosedQualityReview:
         self.objects, self.pulses = objects, pulses
         self.expected_tip_sha256, self.current_block = expected_tip_sha256, current_block
         self._outcomes: dict[str, ClosedParticipantQuality] = {}
+        self._tracks = {
+            p.admission.admission.submission_sha256: (
+                p.record.request.signed_submission.submission.track
+            )
+            for p in self.roster.participants
+        }
         self.cpu_efficiency_authorization = round_cpu_efficiency_authorization(
             self.roster.round, self.policy, self.history
         )
@@ -328,153 +336,206 @@ class ClosedQualityReview:
         )
         if member is None:
             raise ValueError("quality review requested an unselected participant")
-        runs = []
-        submission = None
-        for ref in member.evaluators:
-            signed = SignedRequestTerminal.model_validate_json(
-                read_endpoint_object(self.objects, ref.terminal_sha256)
-            )
-            terminal = signed.terminal
-            assignment = CohortExecutionAssignment.model_validate_json(
-                read_endpoint_object(self.objects, terminal.assignment_sha256)
-            )
-            order = assignment.certificate.order
-            job = recoverable_order_job(order, ref.evaluator_hotkey)
-            if [(c.case_id, c.video_sha256, c.stratum) for c in self.suite.cases] != [
-                (c.case_id, c.video_sha256, c.stratum) for c in job.cases
-            ]:
-                raise ValueError("quality case catalog differs from the revealed suite")
-            submission = order.submission.submission
-            paired_metric = submission.track == "model" and isinstance(
-                self.history.authority.authority, ModelRewardCohortAuthority
-            )
-            archive = parse_request_execution_archive(
-                read_endpoint_object(self.objects, terminal.execution_archive_sha256)
-            )
-            outputs = replay_archived_execution(
-                job,
-                archive,
-                self.objects,
-                self.policy,
-                started_after=self.opened_at,
-                finished_by=self.closed_at,
-            )
-            efficiency = None
-            if self.cpu_efficiency_authorization is not None:
-                if not paired_metric or terminal.endpoint_archive_sha256 is not None:
-                    raise ValueError("CPU efficiency requires native paired model execution")
-                efficiency = summarize_evaluator_efficiency(
-                    outputs,
-                    self.suite.cases,
-                    dict(self.policy.stratum_weights),
-                    contract_sha256=digest(self.roster.round.cpu_efficiency_adoption.adoption),
-                    evaluator_identity=identity(ref.evaluator_hotkey),
-                    terminal_sha256=ref.terminal_sha256,
-                    maximum_inference_ms=self.policy.maximum_inference_ms,
-                )
-            incumbent = tuple(measured_observation(o, self.policy) for o in outputs["incumbent"])
-            if terminal.endpoint_archive_sha256 is None:
-                basis = "measured_model_execution"
-                candidate = tuple(
-                    measured_observation(o, self.policy) for o in outputs["candidate"]
-                )
-            else:
-                basis = "endpoint_content_only"
-                endpoint = EndpointReplayArchive.model_validate_json(
-                    read_endpoint_object(self.objects, terminal.endpoint_archive_sha256)
-                )
-                quality = replay_endpoint_archive_quality(
-                    endpoint,
-                    self.objects,
-                    self.suite,
-                    self.policy,
-                    self.history,
-                    pulses=self.pulses,
-                    expected_tip_sha256=self.expected_tip_sha256,
-                    current_block=self.current_block,
-                )
-                candidate = tuple(
-                    QualityObservation(c.case_id, c.status, c.hypothesis, None)
-                    for c in quality.cases
-                )
-            reason = None
-            if any(o.status == "infrastructure_failure" for o in (*candidate, *incumbent)):
-                reason = "infrastructure_failure"
-            elif any(o.resource_eligible is not True for o in incumbent):
-                reason = "incumbent_failure"
-            runs.append(
-                ClosedEvaluatorQuality(
-                    evaluator_hotkey=ref.evaluator_hotkey,
-                    terminal_sha256=ref.terminal_sha256,
-                    candidate_observations_sha256=observations_sha256(candidate),
-                    incumbent_observations_sha256=observations_sha256(incumbent),
-                    candidate_basis=basis,
-                    cpu_efficiency=efficiency,
-                    reason=reason,
-                    candidate=quality_totals(
-                        candidate, self.suite, self.policy, paired_baseline_metric=paired_metric
-                    )
-                    if reason is None
-                    else None,
-                    incumbent=quality_totals(incumbent, self.suite, self.policy, incumbent=True)
-                    if reason is None
-                    else None,
-                )
-            )
-        reason = next(
-            (
-                r
-                for r in ("infrastructure_failure", "incumbent_failure")
-                if any(run.reason == r for run in runs)
-            ),
-            None,
-        )
-        first = runs[0]
-        if reason is None and any(
-            (
-                r.candidate_observations_sha256,
-                r.incumbent_observations_sha256,
-                r.candidate_basis,
-                r.candidate,
-                r.incumbent,
-            )
-            != (
-                first.candidate_observations_sha256,
-                first.incumbent_observations_sha256,
-                first.candidate_basis,
-                first.candidate,
-                first.incumbent,
-            )
-            for r in runs[1:]
-        ):
-            reason = "observation_disagreement"
-        result = ClosedParticipantQuality(
-            schema="umi-cohort-closed-quality/3"
-            if self.cpu_efficiency_authorization is not None
-            else "umi-cohort-closed-quality/2"
-            if paired_metric
-            else "umi-cohort-closed-quality/1",
-            quality_rule="paired_baseline_metric/1" if paired_metric else None,
-            policy_sha256=digest(self.policy),
-            round_sha256=digest(self.roster.round),
-            suite_sha256=digest(self.suite),
-            request_closure_sha256=self.request_closure_sha256,
-            submission_sha256=submission_sha256,
-            order_sha256=member.order_sha256,
-            hotkey=submission.hotkey,
-            track=submission.track,
-            runs=tuple(runs),
-            reason=reason,
-            candidate=first.candidate if reason is None else None,
-            incumbent=first.incumbent if reason is None else None,
-            cpu_efficiency=(
-                combine_cpu_efficiency_runs(
-                    digest(self.roster.round.cpu_efficiency_adoption.adoption),
-                    tuple(run.cpu_efficiency for run in runs),
-                )
-                if self.cpu_efficiency_authorization is not None
-                else None
-            ),
+        # Model outcomes depend on the authenticated immutable execution window,
+        # not a later settlement phase or observation. Endpoint replay retains its
+        # existing current-history checks and therefore its full context.
+        track = self._tracks[submission_sha256]
+        result = _closed_participant_quality(
+            member,
+            self.roster.round,
+            self.suite,
+            self.policy,
+            self.history.authority,
+            self.request_closure_sha256,
+            track,
+            self.opened_at,
+            self.closed_at,
+            self.cpu_efficiency_authorization is not None,
+            self.objects,
+            pulses=self.pulses,
+            history=self.history if track == "endpoint" else None,
+            expected_tip_sha256=self.expected_tip_sha256 if track == "endpoint" else None,
+            current_block=self.current_block if track == "endpoint" else None,
         )
         self._outcomes[submission_sha256] = result
         return result
+
+
+@verified_replay(
+    "closed_participant_quality_v1",
+    ClosedParticipantQuality,
+    restore=restore_closed_participant_quality,
+)
+def _closed_participant_quality(
+    member,
+    round_,
+    suite,
+    policy,
+    authority,
+    request_closure_sha256,
+    track,
+    opened_at,
+    closed_at,
+    cpu_efficiency_enabled,
+    objects,
+    *,
+    pulses,
+    history,
+    expected_tip_sha256,
+    current_block,
+):
+    """Checkpoint one exact participant after the caller's fresh authority review.
+
+    The existing owner-private replay store binds verifier semantics and traces
+    every original object. Model results survive later phase tips and restart;
+    endpoint results additionally bind their current authorization context.
+    """
+    submission_sha256 = member.submission_sha256
+    runs = []
+    submission = None
+    for ref in member.evaluators:
+        signed = SignedRequestTerminal.model_validate_json(
+            read_endpoint_object(objects, ref.terminal_sha256)
+        )
+        terminal = signed.terminal
+        assignment = CohortExecutionAssignment.model_validate_json(
+            read_endpoint_object(objects, terminal.assignment_sha256)
+        )
+        order = assignment.certificate.order
+        job = recoverable_order_job(order, ref.evaluator_hotkey)
+        if [(c.case_id, c.video_sha256, c.stratum) for c in suite.cases] != [
+            (c.case_id, c.video_sha256, c.stratum) for c in job.cases
+        ]:
+            raise ValueError("quality case catalog differs from the revealed suite")
+        submission = order.submission.submission
+        if submission.track != track:
+            raise ValueError("quality outcome differs from its authenticated participant track")
+        paired_metric = submission.track == "model" and isinstance(
+            authority.authority, ModelRewardCohortAuthority
+        )
+        archive = parse_request_execution_archive(
+            read_endpoint_object(objects, terminal.execution_archive_sha256)
+        )
+        outputs = replay_archived_execution(
+            job,
+            archive,
+            objects,
+            policy,
+            started_after=opened_at,
+            finished_by=closed_at,
+        )
+        efficiency = None
+        if cpu_efficiency_enabled:
+            if not paired_metric or terminal.endpoint_archive_sha256 is not None:
+                raise ValueError("CPU efficiency requires native paired model execution")
+            efficiency = summarize_evaluator_efficiency(
+                outputs,
+                suite.cases,
+                dict(policy.stratum_weights),
+                contract_sha256=digest(round_.cpu_efficiency_adoption.adoption),
+                evaluator_identity=identity(ref.evaluator_hotkey),
+                terminal_sha256=ref.terminal_sha256,
+                maximum_inference_ms=policy.maximum_inference_ms,
+            )
+        incumbent = tuple(measured_observation(o, policy) for o in outputs["incumbent"])
+        if terminal.endpoint_archive_sha256 is None:
+            basis = "measured_model_execution"
+            candidate = tuple(measured_observation(o, policy) for o in outputs["candidate"])
+        else:
+            basis = "endpoint_content_only"
+            endpoint = EndpointReplayArchive.model_validate_json(
+                read_endpoint_object(objects, terminal.endpoint_archive_sha256)
+            )
+            quality = replay_endpoint_archive_quality(
+                endpoint,
+                objects,
+                suite,
+                policy,
+                history,
+                pulses=pulses,
+                expected_tip_sha256=expected_tip_sha256,
+                current_block=current_block,
+            )
+            candidate = tuple(
+                QualityObservation(c.case_id, c.status, c.hypothesis, None) for c in quality.cases
+            )
+        reason = None
+        if any(o.status == "infrastructure_failure" for o in (*candidate, *incumbent)):
+            reason = "infrastructure_failure"
+        elif any(o.resource_eligible is not True for o in incumbent):
+            reason = "incumbent_failure"
+        runs.append(
+            ClosedEvaluatorQuality(
+                evaluator_hotkey=ref.evaluator_hotkey,
+                terminal_sha256=ref.terminal_sha256,
+                candidate_observations_sha256=observations_sha256(candidate),
+                incumbent_observations_sha256=observations_sha256(incumbent),
+                candidate_basis=basis,
+                cpu_efficiency=efficiency,
+                reason=reason,
+                candidate=quality_totals(
+                    candidate, suite, policy, paired_baseline_metric=paired_metric
+                )
+                if reason is None
+                else None,
+                incumbent=quality_totals(incumbent, suite, policy, incumbent=True)
+                if reason is None
+                else None,
+            )
+        )
+    reason = next(
+        (
+            r
+            for r in ("infrastructure_failure", "incumbent_failure")
+            if any(run.reason == r for run in runs)
+        ),
+        None,
+    )
+    first = runs[0]
+    if reason is None and any(
+        (
+            r.candidate_observations_sha256,
+            r.incumbent_observations_sha256,
+            r.candidate_basis,
+            r.candidate,
+            r.incumbent,
+        )
+        != (
+            first.candidate_observations_sha256,
+            first.incumbent_observations_sha256,
+            first.candidate_basis,
+            first.candidate,
+            first.incumbent,
+        )
+        for r in runs[1:]
+    ):
+        reason = "observation_disagreement"
+    result = ClosedParticipantQuality(
+        schema="umi-cohort-closed-quality/3"
+        if cpu_efficiency_enabled
+        else "umi-cohort-closed-quality/2"
+        if paired_metric
+        else "umi-cohort-closed-quality/1",
+        quality_rule="paired_baseline_metric/1" if paired_metric else None,
+        policy_sha256=digest(policy),
+        round_sha256=digest(round_),
+        suite_sha256=digest(suite),
+        request_closure_sha256=request_closure_sha256,
+        submission_sha256=submission_sha256,
+        order_sha256=member.order_sha256,
+        hotkey=submission.hotkey,
+        track=submission.track,
+        runs=tuple(runs),
+        reason=reason,
+        candidate=first.candidate if reason is None else None,
+        incumbent=first.incumbent if reason is None else None,
+        cpu_efficiency=(
+            combine_cpu_efficiency_runs(
+                digest(round_.cpu_efficiency_adoption.adoption),
+                tuple(run.cpu_efficiency for run in runs),
+            )
+            if cpu_efficiency_enabled
+            else None
+        ),
+    )
+    return result

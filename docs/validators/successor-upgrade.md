@@ -61,6 +61,14 @@ does not reserve all those lanes in advance or promise that all can run at once.
 Keep each model's signed memory limit, the separate preparation lane, host
 reserve, background allowance and bounded disk working set intact.
 
+A host selecting `umi-host-execution-memory-admission/1` shares one transient
+slot between native graph work and model inference. Its independent export and
+two retained settlement slots are part of the same qualified policy. The
+model-only lane-expansion command below refuses this selection; change it only
+through the supported whole-host configuration handoff. See
+[host memory admission](../operators/settlement.md#host-memory-admission) for
+orphan cleanup, restart and capacity requirements.
+
 Prepare a prospective policy using the qualified host interpreter:
 
 ```sh
@@ -127,9 +135,9 @@ selection and restoration dependencies until every reader using them has moved.
 
 ### CPU-efficiency readers
 
-C8+ CPU-efficiency adoption is a prospective reader-first transition. Preserve
-existing C6/C7 signed inputs, timing evidence and reward behavior. Do not attach
-the contract to an already prepared round or infer timing from historical
+CPU-efficiency adoption from cohort sequence 8 is a prospective reader-first
+transition. Preserve historical signed inputs, timing evidence and reward behavior.
+Do not attach the contract to an already prepared round or infer timing from historical
 `elapsed_ms`. The [settlement specification](../operators/settlement.md#prospective-cpu-efficiency-rewards)
 defines the signed contract, model-execution boundary and bounded adjustment.
 
@@ -143,7 +151,7 @@ defines the signed contract, model-execution boundary and bounded adjustment.
 | Reference-following validator | Existing approved signed row/policy path remains sufficient; it does not parse raw timing. Publish and verify adoption of the eventual approved row through the usual channel. |
 
 Install the exclusive bundle-cache reader and retirement hooks with every
-selected evaluator/overlay. Drain legacy untracked readers before C8 timing;
+selected evaluator/overlay. Drain legacy untracked readers before prospective timing;
 a newly created Python process alone does not establish cache comparability.
 Retain external invocation markers across restart so cleanup can reconcile
 exact orphan containers. Timed receipts require model/invocation-bound empty
@@ -152,7 +160,8 @@ bundle-page-cache evidence; missing observations stop timing qualification.
 Ship the native `umi.host_cpu_partition` restorer and `umi.host_cpu_probe` helper
 with the selected signed host. Follow the
 [partition provisioning and qualification instructions](../operators/settlement.md#cpu-partition-provisioning-and-qualification)
-after C7 drains, preserving the existing reviewers and memory-slot identities.
+after the preceding untimed work drains, preserving existing reviewers and
+memory-slot identities.
 The plan selects an exclusive `root` partition, normal scheduler balancing and
 explicit cgroupfs Podman execution; it does not change global Podman defaults.
 Retain the historical systemd reader for untimed execution and orphan recovery.
@@ -174,7 +183,8 @@ authority. That same selected-config update must carry the private
 The existing adoption series timer then signs and delivers one retained CPU
 contract per authority through the authenticated model-review peers. Verify the
 exact reviewer selections before the owner selection; dynamic delivery changes
-only first new C8+ preparation, never a retained C7 round. The standalone model client has no background source updater; when a
+only first new preparation from sequence 8, never a retained round. The standalone
+model client has no background source updater; when a
 full-reader update is needed, publish the qualified `runtime.revision` through
 `deploy/miner-upgrade/current.json` and use its supported installer rerun. An
 upload-only miner needs no resubmission for this timing policy. Verify the actual
@@ -307,7 +317,13 @@ automatic discovery under the selected coordinator's protected
 `files_directory/allocations/{digest}.json`; explicit map entries retain their
 original precedence and file ownership contract. The coordinator, reviewer and
 writer boot paths export the compact original and authenticated effective
-allocations during their existing native preparation. The publisher reads only
+allocations during their existing native preparation. Coordinator and independent
+reviewer decision review also exports its already validated allocation values
+to that reviewer's selected `files_directory` before signing. Certified input
+publication restores missing exports for older completed decisions before
+publishing their decision files. This reuses the existing package/adoption
+review; it does not wait for a writer whose preparation can use a separate
+readback directory. The publisher reads only
 these compact files and checks their identity against the current signed/native
 selection; it does not reopen reward packages. Export/discovery grants no reward
 authority by itself.
@@ -322,6 +338,10 @@ copy from its immutable source before resuming; never reset native verification
 or publication journals to repair discovery. A missing producer export waits
 with progress; an older coordinator must select the supported export-capable
 upgrade or keep its existing explicit allocation map until that upgrade.
+These exports use the existing allocation schema and immutable publication
+format. Existing miner and reference readers require no format migration;
+coordinator/reviewer upgrades must include the decision-review and certified
+publication producers as well as the writer preparation path.
 
 An explicit compatible transport selection uses schema
 `umi-reference-publisher-config/2`, `gateway_origin` set to
@@ -1589,6 +1609,26 @@ not cause a second payload hash pass solely to delete those bytes; a present but
 mismatched receipt still requires explicit repair. Signed manifests, requests,
 admissions, journals and remote objects remain retained.
 
+Benchmark evaluator owners also retire completed direct-model cache candidates
+incrementally from the existing execution worker's idle pass. A candidate needs
+its authenticated `complete` cohort history, completed local execution, intact
+remote byte-completion records and unchanged local materialization identities.
+The original `archive` and `standby` slots are included. Current and acknowledged
+frozen incumbents, unfinished transfers and live readers remain protected.
+An intent in the existing benchmark journal precedes eviction; restart finishes
+an interrupted removal without reading or hashing model payloads again. Unknown
+legacy sources retain their existing cleanup path and report a hold. Cohort
+history discovery uses the existing owner history port at most once per minute
+per pending cohort, then reuses retained terminal verification.
+
+Select this source through the supported immutable host/source maintenance path
+for each benchmark evaluator and execution overlay, preserving its cache root,
+benchmark journal and remote verification directory. Older two-slot layouts
+need no cache reset or signed-input migration. The upload-only miner, settlement
+reviewer, reward writer and public readers retain their existing formats; this
+cleanup introduces no new signed protocol or miner update requirement. Qualify
+the installed selection before claiming automatic reclamation is deployed.
+
 Schema versions 3 and 4 are the standing-series successors of versions 1 and 2.
 They include the immediate predecessor series, opportunity manifest and
 eligibility runtime selected by the signed boundary. Every coordinator and
@@ -1891,6 +1931,32 @@ preparation publisher's `publish_history` port restores the original round file
 from the owning journal after a lost acknowledgement or a missing derived file.
 After request publication succeeds, the lifecycle returns
 `settlement_handoff_published` and the recurring settlement service takes over.
+Request publication reviews each exact closure once during initial delivery.
+Its current certified-history check must select that same reviewed prefix. Each
+native receipt pass reads an object's authenticated export descriptor once and
+shares it across identity, size and coverage accounting; selected native conflict
+fences and file identities bracket the pass.
+
+After durable handoff, a completion projection binds the existing native receipt
+to the exact policy, authority, verifier/runtime semantics, relevant intake-source
+revisions, output identities and full proof-observation set. Unchanged restarts
+and repeated lifecycle calls check current authority, selected native holds,
+output stamps and the proof owner's durable delivery metadata before returning.
+They do not replay closure dependencies, decode unchanged descriptors, read
+evidence payloads or acquire the aggregate publication lane. Operation permission
+checks remain mandatory. Legacy injected proof publishers without the completion
+probe retain the guarded delivery path.
+
+Existing handoffs migrate from their exact retained native receipt and original
+closure/inventory metadata, without another native semantic review. A missing or
+damaged completion/native receipt reports a scoped metadata repair; it cannot
+silently become first verification. Changed outputs restore only affected files;
+unfinished proof delivery resumes through its existing owner. Final receipt,
+authority and selected-output fences run after asynchronous delivery, before
+publishing the handoff. Native receipt namespaces, signed evidence, miner and
+validator wire formats and resource limits remain unchanged. No journal reset or
+new consent is needed; the supported lifecycle host wires the proof-completion
+port for retained and future cohorts.
 
 For a standing series, the configured lifecycle host supplies `SeriesRequestStart`
 through the lifecycle's `request_start` argument before enabling dispatch. Its private
@@ -1899,7 +1965,7 @@ through the lifecycle's `request_start` argument before enabling dispatch. Its p
 from the qualified predecessor closure and the announced launch notice. The
 gate cannot infer a legacy closure from a current score or weight row.
 
-For C6 and subsequent cohorts, including successor series, select
+For cohort sequence 6 and subsequent cohorts, including successor series, select
 `rest_clock: "cohort_cutover"` in `request_start`. The lifecycle records each
 cohort's cutover during active intake, before artifact or preparation work.
 Requests require the preceding cohort's verified request-closing certificate and
@@ -3634,6 +3700,11 @@ preserved. Oversize, encoding and substantive-document holds continue to apply.
 Successful reviews retain their original bytes across this upgrade.
 
 Each acceptance sweep checks up to 16 latest uncertified model entries per cohort.
+Pending selection pages participant-certified latest candidates first, resetting
+an old unready offset at that ready-group boundary. Certificate presence is only
+a scheduling hint: exact preparation, current selection and quorum checks remain
+mandatory. When no candidates have participant certificates, ordinary pending
+selection continues so incomplete admission and review diagnostics remain visible.
 When more than one cohort has pending latest models, it processes one model from
 each and rotates the first cohort on the next sweep. This prevents hash ordering
 and large model batches from delaying all later cohorts. The ordinary cursor

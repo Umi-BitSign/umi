@@ -225,6 +225,49 @@ class CohortExecutor(CohortExecutionAuthority):
     async def _first_unfinished(self, job):
         return await run_owned_thread(self.journal.first_unfinished, job)
 
+    async def reconcile_retained(self, slot, assignment=None, *, pending_jobs=None):
+        """Retire abandoned native attempts before RPC, phase or cache gates.
+
+        The local assignment's quorum/delivery proofs and exact attempt/runtime
+        bindings authorize only their own container cleanup. They never replace
+        fresh authority for beginning or finishing an execution step.
+        """
+        if pending_jobs is None:
+            pending_jobs = await run_owned_thread(self.journal.pending_reconciliation_jobs)
+        if not pending_jobs:
+            return
+        raw = await run_owned_thread(self.journal.journal.get_raw, "assignment", slot)
+        if raw is None:
+            if assignment is None:
+                raise FileNotFoundError("retained cleanup requires its original assignment")
+            return
+        if assignment is not None and raw != canonical_json_bytes(assignment):
+            raise ValueError("execution slot already contains another assignment")
+        _, _, pending = await run_owned_thread(
+            self.journal.reconciliation_attempts, slot, pending_jobs
+        )
+        if not pending:
+            return  # Completed evidence keeps its original lock-free fast path.
+        with self.journal.locked(slot):
+            _, job, attempts = await run_owned_thread(self.journal.reconciliation_attempts, slot)
+            with TransferProgress(
+                "execution_retained_cleanup",
+                len(attempts),
+                unit="native_attempts",
+                planning_unit_seconds=(1, SANDBOX_RECONCILIATION_TIMEOUT_SECONDS),
+            ) as progress:
+                for attempt in attempts:
+                    await await_progress(
+                        wait_for_owned(
+                            self.sandbox.reconcile(job, attempt),
+                            timeout=SANDBOX_RECONCILIATION_TIMEOUT_SECONDS,
+                        ),
+                        stage="execution_retained_container_cleanup",
+                        cohort=job.round.cohort_sha256,
+                    )
+                    await self._journal_progress(job, self.journal.stopped, attempt)
+                    progress.advance(1)
+
     async def advance_batch(
         self, assignment: CohortExecutionAssignment
     ) -> RecoverableExecutionEvidence | None:
@@ -238,6 +281,7 @@ class CohortExecutor(CohortExecutionAuthority):
         evidence = state.evidence if role_aware and state is not None else state
         if evidence is not None:
             return evidence
+        await self.reconcile_retained(slot, assignment)
         job = await self._journal_progress(assignment, self.journal.validate_assignment, assignment)
         scope_options = {}
         if role_aware and state is not None:
@@ -362,6 +406,7 @@ class CohortExecutor(CohortExecutionAuthority):
         evidence = await self._completed(assignment, slot)
         if evidence is not None:
             return evidence
+        await self.reconcile_retained(slot, assignment)
         with self.journal.locked(slot):
             evidence = await self._completed(assignment, slot)
             if evidence is not None:
@@ -384,8 +429,10 @@ class CohortExecutor(CohortExecutionAuthority):
                 else await self._journal_progress(job, self.journal.result, job, attempt)
             )
             if pending is None:
-                if attempt is not None:
-                    # No replacement while an uncertain prior sandbox can still run.
+                if attempt is not None and not await self._journal_progress(
+                    job, self.journal.attempt_stopped, attempt
+                ):
+                    # Handle only a race after the early local cleanup pass.
                     await wait_for_owned(
                         self.sandbox.reconcile(job, attempt),
                         timeout=SANDBOX_RECONCILIATION_TIMEOUT_SECONDS,
@@ -437,6 +484,7 @@ class CohortExecutionWorker:
         batch_size=16,
         concurrency=4,
         defer_endpoint_until_terminal=False,
+        maintenance=None,
     ):
         if (
             inbox.policy != executor.journal.policy
@@ -461,6 +509,7 @@ class CohortExecutionWorker:
         self.inbox, self.executor, self.batch_size = inbox, executor, batch_size
         self.concurrency = concurrency
         self.defer_endpoint_until_terminal = defer_endpoint_until_terminal
+        self.maintenance = maintenance
         self.capacity = asyncio.Semaphore(concurrency)
         # All assignments share one private inbox lock. Parallel sandbox jobs
         # must not make their own local reads compete for that nonblocking lock.
@@ -468,6 +517,82 @@ class CohortExecutionWorker:
         self.serial = asyncio.Lock()
         self.source_priority_due = True
         self.resume_priority_due = True
+        self.recovery_started = False
+        self.recovery_pending = set()
+        self.recovery_retry_after = ""
+
+    async def _recover_retained(self):
+        """Sweep before dispatch; retry cleanup independently of execution slots."""
+
+        async def recover(slot, pending_jobs=None):
+            try:
+                await self.executor.reconcile_retained(slot, pending_jobs=pending_jobs)
+            except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+                self.recovery_pending.add(slot)
+                report_execution_retry(slot=slot, error=error)
+            else:
+                self.recovery_pending.discard(slot)
+
+        if not self.recovery_started:
+            wanted = await run_owned_thread(self.executor.journal.pending_reconciliation_jobs)
+            if not wanted:
+                self.recovery_started = True
+                return True
+            after = ""
+            slots, total = await run_owned_thread(self.executor.journal.retained_assignment_page)
+            with TransferProgress(
+                "execution_retained_recovery_inventory",
+                total,
+                unit="retained_assignments",
+                planning_unit_seconds=(0.01, SANDBOX_RECONCILIATION_TIMEOUT_SECONDS),
+            ) as progress:
+                while slots and wanted:
+                    for slot in slots:
+                        job_sha256 = await run_owned_thread(
+                            self.executor.journal.retained_job_sha256, slot
+                        )
+                        if job_sha256 in wanted:
+                            await recover(slot, pending_jobs=wanted)
+                            wanted.remove(job_sha256)
+                        progress.advance(1)
+                        if not wanted:
+                            # Remaining completed assignments need no decoding.
+                            progress.advance(total - progress.completed, restored=True)
+                            break
+                    if wanted:
+                        after = slots[-1]
+                        slots, _ = await run_owned_thread(
+                            lambda after=after: self.executor.journal.retained_assignment_page(
+                                after=after
+                            )
+                        )
+                if wanted:
+                    raise RuntimeError(
+                        "retained native cleanup requires missing assignment authority repair"
+                    )
+            self.recovery_started = True
+        else:
+            # Failed native cleanup cannot be stranded behind all concurrent
+            # jobs waiting for the very container it must retire.
+            ordered = sorted(self.recovery_pending)
+            rotated = [slot for slot in ordered if slot > self.recovery_retry_after] + [
+                slot for slot in ordered if slot <= self.recovery_retry_after
+            ]
+            for slot in rotated[:32]:
+                await recover(slot)
+                self.recovery_retry_after = slot
+        return not self.recovery_pending
+
+    def _recovery_status(self):
+        return {
+            "status": "cohort_execution_pending",
+            "stage": "execution_retained_container_cleanup",
+            "retry_count": len(self.recovery_pending),
+            "jobs_complete": 0,
+            "steps_advanced": 0,
+            "jobs_deferred": 0,
+            "chain_submission_authorized": False,
+        }
 
     def _startup_resume(self):
         if not self.resume_priority_due:
@@ -497,6 +622,8 @@ class CohortExecutionWorker:
 
     async def poll_once(self):
         async with self.serial:
+            if not await self._recover_retained():
+                return self._recovery_status()
             journal = self.executor.journal.journal
 
             def cursor():
@@ -531,6 +658,7 @@ class CohortExecutionWorker:
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+            await self._maintain()
             pending = [r for r in results if r[1] == "pending"]
             deferred = [r for r in results if r[1] == "deferred"]
             return {
@@ -585,11 +713,18 @@ class CohortExecutionWorker:
                 return slot, "pending", type(error).__name__
 
     async def _rolling_poll(self, active):
+        if not await self._recover_retained():
+            return self._recovery_status()
         results = []
         for slot, task in tuple(active.items()):
             if task.done():
                 results.append(task.result())
                 del active[slot]
+        # Completed acknowledged assignments stay in the inbox for replay.
+        # Retire idle terminal caches before refilling, otherwise even an
+        # entirely completed inbox keeps `active` nonempty on every return.
+        if not active:
+            await self._maintain()
         if len(active) < self.concurrency:
             journal = self.executor.journal.journal
 
@@ -661,6 +796,21 @@ class CohortExecutionWorker:
         # Keep the process alive until owned sandbox writes and cleanup drain,
         # even if repeated shutdown signals arrive.
         await await_owned_task(asyncio.create_task(drained()))
+
+    async def _maintain(self):
+        if self.maintenance is not None:
+            try:
+                await self.maintenance()
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                sqlite3.Error,
+                asyncio.TimeoutError,
+            ) as error:
+                # Cleanup never suppresses execution or invents authority after
+                # an unavailable source. The existing owner retries its intent.
+                report_execution_retry(slot=None, error=error)
 
     async def run(
         self,

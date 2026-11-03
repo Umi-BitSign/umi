@@ -152,6 +152,32 @@ async def test_host_runs_workers_and_drains_cancelled_inference(native):
     assert host.execution.head(e.job, 0) is not None
 
 
+async def test_rolling_owner_maintains_terminal_cache_with_completed_inbox(native):
+    n, e = native, native.e
+    host = n.host()
+    assert host.inbox.protects_incumbent(e.job.round.incumbent_model_sha256)
+    assert not host.inbox.protects_incumbent("ff" * 32)
+    for _ in range(step_count(e.job)):
+        await host.worker.poll_once()
+    assert host.execution.evidence(e.r.slot) is not None
+    before = len(e.calls)
+    maintained, reports, stop = [], [], asyncio.Event()
+
+    async def maintenance():
+        assert host.inbox.assignments() == (e.r.slot,)
+        maintained.append(True)
+
+    def report(value):
+        reports.append(value)
+        if len(maintained) == 2:
+            stop.set()
+
+    host.worker.maintenance = maintenance
+    await asyncio.wait_for(host.worker.run(stop, poll_seconds=0.01, report=report), 20)
+    assert len(maintained) == 2 and len(e.calls) == before
+    assert any(report["jobs_complete"] for report in reports)
+
+
 async def test_host_reports_failed_worker_without_private_exception_text(native):
     class FailedWorker:
         async def run(self, stop, *, poll_seconds, report):

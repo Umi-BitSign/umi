@@ -1,7 +1,8 @@
 # UMI documentation
 
-Start with the guide for your role. C5 competition rewards are live. C6 remains
-in public-model intake while release preparation completes. Read
+Start with the guide for your role. Public competition intake is open only for
+cohorts whose current authenticated routes accept new submissions. Intake,
+certification, evaluation and active rewards are separate states. Read
 [current miner operation](CURRENT_MINER_OPERATION.md) and the
 [model submission steps](miners/model.md#model-files-for-recoverable-cohorts),
 including the [admission-status query](miners/model.md#check-admission-after-upload).
@@ -16,7 +17,7 @@ and policy details.
 | Register a new SN78 hotkey | [Official Bittensor mining guide](https://www.bittensor.com/docs/guides/mining), using subnet **78** |
 | Run a miner now | [Miner requirements](CURRENT_MINER_OPERATION.md) |
 | Configure or update an endpoint | [Current connection guide](miners/connection.md) |
-| Submit a public model for C6 | [Upload and check admission](miners/model.md#model-files-for-recoverable-cohorts) |
+| Submit a public model | [Upload and check admission](miners/model.md#model-files-for-recoverable-cohorts) |
 | Connect my translation model | [Model integration and HTTPS endpoints](miners/model.md) |
 | Download a certified public model | [Public model download instructions](miners/model.md#download-a-certified-public-model) |
 | Run a miner on Apple Silicon | [Mac miner setup](miners/macos.md) |

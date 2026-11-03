@@ -79,7 +79,7 @@ def review_empty_original(reader, journal_owner):
     if reader.journal.root != journal_owner.root / "history":
         raise ValueError("empty original differs from original logical history")
     with reader.journal.read_transaction() as db:
-        reader.checkpoints.check_schema(db)
+        folded_tables, folded_records = reader.folded_frontier.unpopulated_layout(db)
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         empty_tables = {
             "holds",
@@ -90,13 +90,17 @@ def review_empty_original(reader, journal_owner):
             "history_source_identity",
             "history_checkpoint_index",
         }
-        allowed = empty_tables | {
-            "binding",
-            "records",
-            "history_checkpoint_state",
-            "round_record_capacity",
-            "round_record_capacity_kinds",
-        }
+        allowed = (
+            empty_tables
+            | folded_tables
+            | {
+                "binding",
+                "records",
+                "history_checkpoint_state",
+                "round_record_capacity",
+                "round_record_capacity_kinds",
+            }
+        )
         if tables - allowed or db.execute("PRAGMA user_version").fetchone()[0] != 0:
             raise HistoryCheckpointRepairRequired("empty original has unsupported auxiliary state")
         if reader.completed_admission._index(db) is not None:
@@ -110,9 +114,9 @@ def review_empty_original(reader, journal_owner):
                 raise HistoryCheckpointRepairRequired(
                     "original history retains work or source metadata"
                 )
-        if db.execute("SELECT kind,id FROM records").fetchall() != [
+        if set(db.execute("SELECT kind,id FROM records")) != folded_records | {
             ("control_history_checkpoint_owner", "owner")
-        ]:
+        }:
             raise HistoryCheckpointRepairRequired(
                 "original history retains source or result records"
             )

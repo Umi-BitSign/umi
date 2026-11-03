@@ -1859,9 +1859,9 @@ On a fully upgraded installation, set
 `benchmark.execution.share_paired_incumbent: true` in every selected phase
 reviewer. Carry the matching execution configuration into settlement's
 `executions` entries. This durable host selection applies to every configured
-future cohort; preserve it when producing successor controls. It is not a C7-only
-switch. The default omission exists for reader-first rolling upgrades and exact
-old config compatibility, not as the recommended final configuration. The normal
+future cohort; preserve it when producing successor controls. The default omission
+exists for reader-first rolling upgrades and exact old config compatibility,
+not as the recommended final configuration. The normal
 order quorum then signs the explicit sampling mode for new model orders;
 already-selected `/1` orders stay unchanged. Follow the reader adoption sequence
 and disabled-evaluator behavior in [evaluation](evaluation.md) before enabling it.

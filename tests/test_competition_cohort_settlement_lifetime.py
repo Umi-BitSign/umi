@@ -35,9 +35,11 @@ def graph(node):
 
 def blank():
     node = object.__new__(CohortSettlementService)
+    node.model_artifacts = None
     # These lifecycle fixtures replace native verification with tiny graph ports.
     # Supply its owner scope explicitly, just as the real constructor does.
     node.verification_reuse = SimpleNamespace(selected=nullcontext)
+    node.model_artifacts = None
     node.data = node.votes = node.controller = node.phases = node.exchange = None
     node.batch_votes = ((), ())
     node.retained_result_votes = ()

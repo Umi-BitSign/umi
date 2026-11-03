@@ -13,6 +13,7 @@ from collections.abc import Callable
 from .competition_cohort_recovery import verify_recovery_quorum
 from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_reward_adoption import RewardAdoptionSelection, verify_reward_adoption
+from .competition_reward_allocation_export import export_reward_allocations
 from .competition_reward_decisions import (
     SignedRewardControlDecision,
     StandingRewardSeries,
@@ -71,16 +72,22 @@ def retain_standing_reward_inputs(
             raise ValueError("reward delivery package differs from its certified decision")
         if not retained_package:
             files.retain_package(package)
+        effective = package.allocation
         if activation.reward_adoption_sha256 is not None:
-            verify_reward_adoption(
+            _, effective = verify_reward_adoption(
                 reward_adoptions,
                 activation.reward_adoption_sha256,
                 series=series,
                 policy=policy,
                 activation=activation,
                 package=package,
+                include_effective_allocation=True,
             )
             files.retain_adoption(reward_adoptions.get(activation.reward_adoption_sha256))
+        # Publication also repairs missing compact exports for decisions that
+        # were certified by an older host. Reuse the package/adoption validation
+        # already performed here; do not restart native preparation for delivery.
+        export_reward_allocations(files.retain_allocation, package.allocation, effective)
         del package, history  # Do not retain this graph while loading the next item.
     # Per-file publication has its own lock. This outer lock serializes the
     # choice of the first signature envelope, including competing exact retries.

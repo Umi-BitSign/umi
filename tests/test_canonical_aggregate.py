@@ -354,3 +354,49 @@ def test_envelope_model_dump_override_does_not_change_parent_projection():
     value = Custom(evidence=OverriddenInventory(objects=(Object(value=1),)))
     assert not _parts(value)
     assert b"changed" not in assert_parity(value)
+
+
+@pytest.mark.parametrize("count", [0, 1, 31])
+def test_nested_aggregate_comparison_hashes_exact_signed_envelopes_once(count, monkeypatch):
+    from umi import canonical_aggregate
+    from umi.canonical_stream import canonical_json_matches_digests
+
+    evidence = Inventory(
+        objects=tuple(Object(value={"é": [i, 1e-7, "x" * 4096]}) for i in range(count))
+    )
+    response = Response(evidence=evidence)
+    signed = SignedResponse(response=response)
+    expected = canonical_json_bytes(signed)
+    expected_digests = (digest(response), digest(evidence))
+    original = canonical_aggregate.rfc8785.dump
+    object_dumps = []
+
+    def tracked(value, sink):
+        if isinstance(value, dict) and "value" in value:
+            object_dumps.append(value)
+        return original(value, sink)
+
+    monkeypatch.setattr(canonical_aggregate.rfc8785, "dump", tracked)
+    items = []
+    matches, actual = canonical_json_matches_digests(
+        signed,
+        expected,
+        (response, evidence),
+        b"umi-open-competition-v1\0",
+        progress=lambda value: items.append(value),
+    )
+    assert matches and actual == expected_digests
+    assert len(object_dumps) == count
+    assert len(items) == count and all(value is evidence for value in items)
+    assert not canonical_json_matches_digests(
+        signed, expected + b" ", (response, evidence), b"umi-open-competition-v1\0"
+    )[0]
+
+
+def test_nested_aggregate_digest_does_not_reuse_another_model_identity():
+    from umi.canonical_stream import canonical_json_matches_digests
+
+    value = Response(evidence=Inventory(objects=()))
+    other = value.evidence.model_copy()
+    with pytest.raises(ValueError, match="not traversed"):
+        canonical_json_matches_digests(value, canonical_json_bytes(value), (other,), b"prefix")

@@ -114,6 +114,8 @@ def prepare_lane_policy(
         expected_sha256=selection.policy_sha256,
         host_identity_path=Path(selection.host_identity_path),
     )
+    if controller.joint_execution_stage:
+        raise ValueError("joint execution policy requires its fixed single transient lane")
     if not controller.model_execution_stage:
         raise ValueError("model execution capacity policy required")
     previous = controller.policy

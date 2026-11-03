@@ -9,6 +9,8 @@ Independent phase signers and current standing-control review remain required.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,6 +57,7 @@ from .competition_reward_manifest import RewardReplayRequirement
 from .competition_round_journal import RoundJournal
 from .competition_store import CompetitionStore
 from .competition_verification_reuse import VerificationSourceChanged
+from .competition_work_progress import progress_items
 from .open_competition import CompetitionPolicy, digest
 from .private_files import private_path
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -74,6 +77,7 @@ class _SettlementObjects:
 
     def __init__(self, owner):
         self.owner = owner
+        self._selection = ContextVar("settlement_object_selection", default=None)
 
     def __call__(self, key):
         try:
@@ -85,6 +89,9 @@ class _SettlementObjects:
         # Presence and conflict checks do not read or decode immutable bodies.
         # A journal entry, including a malformed/null entry, must take the
         # ordinary archive path; it cannot borrow the external source's trust.
+        selected = self._selection.get()
+        if selected is not None and key in selected[0]:
+            return None if key in selected[1] else self.owner.external
         with self.owner.journal.read_transaction() as db:
             if db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone():
                 raise ValueError("round journal conflict held")
@@ -93,6 +100,59 @@ class _SettlementObjects:
                 ("endpoint_replay_object", key),
             ).fetchone()
         return None if present else self.owner.external
+
+    @staticmethod
+    def _selected(db, keys):
+        present = set()
+        for offset in range(0, len(keys), 256):
+            batch = keys[offset : offset + 256]
+            placeholders = ",".join("?" for _ in batch)
+            if db.execute(
+                f"SELECT 1 FROM holds WHERE id IN ({placeholders}) LIMIT 1", batch
+            ).fetchone():
+                raise VerificationSourceChanged("round journal conflict held")
+            present.update(
+                row[0]
+                for row in db.execute(
+                    "SELECT id FROM records WHERE kind='endpoint_replay_object' "
+                    f"AND id IN ({placeholders})",
+                    batch,
+                )
+            )
+        return frozenset(present)
+
+    @contextmanager
+    def verification_batch(self, keys):
+        """Fence archive precedence once without holding a read transaction.
+
+        SQLite's data_version is comparable only on the same connection. Keep
+        that read-only connection, but release its snapshot before any source
+        access. Unrelated concurrent commits require only a bounded selection
+        recheck; changed precedence or conflict holds refuse the entire reuse.
+        Immutable external file identities are still checked for every object.
+        """
+        keys = tuple(dict.fromkeys(keys))
+        journal = self.owner.journal
+        before = journal.path.stat()
+        with journal.read_transaction() as db:
+            version = db.execute("PRAGMA data_version").fetchone()[0]
+            present = self._selected(db, keys)
+            db.execute("ROLLBACK")
+            token = self._selection.set((frozenset(keys), present))
+            try:
+                yield
+                journal._check_files()
+                current = journal.path.stat()
+                if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
+                    raise VerificationSourceChanged("settlement journal identity changed")
+                if db.execute("PRAGMA data_version").fetchone()[0] != version:
+                    with journal.read_transaction() as fresh:
+                        if self._selected(fresh, keys) != present:
+                            raise VerificationSourceChanged(
+                                "settlement archive selection changed during verification"
+                            )
+            finally:
+                self._selection.reset(token)
 
     def verification_identity(self, key):
         source = self._external(key)
@@ -303,7 +363,12 @@ class CohortSettlement:
                 by_submission[vote.result.submission_sha256].append(vote)
             certificates = {
                 key: collect_quality_certificate(self.journal, benchmark_review, key, votes)
-                for key, votes in by_submission.items()
+                for key, votes in progress_items(
+                    by_submission.items(),
+                    stage="quality_participant_certificates",
+                    unit="participants",
+                    cohort=benchmark_review.roster.round.cohort_sha256,
+                )
             }
             if any(c is None for c in certificates.values()):
                 return NativeSettlementResult("waiting_quality_votes")

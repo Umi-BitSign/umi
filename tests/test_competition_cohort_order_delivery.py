@@ -520,11 +520,15 @@ async def test_operation_timeout_rotates_to_other_reviewers_without_discarding_w
     r = relay
     original = r.reviewers.lookup
     slow = identity(r.cfg.reviewers[0])
+    # Isolate the transport timeout from native proof/signing throughput. The
+    # responsive peer has a genuine durable vote ready before the timed poll.
+    ready = await r.reviewers.attest(r.cfg.reviewers[1], r.h.order, r.h.participant)
 
     async def delayed(who, slot):
         if identity(who) == slow:
             await asyncio.Event().wait()
-        return await original(who, slot)
+        assert slot == r.slot and identity(who) == identity(ready.signature.hotkey)
+        return ready
 
     r.reviewers.lookup = delayed
     result = await r.worker(operation_timeout_seconds=1).poll_once()
