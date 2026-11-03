@@ -602,6 +602,26 @@ operators. Settlement publication and reward activation remain on the
 
 ## Recoverable cohort admission
 
+When a bounded workload profile is selected, ordinary HTTP requests retain its
+native concurrency and aggregate byte limits. Requests waiting for capacity do
+not decode or read their bodies. Read waiters use
+`api_limits.maximum_concurrent_reads`; uploads and upload-control GETs use
+`maximum_concurrent_submissions`. A burst of at most that many controls runs
+before the next waiting read. Queue waits use `capacity_wait_seconds`.
+
+Identical in-flight public status, cohort-index and service-work reads share one
+response. Exact queries and response-varying headers remain distinct; requests
+with authentication or cookies and nonce readiness requests do not share work.
+Completed responses are not cached. Shared response bytes remain charged until
+the last sender finishes, disconnects or times out. Shutdown rejects queued
+requests before draining requests that already own native work.
+
+Capacity rejections retain HTTP 503 and `retry_unchanged: true`. The
+`x-umi-reason-code` header distinguishes queue exhaustion, timeout and shutdown.
+Bounded `workload_http_admission` logs report active route classes and ages,
+waiting counts and a queue-only ETA; queries and signed request bodies are not
+logged. Cached cohort progress remains available while native requests wait.
+
 Retained intake history reads use atomic SQLite read snapshots after checking the
 exact private database binding. An initialized binding and complete recovery
 schema do not require a write transaction merely to read existing history. New
