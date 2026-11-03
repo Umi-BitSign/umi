@@ -333,6 +333,13 @@ rejection reason and cleanup receipt remain retained.
 Upload completion is not admission certification, artifact acceptance or reward
 activation. Use `query-cohort-admission` with the same request to check admission.
 
+If an intake or upload-control request returns HTTP 503 with
+`retry_unchanged: true`, keep the same signed request and retry after the
+`Retry-After` interval. A queued request may take up to the service's configured
+capacity wait before responding. The official client preserves the upload and
+signed submission across these retries; do not create another reservation or
+re-sign merely because the service is busy.
+
 When the public cohort index advertises the legacy `model_upload_url`, deliver a model
 bundle before submitting model-track participation. POST the same signed
 `CohortParticipationRequest` to that URL to reserve delivery. A reservation

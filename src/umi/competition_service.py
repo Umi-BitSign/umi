@@ -25,7 +25,10 @@ from .competition_cohort_model_upload_http import model_upload_routes
 from .competition_cohort_public_api import CohortPublicApiConfig
 from .competition_cohort_request_readiness_host import request_readiness_routes
 from .competition_cohort_service_api import service_admission_routes
-from .competition_cohort_service_host import ServiceAdmissionHost, ServiceAdmissionHostConfig
+from .competition_cohort_service_host import (
+    ServiceAdmissionHost,
+    ServiceAdmissionHostConfig,
+)
 from .competition_commands.common import load_json
 from .competition_finality_cache import VerifiedRegistrationCache
 from .competition_historical_registration import HistoricalRegistrationProvider
@@ -40,7 +43,11 @@ from .competition_store import (
     CompetitionStore,
     HistoricalIntakeArchiveBinding,
 )
-from .host_memory_runtime import RequestsStageASGIBinding, WorkloadASGIBinding, memory_runtime
+from .host_memory_runtime import (
+    RequestsStageASGIBinding,
+    WorkloadASGIBinding,
+    memory_runtime,
+)
 from .open_competition import CompetitionPolicy, Hex32, RegistrationSnapshot, digest
 from .policy import umi_source_tree_sha256
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -90,7 +97,8 @@ class CompetitionServiceConfig(StrictProtocolModel):
     # stay admitted in this same ledger (see competition_policy_lineage). Distinct from
     # historical_archives, which is the terms-change path that archives a predecessor.
     predecessor_policies: Annotated[
-        tuple[Annotated[str, Field(min_length=1, max_length=4096)], ...], Field(max_length=8)
+        tuple[Annotated[str, Field(min_length=1, max_length=4096)], ...],
+        Field(max_length=8),
     ] = ()
 
     @model_serializer(mode="wrap")
@@ -182,14 +190,24 @@ def create_intake_app(config, policy, *, provider_factory=None) -> FastAPI:
         series_sha256=digest(service.series),
         authority_sha256=digest(service.series.recovery.authority),
         maximum_aggregate_bytes=max(
-            owner.maximum_export_bytes, owner.request_evidence_bytes, owner.request_replay_bytes
+            owner.maximum_export_bytes,
+            owner.request_evidence_bytes,
+            owner.request_replay_bytes,
         ),
     ) as controller:
         app = _create_intake_app(config, policy, provider_factory=provider_factory)
         if controller.requests_stage:
             app.add_middleware(RequestsStageASGIBinding, controller=controller)
         if controller.joint_execution_stage:
-            app.add_middleware(WorkloadASGIBinding, controller=controller)
+            app.state.workload_http_shutdown = []
+            app.add_middleware(
+                WorkloadASGIBinding,
+                controller=controller,
+                maximum_waiting=config.api_limits.maximum_concurrent_reads,
+                maximum_control_waiting=config.api_limits.maximum_concurrent_submissions,
+                wait_seconds=config.api_limits.capacity_wait_seconds,
+                shutdown_callbacks=app.state.workload_http_shutdown,
+            )
         return app
 
 
