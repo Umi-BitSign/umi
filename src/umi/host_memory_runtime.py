@@ -8,8 +8,10 @@ is no implicit reentrancy or sharing between concurrent children.
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import traceback
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
@@ -18,6 +20,7 @@ from typing import Annotated
 from pydantic import Field, ValidationError, model_validator
 
 from .competition_cohort_public_progress import is_cached_cohort_progress_request
+from .competition_progress import _failure_details
 from .concurrency import run_owned_thread
 from .host_memory_admission import HostMemoryAdmission, HostMemoryLease, _absolute
 from .host_memory_request_bounds import stage_evidence_budget
@@ -176,6 +179,14 @@ def _bounded_error_value(value, budget, depth=0):
 
 
 def compact_memory_error(error: BaseException) -> BaseException:
+    # Record bounded source locations before dropping the rejected graph. A
+    # later transport log can otherwise show only this wrapper's re-raise.
+    # Diagnostic failure must never prevent native graph release.
+    with suppress(Exception):
+        logging.getLogger(__name__).warning(
+            "native_aggregate_failed details=%s",
+            json.dumps(_failure_details(error), separators=(",", ":")),
+        )
     discard_error_frames(error)
     # Pydantic owns rejected inputs independently of its completed frames.
     if isinstance(error, ValidationError):
