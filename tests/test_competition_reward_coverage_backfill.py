@@ -1,5 +1,6 @@
 """Scheduling over isolated synthetic endpoints; native capture is qualified separately."""
 
+import ast
 import asyncio
 import errno
 import hashlib
@@ -299,7 +300,9 @@ async def test_backfill_progress_withdraws_eta_on_retry_and_separates_credit(lan
     assert "successor_activation_eta_seconds" in caplog.text
 
 
-async def test_credit_progress_separates_finite_saved_replay_after_restart(lanes, caplog):
+async def test_credit_progress_separates_finite_saved_replay_after_restart(
+    lanes, caplog, http_log_redaction
+):
     h = lanes
     owner, _ = h.owner()
     original = await owner.step()
@@ -307,9 +310,12 @@ async def test_credit_progress_separates_finite_saved_replay_after_restart(lanes
     restarted, _ = h.owner()
     with caplog.at_level("INFO", logger="umi.competition_reward_coverage_collector"):
         restored = await restarted.step()
-    phases = {
-        r.args["phase"]: r.args for r in caplog.records if r.msg == "coverage_credit_progress %s"
-    }
+    emitted = [
+        ast.literal_eval(r.getMessage().removeprefix("coverage_credit_progress "))
+        for r in caplog.records
+        if r.getMessage().startswith("coverage_credit_progress ")
+    ]
+    phases = {report["phase"]: report for report in emitted}
     assert phases["retained_interval_replay"]["credited_delta_ms"] == expected
     zero = {k: 0 for k in h.validators}
     assert phases["recent_block_capture"]["credited_delta_ms"] == zero
@@ -357,13 +363,19 @@ async def test_actual_cli_reports_failed_gap_without_exception_secrets(
 
 
 @pytest.mark.parametrize("status", [429, 503])
-def test_coverage_retry_logs_bounded_r2_http_status_without_response_data(caplog, status):
+def test_coverage_retry_logs_bounded_r2_http_status_without_response_data(
+    caplog, status, http_log_redaction
+):
     try:
         raise R2EvidenceHTTPError(status)
     except R2EvidenceHTTPError as error:
         with caplog.at_level("INFO", logger="umi.competition_reward_coverage_collector"):
             _log_retry(error, phase="replay", operation="restore_and_credit_interval")
-    report = [record.args for record in caplog.records if record.msg == "coverage_retry %s"]
+    report = [
+        ast.literal_eval(record.getMessage().removeprefix("coverage_retry "))
+        for record in caplog.records
+        if record.getMessage().startswith("coverage_retry ")
+    ]
     assert len(report) == 1
     assert report[0]["r2_http_status"] == status
     assert report[0]["reason_codes"] == ["r2_http_failure"]
@@ -371,7 +383,9 @@ def test_coverage_retry_logs_bounded_r2_http_status_without_response_data(caplog
 
 
 @pytest.mark.parametrize("damaged", [False, True])
-def test_coverage_retry_identifies_real_private_mutex_without_secrets(tmp_path, caplog, damaged):
+def test_coverage_retry_identifies_real_private_mutex_without_secrets(
+    tmp_path, caplog, damaged, http_log_redaction
+):
     path = tmp_path / "secret-owner-path.lock"
     owner = lock_private_file(path)
     try:
@@ -389,7 +403,11 @@ def test_coverage_retry_identifies_real_private_mutex_without_secrets(tmp_path, 
                 _log_retry(wrapped, phase="backfill", operation="capture", block=100)
     finally:
         os.close(owner)
-    reports = [record.args for record in caplog.records if record.msg == "coverage_retry %s"]
+    reports = [
+        ast.literal_eval(record.getMessage().removeprefix("coverage_retry "))
+        for record in caplog.records
+        if record.getMessage().startswith("coverage_retry ")
+    ]
     assert len(reports) == 1
     report = reports[0]
     assert report["private_mutex"] == (

@@ -241,6 +241,35 @@ class FoldedHistoryFrontier:
         return dict(owner=self.blocks.owner, generation=key)
 
     @_repair_metadata
+    def unpopulated_layout(self, db):
+        """Review initial metadata for an empty or source-only stopped original."""
+        state = self.state(db)
+        objects = {
+            row[0]
+            for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE name LIKE 'history_folded_%'"
+            )
+        }
+        records = set(
+            db.execute("SELECT kind,id FROM records WHERE kind LIKE 'control_history_folded_%'")
+        )
+        if state is None:
+            if objects or records:
+                raise HistoryCheckpointRepairRequired("legacy original has orphan folded metadata")
+            return set(), set()
+        expected_records = {(_MARKER, "owner"), (_GENERATION, "initial")}
+        if (
+            state != (self.blocks.owner, 0, self.blocks.binding["first_block"] - 1, None, "initial")
+            or objects != {_STATE, _ANCHORS, *self.triggers}
+            or records != expected_records
+            or db.execute(f"SELECT 1 FROM {_ANCHORS} LIMIT 1").fetchone()
+        ):
+            raise HistoryCheckpointRepairRequired(
+                "original folded history is populated, changed or damaged"
+            )
+        return {_STATE, _ANCHORS}, expected_records
+
+    @_repair_metadata
     def state(self, db, *, pending_population=None):
         self.blocks.check_schema(db)
         exists = db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (_STATE,)).fetchone()

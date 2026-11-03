@@ -6,10 +6,10 @@ for promotion into successive public baselines.
 
 ## Miners: start here
 
-- **Submit a public model for C6:** follow the [model submission steps](docs/miners/model.md#model-files-for-recoverable-cohorts), including the separate admission-status check. Install the [published model client](docs/miners/connection.md#install-or-update-the-model-submission-client), even if you already run an endpoint miner.
-- **Check what is required now:** [current miner operation](docs/CURRENT_MINER_OPERATION.md) distinguishes live C5 rewards, C6 intake and successor preparation.
+- **Submit a public model:** follow the [model submission steps](docs/miners/model.md#model-files-for-recoverable-cohorts), including the separate admission-status check. Install the [published model client](docs/miners/connection.md#install-or-update-the-model-submission-client), even if you already run an endpoint miner.
+- **Check what is required now:** [current miner operation](docs/CURRENT_MINER_OPERATION.md) explains submission, certification and reward activation.
 - **Register a hotkey:** use the official [Bittensor registration guide](https://www.bittensor.com/docs/guides/mining) for subnet **78**. Registration alone does not submit a model or earn a competition reward.
-- **Maintain an existing endpoint:** use the [connection guide](docs/miners/connection.md) and [model integration guide](docs/miners/model.md). Endpoint enrollment is not a public-model submission for C6.
+- **Maintain an existing endpoint:** use the [connection guide](docs/miners/connection.md) and [model integration guide](docs/miners/model.md). Endpoint enrollment is not a public-model submission.
 
 ## Validators: start here
 
@@ -27,17 +27,16 @@ for promotion into successive public baselines.
 
 ## Network phase
 
-C5 certification is complete and C5 competition rewards are live. C6 remains in
-public-model intake while its release preparation completes. Its evaluation and
-cohort certification have not started. The intake cutoff will be announced
-separately; an expired nominal block target is not a new cutoff announcement.
+Public competition intake is live. The selected cohort's signed history and
+readiness establish whether it accepts new submissions; an expired nominal block
+target alone does not close intake. Follow the announced intake deadline when one
+is selected. Certification and challenge start are separate from intake closure.
 
-C6 uses direct R2 model delivery. Prepare public-model contributions for C6 and
-later cohorts; do not start an endpoint enrollment as a substitute. Later cohorts
-still require their authenticated successor plans before opening. Read the
+Public-model cohorts use direct R2 delivery. Read the
 [current miner operation guide](docs/CURRENT_MINER_OPERATION.md), the
 [cohort catalog](https://api.umi.vision/v1/competition/cohorts) and the selected
-cohort's signed history/readiness before submitting.
+cohort's signed history/readiness before submitting. Use the published model
+client and the license terms authenticated for that cohort and model.
 
 The original submission receipt always says `pending_attestation`. It does not
 change when a certificate is issued. Run `query-cohort-admission` with the original
@@ -47,10 +46,9 @@ means the model has been scored or has active rewards. The
 exact command and explains each stage.
 
 The [current upgrade manifest](deploy/miner-upgrade/current.json) selects the
-published client and its authenticated policy/runtime bindings. The `main` branch
-is reviewed source, not an activation signal. Live behavior is defined by the
+published client and its authenticated policy/runtime bindings. The `main` branch is reviewed source, not an activation signal. Live behavior is defined by the
 signed deployment, cohort history and finalized chain state. Historical bridge
-instructions do not describe current C5 competition payouts.
+instructions do not describe current competition payouts.
 
 ## Development
 

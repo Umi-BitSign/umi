@@ -1,5 +1,6 @@
 """Bounded retained metadata survives ancestry progress, never changed dependencies."""
 
+import ast
 import asyncio
 import logging
 from collections import Counter
@@ -68,7 +69,7 @@ async def retained(history_case, monkeypatch, *, per_block=False):
 
 @pytest.mark.parametrize("parallel", [False, True])
 async def test_progress_reuses_one_batch_but_rechecks_final_dependencies(
-    history_case, monkeypatch, parallel, caplog
+    history_case, monkeypatch, parallel, caplog, http_log_redaction
 ):
     h, expected, loads = await retained(history_case, monkeypatch, per_block=True)
     if parallel:
@@ -93,10 +94,10 @@ async def test_progress_reuses_one_batch_but_rechecks_final_dependencies(
         assert h.reader._next == h.old.height
         assert h.reader.progress.latest["stage"] == "owned_historical_ancestry"
         emitted = [
-            row.args
+            ast.literal_eval(row.getMessage().removeprefix("reward_history_progress "))
             for row in caplog.records
             if row.name == "umi.competition_reward_history_progress"
-            and row.msg == "reward_history_progress %s"
+            and row.getMessage().startswith("reward_history_progress ")
         ]
         # A fast bounded continuation must reach the log before the next pass
         # replaces the current stage with history_preparation.

@@ -21,6 +21,7 @@ from umi.competition_reward_writer_reconciliation import hold_stopped_standing_w
 from umi.competition_round_journal import RoundJournal
 from umi.competition_supervisor_runtime import hold_successor_startup_lease
 from umi.open_competition import digest
+from umi.protocol import canonical_json_bytes
 
 from .test_competition_reward_writer_review import (  # noqa: F401
     activation_case,
@@ -79,8 +80,21 @@ async def empty_original(selected_boot):  # noqa: F811
                 yield SimpleNamespace(reader=reader, journals=journals, root=root)
 
 
-async def test_genuine_empty_original_is_bound_and_repeat_preserves_journal(empty_original):
+def legacy_frontier(reader):
+    """Retain the original layout from before folded-prefix metadata existed."""
+    with reader.journal.transaction() as db:
+        for name in reader.folded_frontier.triggers:
+            db.execute("DROP TRIGGER " + name)
+        db.execute("DROP TABLE history_folded_state")
+        db.execute("DROP TABLE history_folded_anchors")
+        db.execute("DELETE FROM records WHERE kind LIKE 'control_history_folded_%'")
+
+
+@pytest.mark.parametrize("layout", ["current", "legacy"])
+async def test_genuine_empty_original_is_bound_and_repeat_preserves_journal(empty_original, layout):
     case = empty_original
+    if layout == "legacy":
+        legacy_frontier(case.reader)
     before = case.reader.journal.path.read_bytes()
     inode = case.reader.journal.path.stat().st_ino
     original = review_empty_original(case.reader, case.journals)
@@ -220,10 +234,13 @@ async def test_empty_capability_cannot_outlive_original_journal_owner(empty_orig
         case.journals._active[0] = True
 
 
-async def test_source_only_review_is_explicit_frozen_and_not_completed(empty_original):
+@pytest.mark.parametrize("layout", ["current", "legacy"])
+async def test_source_only_review_is_explicit_frozen_and_not_completed(empty_original, layout):
     from umi.competition_reward_writer_sources import review_source_only_original
 
     case = empty_original
+    if layout == "legacy":
+        legacy_frontier(case.reader)
     first = case.reader.first_block
     case.reader.journal.put("control_history_block", str(first), {"retained": "source"})
     before = case.reader.journal.path.read_bytes()
@@ -239,6 +256,101 @@ async def test_source_only_review_is_explicit_frozen_and_not_completed(empty_ori
     case.reader.journal.put("control_history_chunk", "ab" * 32, {"late": "mutation"})
     with pytest.raises(HistoryCheckpointRepairRequired, match="database changed"):
         original.validate()
+
+
+@pytest.mark.parametrize("source_only", [False, True])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "revision",
+        "highest",
+        "selection",
+        "missing_owner",
+        "missing_generation",
+        "missing_table",
+        "missing_trigger",
+        "unknown_trigger",
+        "extra_owner",
+        "extra_generation",
+        "replaced_generation",
+        "populated",
+        "frontier_record",
+        "anchor_record",
+        "anchor_index",
+        "legacy_orphan_trigger",
+    ],
+)
+async def test_original_review_refuses_noninitial_frontier(empty_original, source_only, fault):
+    from umi.competition_reward_writer_sources import review_source_only_original
+
+    reader, journals = empty_original.reader, empty_original.journals
+    if source_only:
+        reader.journal.put("control_history_block", str(reader.first_block), {"retained": "source"})
+    if fault == "legacy_orphan_trigger":
+        legacy_frontier(reader)
+    with reader.journal.transaction() as db:
+        if fault == "revision":
+            db.execute("UPDATE history_folded_state SET revision=1")
+        elif fault == "highest":
+            db.execute("UPDATE history_folded_state SET highest=highest+1")
+        elif fault == "selection":
+            db.execute("UPDATE history_folded_state SET key=?", ("ab" * 32,))
+        elif fault in {"missing_owner", "missing_generation"}:
+            kind = "control_history_folded_" + fault.removeprefix("missing_")
+            db.execute("DELETE FROM records WHERE kind=?", (kind,))
+        elif fault == "missing_table":
+            db.execute("DROP TABLE history_folded_anchors")
+        elif fault == "missing_trigger":
+            db.execute("DROP TRIGGER history_folded_source")
+        elif fault in {"unknown_trigger", "legacy_orphan_trigger"}:
+            db.execute(
+                "CREATE TRIGGER history_folded_unknown AFTER INSERT ON records BEGIN SELECT 1; END"
+            )
+        elif fault == "anchor_index":
+            db.execute(
+                "INSERT INTO history_folded_anchors VALUES (?,?)", (reader.first_block, "ab" * 32)
+            )
+        else:
+            kind, key, body = {
+                "extra_owner": (
+                    "control_history_folded_owner",
+                    "other",
+                    reader.folded_frontier.marker,
+                ),
+                "extra_generation": (
+                    "control_history_folded_generation",
+                    "other",
+                    reader.folded_frontier.generation("other"),
+                ),
+                "replaced_generation": (
+                    "control_history_folded_generation",
+                    "other",
+                    reader.folded_frontier.generation("other"),
+                ),
+                "populated": (
+                    "control_history_folded_populated",
+                    "initial",
+                    reader.folded_frontier.populated("initial"),
+                ),
+                "frontier_record": ("control_history_folded_frontier", "ab" * 32, {}),
+                "anchor_record": ("control_history_folded_anchor", "ab" * 32, {}),
+            }[fault]
+            db.execute(
+                "INSERT INTO records VALUES (?,?,?)", (kind, key, canonical_json_bytes(body))
+            )
+            if fault == "replaced_generation":
+                db.execute(
+                    "DELETE FROM records WHERE kind='control_history_folded_generation' "
+                    "AND id='initial'"
+                )
+                db.execute("UPDATE history_folded_state SET revision=0,generation='other'")
+    before = reader.journal.path.read_bytes()
+    with pytest.raises(HistoryCheckpointRepairRequired):
+        if source_only:
+            review_source_only_original(reader, journals, through_block=reader.first_block)
+        else:
+            review_empty_original(reader, journals)
+    assert reader.journal.path.read_bytes() == before
 
 
 @pytest.mark.parametrize(
