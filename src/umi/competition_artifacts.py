@@ -12,6 +12,7 @@ import os
 import secrets
 import shutil
 import stat
+from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
@@ -90,7 +91,14 @@ def _check_tree(root_fd: int, bundle: ModelBundle) -> None:
         raise ValueError("bundle is missing a declared artifact")
 
 
-def _copy_verified(stream: BinaryIO, record: BundleFile, target: BinaryIO | None) -> None:
+def _copy_verified(
+    stream: BinaryIO,
+    record: BundleFile,
+    target: BinaryIO | None,
+    *,
+    check_write: Callable[[int], None] | None = None,
+    on_bytes_written: Callable[[int], None] | None = None,
+) -> None:
     before = os.fstat(stream.fileno())
     hasher = hashlib.sha256()
     total = 0
@@ -100,7 +108,12 @@ def _copy_verified(stream: BinaryIO, record: BundleFile, target: BinaryIO | None
             raise ValueError("artifact grew while being verified")
         hasher.update(chunk)
         if target is not None:
-            target.write(chunk)
+            if check_write is not None:
+                check_write(len(chunk))
+            if target.write(chunk) != len(chunk):
+                raise OSError("artifact preservation write was incomplete")
+            if on_bytes_written is not None:
+                on_bytes_written(len(chunk))
     after = os.fstat(stream.fileno())
     if (
         total != record.size_bytes
@@ -126,11 +139,16 @@ def preserve_bundle(
     source: Path,
     archive: Path,
     policy: CompetitionPolicy,
+    *,
+    check_write: Callable[[int], None] | None = None,
+    on_bytes_written: Callable[[int], None] | None = None,
 ) -> Path:
     """Copy and verify all model files, then atomically publish a content directory.
 
     A destination interrupted before rename is never a promotable archive.
     Retries reuse the preserved verification receipt instead of overwriting it.
+    Optional admission and progress ports run before and after bounded payload
+    writes. The caller owns metadata headroom; receipt reuse performs no writes.
     """
     validate_bundle_policy(bundle, policy)
     if not archive.is_absolute() or archive.is_symlink():
@@ -141,22 +159,45 @@ def preserve_bundle(
     key = digest(bundle)
     lease = lock_private_file(archive / (".preserve-" + key + ".lock"))
     try:
-        return _preserve_locked(bundle, source, archive, policy)
+        return _preserve_locked(
+            bundle,
+            source,
+            archive,
+            policy,
+            check_write=check_write,
+            on_bytes_written=on_bytes_written,
+        )
     finally:
         os.close(lease)
 
 
-def _preserve_locked(bundle, source, archive, policy):
-    key = digest(bundle)
-    final = archive / key
-    # This exact, per-manifest scratch directory is exclusively owned by the
-    # lock above. A killed copy can be retried without accumulating orphan data.
+def _clear_preservation_stage(archive, key):
     stage = archive / (".pending-" + key)
     if stage.exists() or stage.is_symlink():
         info = stage.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise ValueError("unsafe interrupted artifact directory")
         shutil.rmtree(stage)
+    return stage
+
+
+def reclaim_interrupted_preservation(bundle, archive, policy):
+    """Release only this native writer's incomplete stage before space admission."""
+    validate_bundle_policy(bundle, policy)
+    with _directory(archive):
+        lease = lock_private_file(archive / (".preserve-" + digest(bundle) + ".lock"))
+        try:
+            _clear_preservation_stage(archive, digest(bundle))
+        finally:
+            os.close(lease)
+
+
+def _preserve_locked(bundle, source, archive, policy, *, check_write=None, on_bytes_written=None):
+    key = digest(bundle)
+    final = archive / key
+    # This exact, per-manifest scratch directory is exclusively owned by the
+    # lock above. A killed copy can be retried without accumulating orphan data.
+    stage = _clear_preservation_stage(archive, key)
     if final.exists() or final.is_symlink():
         _verify_preserved_locked(bundle, archive, policy)
         return final
@@ -170,7 +211,16 @@ def _preserve_locked(bundle, source, archive, policy):
                 target = model_root / record.path
                 target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 with _artifact(root_fd, record) as (stream, _), target.open("xb") as output:
-                    _copy_verified(stream, record, output)
+                    if check_write is None and on_bytes_written is None:
+                        _copy_verified(stream, record, output)
+                    else:
+                        _copy_verified(
+                            stream,
+                            record,
+                            output,
+                            check_write=check_write,
+                            on_bytes_written=on_bytes_written,
+                        )
                     output.flush()
                     os.fsync(output.fileno())
                 target.chmod(0o400)
@@ -206,6 +256,19 @@ def verify_preserved_bundle(
     archive: Path,
     policy: CompetitionPolicy,
 ) -> str:
+    # A worker-created reference may also be a local/legacy candidate. Its
+    # byte-reading verifier shares the exact archive lease with reference
+    # replayers, including through a read-only canonical bind.
+    reference_lock = archive / ".reference-working-set" / (digest(bundle) + ".lock")
+    lease = lock_private_file(reference_lock, shared=True) if reference_lock.exists() else None
+    try:
+        return _verify_preserved_reader(bundle, archive, policy)
+    finally:
+        if lease is not None:
+            os.close(lease)
+
+
+def _verify_preserved_reader(bundle, archive, policy):
     validate_bundle_policy(bundle, policy)
     # Readers of already verified content do not contend with one another.
     expected = _preserved_verification_record(bundle, archive)

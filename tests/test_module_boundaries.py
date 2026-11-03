@@ -67,8 +67,12 @@ def test_public_command_arguments_match_pre_refactor_contract() -> None:
     # The runtime-port command exercises the real parser and owned-provider
     # handler separately, while existing argument contracts remain unchanged.
     commands.pop("apply-runtime-port")
-    # Remove only the named additive cohort commands before checking the
-    # original operator interface. Existing commands keep their original hash.
+    # These additive commands have dedicated parser and handler coverage. Keep
+    # the original command digest so none of the older interfaces can drift.
+    commands.pop("apply-cohort-baseline")
+    commands.pop("fetch-cohort-model-licenses")
+    # Cohort admission has separate parser and handler qualification. Its new
+    # commands must not change the existing operator interface.
     for command in (
         "initialize-cohort-intake",
         "sign-cohort-consent",
@@ -76,8 +80,6 @@ def test_public_command_arguments_match_pre_refactor_contract() -> None:
         "submit-cohort-model",
         "query-cohort-admission",
         "run-cohort-admission-worker",
-        "apply-cohort-baseline",
-        "fetch-cohort-model-licenses",
     ):
         commands.pop(command)
     actions = commands["fetch-initial-successor-history"]["actions"]
@@ -136,6 +138,65 @@ def test_published_schemas_match_pre_refactor_contracts() -> None:
             assert extension["default"] is None
             assert "scoring_by_target" not in pins["required"]
         definitions = schema.get("$defs", {})
+        bundle = definitions.get("ModelBundle")
+        if bundle is not None:
+            extension = bundle["properties"].pop("license_adoption")
+            assert extension == {
+                "anyOf": [
+                    {"$ref": "#/$defs/SignedModelLicenseTermsAdoption"},
+                    {"type": "null"},
+                ],
+                "default": None,
+            }
+            assert "license_adoption" not in bundle["required"]
+            additions = {
+                name: definitions.pop(name)
+                for name in ("ModelLicenseTermsAdoption", "SignedModelLicenseTermsAdoption")
+            }
+            assert json_sha256(additions) == contracts["model_license_definitions_sha256"]
+            tag = bundle["properties"]["schema"]
+            assert tag.pop("enum") == ["umi-model-bundle/1", "umi-model-bundle/2"]
+            tag["const"] = "umi-model-bundle/1"
+        output = definitions.get("CaseOutput")
+        if output is not None:
+            extension = output["properties"].pop("cpu_timing")
+            assert extension == {
+                "anyOf": [{"$ref": "#/$defs/CpuTimingEvidence"}, {"type": "null"}],
+                "default": None,
+            }
+            assert "cpu_timing" not in output["required"]
+            additions = {
+                name: definitions.pop(name)
+                for name in (
+                    "CpuBundleCacheEvidence",
+                    "CpuConditionEvidence",
+                    "CpuTicks",
+                    "CpuTimingContext",
+                    "CpuTimingEvidence",
+                    "CpuTimingSample",
+                    "FixedCpuProbe",
+                    "ObserverLag",
+                    "PressureSnapshot",
+                    "ProbeWorker",
+                )
+            }
+            assert json_sha256(additions) == contracts["cpu_timing_definitions_sha256"]
+        execution = definitions.get("OfflineCaseExecution")
+        if execution is not None:
+            tag = execution["properties"]["schema"]
+            assert tag.pop("enum") == [
+                "umi-offline-case-execution/1",
+                "umi-offline-case-execution/2",
+            ]
+            tag["const"] = "umi-offline-case-execution/1"
+        runtime = definitions.get("OfflineCpuRuntime")
+        if runtime is not None:
+            # The supported runner now supplies the existing maximum when the
+            # optional input is omitted; explicit historical limits are intact.
+            assert runtime["properties"]["pids_limit"].pop("default") == 256
+            assert "pids_limit" not in runtime["required"]
+            required = {*runtime["required"], "pids_limit"}
+            runtime["required"] = [name for name in runtime["properties"] if name in required]
         if "EndpointUnavailableEvidence" in definitions:
             # C4's retained repair evidence is an explicit versioned extension.
             # Pin its additions and preserve every original field's contract.
@@ -160,63 +221,6 @@ def test_published_schemas_match_pre_refactor_contracts() -> None:
             assert reasons.pop() == "coordinator_outcome_unavailable"
             variants = definitions["ExecutionAnnouncement"]["properties"]["evidence"]["anyOf"]
             assert variants.pop() == {"$ref": "#/$defs/EndpointUnavailableEvidence"}
-        if "CpuTimingEvidence" in definitions:
-            additions = {
-                name: definitions.pop(name)
-                for name in (
-                    "CpuBundleCacheEvidence",
-                    "CpuConditionEvidence",
-                    "CpuTicks",
-                    "CpuTimingContext",
-                    "CpuTimingEvidence",
-                    "CpuTimingSample",
-                    "FixedCpuProbe",
-                    "ObserverLag",
-                    "PressureSnapshot",
-                    "ProbeWorker",
-                )
-            }
-            assert json_sha256(additions) == contracts["cpu_timing_definitions_sha256"]
-            output = definitions["CaseOutput"]
-            timing = output["properties"].pop("cpu_timing")
-            assert timing == {
-                "anyOf": [{"$ref": "#/$defs/CpuTimingEvidence"}, {"type": "null"}],
-                "default": None,
-            }
-            assert "cpu_timing" not in output["required"]
-            if "OfflineCaseExecution" in definitions:
-                tag = definitions["OfflineCaseExecution"]["properties"]["schema"]
-                assert tag.pop("enum") == [
-                    "umi-offline-case-execution/1",
-                    "umi-offline-case-execution/2",
-                ]
-                tag["const"] = "umi-offline-case-execution/1"
-        if "SignedModelLicenseTermsAdoption" in definitions:
-            additions = {
-                name: definitions.pop(name)
-                for name in (
-                    "ModelLicenseTermsAdoption",
-                    "SignedModelLicenseTermsAdoption",
-                )
-            }
-            assert json_sha256(additions) == contracts["model_license_definitions_sha256"]
-            bundle = definitions["ModelBundle"]
-            adoption = bundle["properties"].pop("license_adoption")
-            assert adoption == {
-                "anyOf": [{"$ref": "#/$defs/SignedModelLicenseTermsAdoption"}, {"type": "null"}],
-                "default": None,
-            }
-            assert "license_adoption" not in bundle["required"]
-            tag = bundle["properties"]["schema"]
-            assert tag.pop("enum") == ["umi-model-bundle/1", "umi-model-bundle/2"]
-            tag["const"] = "umi-model-bundle/1"
-        if "OfflineCpuRuntime" in definitions:
-            runtime = definitions["OfflineCpuRuntime"]
-            assert runtime["properties"]["pids_limit"].pop("default") == 256
-            assert "pids_limit" not in runtime["required"]
-            runtime["required"].insert(
-                runtime["required"].index("maximum_video_bytes"), "pids_limit"
-            )
         assert json_sha256(schema) == expected, reference
 
 

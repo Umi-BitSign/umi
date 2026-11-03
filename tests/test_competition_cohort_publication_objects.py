@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from contextlib import contextmanager
 from threading import Event
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from umi import competition_cohort_publication_objects as module
 from umi.competition_cohort_endpoint_archive import JournalEndpointObjects
 from umi.competition_cohort_publication_objects import PublicationObjects
+from umi.competition_cohort_reward_package import ReplayObjectCollector
 from umi.competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from umi.competition_round_journal import RoundJournal
 from umi.competition_verification_reuse import VerificationSourceChanged
@@ -115,6 +117,131 @@ def test_missing_original_cannot_borrow_retained_export(tmp_path):
         reopen().verification_replay(keys[0])
     with pytest.raises(VerificationSourceChanged, match="original is missing"):
         reopen().ensure(keys[0], lambda _: canonical_json_bytes({"value": "first"}))
+
+
+def test_receipt_batch_reads_each_descriptor_once_and_preserves_collector_coverage(
+    tmp_path, monkeypatch
+):
+    source, _files, keys, reopen = setup_objects(tmp_path)
+    objects = reopen()
+    for key in keys:
+        objects.verification_replay(key)
+    objects = reopen()
+    reads, snapshots = [], []
+    native_read = module.read_verification_metadata
+    native_snapshot = source.journal.read_transaction
+
+    def metadata(path):
+        reads.append(path.stem)
+        return native_read(path)
+
+    @contextmanager
+    def snapshot():
+        snapshots.append(True)
+        with native_snapshot() as db:
+            yield db
+
+    def no_payload(*args):
+        pytest.fail("unchanged receipt batch read an evidence payload")
+
+    monkeypatch.setattr(module, "read_verification_metadata", metadata)
+    monkeypatch.setattr(source.journal, "read_transaction", snapshot)
+    monkeypatch.setattr(JournalEndpointObjects, "__call__", no_payload)
+    monkeypatch.setattr(SettlementEvidenceFiles, "__call__", no_payload)
+    collector = ReplayObjectCollector(objects, 64 * 1024**2)
+    for _ in range(2):
+        reads.clear()
+        snapshots.clear()
+        with collector.verification_batch(keys):
+            for key in keys:
+                # Match the old null-source-identity receipt compatibility path:
+                # identity, authenticated SHA, then complete collector replay.
+                assert collector.verification_identity(key) is not None
+                assert collector.verification_sha256(key) is not None
+                collector.verification_replay(key)
+                collector.verification_replay(key)
+        assert reads == keys
+        assert len(snapshots) == 2
+        assert set(collector.values) == set(keys)
+        assert collector.used == sum(objects.verification_size(key) for key in keys)
+
+
+def test_receipt_batch_ignores_unrelated_journal_appends_and_conflicts(tmp_path, monkeypatch):
+    source, _files, keys, reopen = setup_objects(tmp_path)
+    objects = reopen()
+    identity = objects.verification_identity(keys[0])
+    native_read = module.read_verification_metadata
+    reads = []
+
+    def metadata(path):
+        reads.append(path.stem)
+        return native_read(path)
+
+    monkeypatch.setattr(module, "read_verification_metadata", metadata)
+    with objects.verification_batch(keys[:1]):
+        assert objects.verification_identity(keys[0]) == identity
+        source.put({"value": "unrelated new intake"})
+        with pytest.raises(ValueError):
+            source.journal.put("endpoint_replay_object", keys[1], {"value": "unrelated conflict"})
+        objects.verification_replay(keys[0])
+        assert objects.verification_identity(keys[0]) == identity
+    assert reads == keys[:1]
+    assert objects._local.batch is None
+
+
+def test_receipt_batch_binds_metadata_stamp_to_the_authenticated_read(tmp_path, monkeypatch):
+    _source, _files, keys, reopen = setup_objects(tmp_path)
+    objects = reopen()
+    objects.verification_replay(keys[0])
+    native_read = objects._read_descriptor
+
+    def replace_after_read(key, **kwargs):
+        authenticated = native_read(key, **kwargs)
+        path = objects.directory / (key + ".json")
+        module._atomic(path, path.read_bytes())
+        return authenticated
+
+    monkeypatch.setattr(objects, "_read_descriptor", replace_after_read)
+    with (
+        pytest.raises(VerificationSourceChanged, match="changed during replay"),
+        objects.verification_batch(keys[:1]),
+    ):
+        objects.verification_replay(keys[0])
+    assert objects._local.batch is None
+
+
+@pytest.mark.parametrize(
+    "change", ["binding", "conflict", "original_missing", "export", "metadata"]
+)
+def test_receipt_batch_rejects_changes_before_returning_and_drops_its_cache(tmp_path, change):
+    source, files, keys, reopen = setup_objects(tmp_path)
+    objects = reopen()
+    objects.verification_replay(keys[0])
+    with pytest.raises(VerificationSourceChanged), objects.verification_batch(keys[:1]):
+        objects.verification_replay(keys[0])
+        if change == "binding":
+            with source.journal.transaction() as db:
+                db.execute("UPDATE binding SET body=?", (canonical_json_bytes({"changed": True}),))
+        elif change == "conflict":
+            with pytest.raises(ValueError):
+                source.journal.put("endpoint_replay_object", keys[0], {"value": "changed"})
+        elif change == "original_missing":
+            with source.journal.transaction() as db:
+                db.execute(
+                    "DELETE FROM records WHERE kind=? AND id=?",
+                    ("endpoint_replay_object", keys[0]),
+                )
+        else:
+            target = (
+                files._path(keys[0])
+                if change == "export"
+                else objects.directory / (keys[0] + ".json")
+            )
+            target.unlink()
+    assert objects._local.batch is None
+    if change in {"export", "metadata"}:
+        objects.verification_replay(keys[0])
+        assert files(keys[0]) == canonical_json_bytes({"value": "first"})
 
 
 def test_unsafe_export_link_refuses_repair_without_touching_target(tmp_path):

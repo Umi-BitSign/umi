@@ -742,30 +742,30 @@ async def run_pipeline(
         else:
             direct.configure_model_reviews(o, client, signatures)
 
-        # Intake preservation runs the real owner in the background, which can
-        # advance its fair cursor. Wait for the actual target dispatch before
-        # checking that independent acceptance remains required.
+        # Upload preservation can leave the fair scheduler on a background
+        # cohort. Its first attempt for this cohort must still be the latest
+        # submission, before its superseded generations, with quorum required.
         o.outages.add("dave.example")
         target = (h.cohort, digest(submitted.signed_submission.submission))
-        attempted = []
-        original_one = o.service.models._one
+        initial_attempts, initial_reports = [], []
+        native_one = o.service.models._one
 
-        async def observe_attempt(cohort, sub):
-            attempted.append((cohort, digest(sub)))
-            return await original_one(cohort, sub)
+        async def record_attempt(cohort, submission):
+            initial_attempts.append((cohort, digest(submission)))
+            return await native_one(cohort, submission)
 
-        with monkeypatch.context() as dispatch:
-            dispatch.setattr(o.service.models, "_one", observe_attempt)
+        with monkeypatch.context() as initial:
+            initial.setattr(o.service.models, "_one", record_attempt)
             for _ in range(2 * len(h.intake.config.cohorts) + 1):
-                first_review = await o.service.models.poll_once()
-                if target in attempted:
+                initial_reports.append(await o.service.models.poll_once())
+                if target in initial_attempts:
                     break
-        assert target in attempted
-        assert first_review["entries_pending"] == 1
+            else:
+                pytest.fail(f"latest submission was not attempted: {initial_reports}")
+        assert [item for item in initial_attempts if item[0] == h.cohort] == [target]
+        assert initial_reports[-1]["entries_pending"] == 1
         with pytest.raises(PendingModelArtifacts):
-            o.service.models.owner.retained(
-                h.cohort, digest(submitted.signed_submission.submission)
-            )
+            o.service.models.owner.retained(*target)
         assert len(signatures) == 1 and set(signatures.values()) == {1}
         o.outages.clear()
         async with o.open() as app:
@@ -787,7 +787,6 @@ async def run_pipeline(
         # and the exact retained certificate, rather than one-poll placement.
         exports, recovery_reports = [], []
         native_export = o.service.models.owner.export
-        target = (h.cohort, digest(submitted.signed_submission.submission))
 
         def record_export(cohort, submission, destination):
             result = native_export(cohort, submission, destination)

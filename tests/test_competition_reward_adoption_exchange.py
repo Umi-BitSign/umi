@@ -16,6 +16,7 @@ from umi import competition_reward_adoption_exchange as module
 from umi import competition_reward_transition_native as native
 from umi.competition_reward_coverage_service import StandingRewardCoverageService
 from umi.competition_reward_decisions import SignedRewardControlDecision
+from umi.competition_reward_timing import IMMEDIATE_ACTIVATION_RULE
 from umi.competition_reward_transition_controls import (
     RewardTransitionApproval,
     RewardTransitionControlReader,
@@ -163,8 +164,10 @@ def exchange_case(opportunity_case, tmp_path, monkeypatch):
 
     monkeypatch.setattr(coverage, "_source", source)
 
-    async def prepare(*, automatic=False):
-        body = revision(c, automatic=automatic).adoption
+    async def prepare(*, automatic=False, immediate=False):
+        body = revision(
+            c, automatic=automatic, activation_rule=IMMEDIATE_ACTIVATION_RULE if immediate else None
+        ).adoption
         intent = native.RewardAdoptionReviewIntent(
             schema="umi-reward-adoption-review-intent/1",
             proposal=body,
@@ -181,12 +184,15 @@ def exchange_case(opportunity_case, tmp_path, monkeypatch):
         approval = None
         if not automatic:
             approval_body = RewardTransitionApproval(
-                schema="umi-reward-transition-approval/1",
+                schema="umi-reward-transition-approval/2"
+                if immediate
+                else "umi-reward-transition-approval/1",
                 series_sha256=digest(c.series),
                 predecessor_decision_sha256=digest(prior),
                 successor_cohort_sha256=body.cohort_sha256,
                 successor_package_sha256=body.package_sha256,
                 reason=body.early_release.reason,
+                activation_rule=body.activation_rule,
             )
             approval = SignedRewardTransitionApproval(
                 approval=approval_body, signature=sign_object(approval_body, wallet("Ferdie"))
@@ -218,9 +224,12 @@ def exchange_case(opportunity_case, tmp_path, monkeypatch):
     )
 
 
-async def test_request_vote_quorum_and_restart_keep_original_bytes(exchange_case, monkeypatch):
+@pytest.mark.parametrize("immediate", [False, True])
+async def test_request_vote_quorum_and_restart_keep_original_bytes(
+    exchange_case, monkeypatch, immediate
+):
     h = exchange_case
-    request = await h.prepare()
+    request = await h.prepare(immediate=immediate)
     body = request.intent.proposal
     slot = h.leader.signer.journal.slot(body)
     port = h.leader.vote_port(h.peerkey)
@@ -246,9 +255,12 @@ async def test_request_vote_quorum_and_restart_keep_original_bytes(exchange_case
     assert (await h.leader.signer.certify(slot)).adoption == body
 
 
-async def test_automatic_peer_restores_exact_anchor_then_obtains_fresh_control(exchange_case):
+@pytest.mark.parametrize("immediate", [False, True])
+async def test_automatic_peer_restores_exact_anchor_then_obtains_fresh_control(
+    exchange_case, immediate
+):
     h = exchange_case
-    request = await h.prepare(automatic=True)
+    request = await h.prepare(automatic=True, immediate=immediate)
     await h.peer.review(request, h.reviewer, coverage=h.coverage, controls=h.controls)
     assert h.state.events == ["hold", "pinned", "package", "anchor", "current", "native", "hold"]
 

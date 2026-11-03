@@ -195,6 +195,26 @@ class CohortOrderInbox:
                 )
             )
 
+    def protects_incumbent(self, model: str) -> bool:
+        """Exclude frozen references from cleanup without replaying assignments.
+
+        Conservatively keep references from any acknowledged cohort, including
+        an unknown or historical head. This metadata can only prevent eviction.
+        """
+        if len(model) != 64 or any(c not in "0123456789abcdef" for c in model):
+            raise ValueError("invalid incumbent cache exclusion")
+        with self.journal.read_transaction() as db:
+            return (
+                db.execute(
+                    "SELECT 1 FROM records c JOIN records r ON c.id=r.id "
+                    "WHERE c.kind='certificate' AND r.kind='receipt' AND "
+                    "json_extract(CAST(c.body AS TEXT),"
+                    "'$.order.round.incumbent_model_sha256')=? LIMIT 1",
+                    (model,),
+                ).fetchone()
+                is not None
+            )
+
     def _check_certificate(self, certificate):
         delivery_receipt(certificate, self.config.signer)
         miner = identity(certificate.order.submission.submission.hotkey)

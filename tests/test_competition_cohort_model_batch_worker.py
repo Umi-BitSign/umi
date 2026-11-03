@@ -3,6 +3,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
+from functools import partial
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -299,6 +300,83 @@ async def test_preparation_reuses_inputs_and_serial_intents_after_reservation_dr
     r.state.pending = 0
     await r.create().poll_cohort(r.cohort, r.adoption)
     assert len(prepared_calls) == 2
+
+
+@pytest.mark.parametrize("stage", ["inputs", "exports"])
+async def test_parallel_model_preparation_serializes_only_shared_publication(
+    batch_owner, monkeypatch, stage
+):
+    from umi import competition_cohort_model_batch_worker as module
+
+    r = batch_owner
+    native = module.run_owned_thread
+    ready_count = 0
+    active_commits = 0
+    commits = []
+    all_ready = asyncio.Event()
+    commit_started = asyncio.Event()
+    release_commit = asyncio.Event()
+
+    async def ready():
+        nonlocal ready_count
+        ready_count += 1
+        if ready_count == len(r.subs):
+            all_ready.set()
+        await all_ready.wait()
+
+    async def prepare_review(cohort, submission):
+        assert cohort == r.cohort and submission in r.subs
+        await ready()
+        return r.inputs
+
+    input_path = r.worker.inputs / "model-reviews" / (r.inputs.model_sha256 + ".json")
+    if stage == "inputs":
+        input_path.unlink()
+        r.worker.prepare_review = prepare_review
+
+    async def owned(function, *args, **kwargs):
+        nonlocal active_commits
+        if stage == "exports" and function == r.owner.publish:
+            result = await native(function, *args, **kwargs)
+            await ready()
+            return result
+        selected_commit = (
+            function == r.owner.export
+            if stage == "exports"
+            else isinstance(function, partial)
+            and function.func is module.publish_private_model
+            and function.args[0] == input_path
+        )
+        if selected_commit:
+            if active_commits:
+                raise OSError("the sibling publication still owns the private directory lock")
+            active_commits += 1
+            commits.append(args[1] if stage == "exports" else function.args[0])
+            commit_started.set()
+            try:
+                await release_commit.wait()
+                return await native(function, *args, **kwargs)
+            finally:
+                active_commits -= 1
+        return await native(function, *args, **kwargs)
+
+    monkeypatch.setattr(module, "run_owned_thread", owned)
+    task = asyncio.create_task(r.create().poll_cohort(r.cohort, r.adoption))
+    try:
+        await asyncio.wait_for(commit_started.wait(), 60)
+        await asyncio.sleep(0)  # Give the other ready publication its scheduling turn.
+        # Both expensive preparations/promotions finish before the first small
+        # publication is released; only shared-directory commits are serialized.
+        assert ready_count == len(r.subs)
+        assert len(r.state.promoted) == (len(r.subs) if stage == "exports" else 0)
+        assert active_commits == len(commits) == 1
+    finally:
+        all_ready.set()
+        release_commit.set()
+        report = await task
+    assert report["status"] == "completed"
+    expected = [digest(sub) for sub in r.subs] if stage == "exports" else [input_path] * len(r.subs)
+    assert sorted(commits) == sorted(expected)
 
 
 async def test_replacement_before_finalization_reuses_unchanged_intent_and_selects_latest(

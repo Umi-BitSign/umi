@@ -1,7 +1,8 @@
 # UMI documentation
 
-Start with the guide for your role. Public competition intake is live for cohorts
-whose signed history and readiness permit submissions. Read
+Start with the guide for your role. Public competition intake is open only for
+cohorts whose current authenticated routes accept new submissions. Intake,
+certification, evaluation and active rewards are separate states. Read
 [current miner operation](CURRENT_MINER_OPERATION.md) and the
 [model submission steps](miners/model.md#model-files-for-recoverable-cohorts),
 including the [admission-status query](miners/model.md#check-admission-after-upload).

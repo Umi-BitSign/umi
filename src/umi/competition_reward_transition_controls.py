@@ -9,11 +9,11 @@ import threading
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, model_serializer, model_validator
 
 from . import competition_host_activation as root_controls
-from .competition_cohort_settlement_config import load_settlement_service_config
-from .competition_service import CompetitionServiceConfig
+from .competition_reward_hold_source import parse_reward_hold_source
+from .competition_reward_timing import RewardActivationRule
 from .open_competition import Signature, digest, identity, verify_signature
 from .private_files import Directory, lock_private_file
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -29,12 +29,30 @@ class RewardTransitionControls(StrictProtocolModel):
 
 
 class RewardTransitionApproval(StrictProtocolModel):
-    schema_: Literal["umi-reward-transition-approval/1"] = Field(alias="schema")
+    schema_: Literal["umi-reward-transition-approval/1", "umi-reward-transition-approval/2"] = (
+        Field(alias="schema")
+    )
     series_sha256: Hex32
     predecessor_decision_sha256: Hex32
     successor_cohort_sha256: Hex32
     successor_package_sha256: Hex32
     reason: Annotated[str, Field(min_length=1, max_length=1024)]
+    activation_rule: RewardActivationRule | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_approval(self, handler):
+        value = handler(self)
+        if self.activation_rule is None:
+            value.pop("activation_rule", None)
+        return value
+
+    @model_validator(mode="after")
+    def versioned_timing(self):
+        if (self.schema_ == "umi-reward-transition-approval/2") != (
+            self.activation_rule is not None
+        ):
+            raise ValueError("operator activation rule requires an explicit versioned approval")
+        return self
 
 
 class SignedRewardTransitionApproval(StrictProtocolModel):
@@ -73,6 +91,7 @@ def verify_transition_approval(signed, *, series, proposal=None):
             or body.successor_cohort_sha256 != proposal.cohort_sha256
             or body.successor_package_sha256 != proposal.package_sha256
             or body.reason != release.reason
+            or body.activation_rule != proposal.activation_rule
         ):
             raise ValueError("operator approval differs from its exact proposed release")
     return signed
@@ -97,10 +116,15 @@ def _identity(path, maximum):
 
 
 def _admission(path):
-    # The same full model parser used by serve-intake, with the stricter native
-    # root-control reader instead of an unprotected general command-line read.
+    # Authenticate the exact selected owner bytes without traversing that
+    # owner's private queues, stores or credentials from an independent reader.
     raw = root_controls._read_root_control_path(path, MAX_CONFIG_BYTES, modes={0o444})
-    return CompetitionServiceConfig.model_validate_json(raw)
+    return parse_reward_hold_source(raw, "admission")
+
+
+def _settlement(path):
+    raw = root_controls._read_root_control_path(path, MAX_CONFIG_BYTES, modes={0o444})
+    return parse_reward_hold_source(raw, "settlement")
 
 
 def publish_reward_transition_approval(config, signed, *, series) -> Path:
@@ -214,7 +238,7 @@ class RewardTransitionControlReader:
             settlement = self._cached(
                 Path(self.config.settlement_config),
                 MAX_CONFIG_BYTES,
-                load_settlement_service_config,
+                _settlement,
             )
             stamps = tuple(
                 self._cache[Path(path)][0]
@@ -222,36 +246,24 @@ class RewardTransitionControlReader:
             )
             if stamps == self._hold_identity:
                 return cohort in self._holds
-            service = admission.recoverable_service
-            if (
-                service is None
-                or service.lifecycle is None
-                or admission.recoverable_intake is None
-                or admission.policy_sha256 != digest(self.policy)
-                or settlement.role != "coordinator"
-                or digest(settlement.policy) != digest(self.policy)
-            ):
-                raise ValueError(
-                    "reward transition requires authoritative admission and settlement holds"
-                )
-            self._series(service.series)
+            self._series(admission.series)
             self._series(settlement.series)
-            bindings = {
-                item.cohort_sha256: item.authority_sha256
-                for item in admission.recoverable_intake.cohorts
-            }
+            verified = set()
+            for source in (admission, settlement):
+                key = (digest(source.series), digest(source.manifest), source.policy_sha256)
+                if key not in verified:
+                    source.verify(self.policy)
+                    verified.add(key)
+            bindings = {item.cohort_sha256: item.authority_sha256 for item in admission.intake}
             lifecycle_bindings = {
-                item.cohort_sha256: item.authority_sha256
-                for item in service.lifecycle.sources.intake.cohorts
+                item.cohort_sha256: item.authority_sha256 for item in admission.lifecycle_intake
             }
             if any(
                 bindings.get(key) != self.authority or lifecycle_bindings.get(key) != self.authority
                 for key in self.cohorts
             ):
                 raise ValueError("admission hold source changed a cohort's intake authority")
-            self._holds = frozenset(
-                service.lifecycle.automatic_progression_hold_cohorts
-            ) | frozenset(settlement.automatic_progression_hold_cohorts)
+            self._holds = frozenset(admission.holds) | frozenset(settlement.holds)
             self._hold_identity = stamps
             return cohort in self._holds
 

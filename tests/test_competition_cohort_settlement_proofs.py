@@ -81,6 +81,7 @@ async def test_completed_publication_survives_restart_without_payload_reads(
 
     monkeypatch.setattr(reopened, "_publish_selected_original", forbidden)
     monkeypatch.setattr(reopened.outbox, "write", forbidden)
+    assert await reopened.publication_completed(observation)
     await reopened.ensure_published(observation)
     assert calls == [observation]
 

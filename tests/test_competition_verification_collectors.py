@@ -1,6 +1,8 @@
 """Owner and package wrappers preserve immutable coverage without payload replay."""
 
 import json
+import sqlite3
+from contextlib import contextmanager
 
 import pytest
 
@@ -91,12 +93,163 @@ def test_native_closure_owner_source_restarts_without_payload_reads(
 
     monkeypatch.setattr(VerifiedPackageSnapshot, "read", no_payload_reads)
     owner, objects = selected(reopen())
+    transactions = []
+    native_transaction = owner.journal.read_transaction
+
+    @contextmanager
+    def counted_transaction(*args, **kwargs):
+        with native_transaction(*args, **kwargs) as db:
+            transactions.append(db)
+            yield db
+
+    monkeypatch.setattr(owner.journal, "read_transaction", counted_transaction)
+    native_replay = owner.external.verification_replay
+
+    def replay(key):
+        assert transactions and not transactions[0].in_transaction
+        return native_replay(key)
+
+    monkeypatch.setattr(owner.external, "verification_replay", replay)
     with VerificationReuse(tmp_path / "receipts", owner="native").selected():
         assert review_service_closed(b, objects=objects) == b["closure"]
+    assert len(transactions) == 1
     assert set(owner.external.values) == original_coverage
     if wrapper:
         assert set(objects.values) == original_coverage
         assert objects.used == owner.external.used
+
+
+@pytest.mark.parametrize("change", ["conflict", "shadow", "unrelated"])
+def test_dependency_batch_fences_concurrent_journal_changes(tmp_path, monkeypatch, policy, change):
+    value = Result(value="retained")
+    key = digest(value)
+    owner = settlement_source(tmp_path, snapshot_at(tmp_path, {key: canonical_json_bytes(value)})())
+
+    @verified_replay("batch_journal_fence", Result)
+    def verify(objects, policy):
+        return Result.model_validate_json(read_endpoint_object(objects, key))
+
+    receipts = tmp_path / "receipts"
+    with VerificationReuse(receipts, owner="batch").selected():
+        assert verify(owner._object, policy) == value
+    native = owner.external.verification_replay
+    changed = False
+
+    def replay(selected):
+        nonlocal changed
+        native(selected)
+        if not changed:
+            changed = True
+            if change == "conflict":
+                with owner.journal.transaction() as db:
+                    db.execute("INSERT INTO holds VALUES (?)", (key,))
+            elif change == "shadow":
+                owner.archive.put(value)
+            else:
+                owner.archive.put(Result(value="unrelated"))
+
+    monkeypatch.setattr(owner.external, "verification_replay", replay)
+    with VerificationReuse(receipts, owner="batch").selected():
+        if change == "unrelated":
+            assert verify(owner._object, policy) == value
+        else:
+            with pytest.raises(ValueError, match=r"conflict held|archive selection changed"):
+                verify(owner._object, policy)
+    assert changed
+
+
+@pytest.mark.parametrize("damage", ["missing", "changed"])
+def test_dependency_batch_preserves_immutable_object_repair(tmp_path, monkeypatch, policy, damage):
+    value = Result(value="retained")
+    key = digest(value)
+    reopen = snapshot_at(tmp_path, {key: canonical_json_bytes(value)})
+    owner = settlement_source(tmp_path, reopen())
+
+    @verified_replay("batch_object_repair", Result)
+    def verify(objects, policy):
+        return Result.model_validate_json(read_endpoint_object(objects, key))
+
+    receipts = tmp_path / "receipts"
+    with VerificationReuse(receipts, owner="repair").selected():
+        assert verify(owner._object, policy) == value
+    original = owner.external.snapshot.store.object_path(key)
+    if damage == "missing":
+        original.unlink()
+    else:
+        original.chmod(0o600)
+        original.write_bytes(b'{"value":"changed"}')
+        original.chmod(0o400)
+    with (
+        VerificationReuse(receipts, owner="repair").selected(),
+        pytest.raises(ValueError, match=r"restoration|immutable identity"),
+    ):
+        verify(owner._object, policy)
+
+
+def test_dependency_batch_detects_commit_after_snapshot_before_version(
+    tmp_path, monkeypatch, policy
+):
+    value = Result(value="retained")
+    key = digest(value)
+    owner = settlement_source(tmp_path, snapshot_at(tmp_path, {key: canonical_json_bytes(value)})())
+    # Rollback journals already prevent this commit while the short snapshot
+    # is open. WAL permits it, so exercise that less restrictive boundary too.
+    with sqlite3.connect(owner.journal.path) as db:
+        assert db.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+
+    @verified_replay("batch_version_boundary", Result)
+    def verify(objects, policy):
+        return Result.model_validate_json(read_endpoint_object(objects, key))
+
+    receipts = tmp_path / "receipts"
+    with VerificationReuse(receipts, owner="boundary").selected():
+        assert verify(owner._object, policy) == value
+    native = owner.journal.read_transaction
+    changed = False
+
+    @contextmanager
+    def racing_snapshot(*args, **kwargs):
+        nonlocal changed
+        with native(*args, **kwargs) as db:
+            if not changed:
+                changed = True
+                with owner.journal.transaction() as writer:
+                    writer.execute("INSERT INTO holds VALUES (?)", (key,))
+            yield db
+
+    monkeypatch.setattr(owner.journal, "read_transaction", racing_snapshot)
+    with (
+        VerificationReuse(receipts, owner="boundary").selected(),
+        pytest.raises(ValueError, match="conflict held"),
+    ):
+        verify(owner._object, policy)
+    assert changed
+
+
+def test_dependency_batch_preserves_collector_retained_precedence(tmp_path, monkeypatch, policy):
+    value = Result(value="retained locally")
+    key = digest(value)
+    owner = settlement_source(tmp_path, snapshot_at(tmp_path, {key: canonical_json_bytes(value)})())
+    source = owner._object
+    collector = ReplayObjectCollector(source, 8 * 1024**2)
+    assert collector.retain(value) == key
+
+    @verified_replay("batch_local_retained", Result)
+    def verify(objects, policy):
+        return Result.model_validate_json(read_endpoint_object(objects, key))
+
+    receipts = tmp_path / "receipts"
+    with VerificationReuse(receipts, owner="local").selected():
+        assert verify(collector, policy) == value
+    with owner.journal.transaction() as db:
+        db.execute("INSERT INTO holds VALUES (?)", (key,))
+
+    def no_upstream_batch(*args):
+        pytest.fail("collector-owned bytes borrowed upstream selection")
+
+    monkeypatch.setattr(source, "verification_batch", no_upstream_batch)
+    with VerificationReuse(receipts, owner="local").selected():
+        assert verify(collector, policy) == value
 
 
 def test_archive_shadow_cannot_borrow_external_identity_or_bypass_conflict(

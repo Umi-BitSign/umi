@@ -99,6 +99,16 @@ def _parts(value: BaseModel) -> dict[str, tuple[Any, TypeAdapter | None]]:
 
 def dump_aggregate(value: BaseModel, sink: _Sink) -> None:
     """Write exact canonical bytes, retaining at most one dumped inventory item."""
+    enter = getattr(sink, "aggregate_enter", None)
+    leave = getattr(sink, "aggregate_leave", None)
+    if enter is not None:
+        enter(value)
+    _dump_aggregate(value, sink)
+    if leave is not None:
+        leave(value)
+
+
+def _dump_aggregate(value: BaseModel, sink: _Sink) -> None:
     parts = _parts(value)
     if not parts:
         rfc8785.dump(value.model_dump(mode="json", by_alias=True), sink)
@@ -127,5 +137,8 @@ def dump_aggregate(value: BaseModel, sink: _Sink) -> None:
             if position:
                 sink.write(b",")
             rfc8785.dump(adapter.dump_python(member, mode="json", by_alias=True), sink)
+            completed = getattr(sink, "aggregate_item", None)
+            if completed is not None:
+                completed(value)
         sink.write(b"]")
     sink.write(b"}")

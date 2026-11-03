@@ -5,4 +5,5 @@
 + /model-acceptance-proposals/*/*.json
 + /model-reward-acceptances/*/*.json
 + /model-reward-preparation/*/*.json
++ /model-reward-references/*/*.json
 - **

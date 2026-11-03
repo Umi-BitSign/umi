@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 from umi import competition_store
+from umi.competition_cohort_baseline_history import read_cohort_baseline_receipt
 from umi.competition_launch import PublicLaunchIdentity, PublicRoundSchedule
 from umi.competition_runtime_port import baseline_record_digest
 from umi.competition_store import CompetitionStore
@@ -141,6 +142,16 @@ def test_native_winner_history_reopens_and_repeats_without_payloads(
     assert record["contributor_hotkey"] == review.candidate.contributor_hotkey
     assert rows(store)["submissions"] == before["submissions"]
     assert rows(store)["promotions"][:1] == before["promotions"]
+    exported = (
+        store.directory
+        / "model-reward-references"
+        / review.target_cohort_sha256
+        / (review.candidate.model_sha256 + ".json")
+    )
+    original_export = exported.read_bytes()
+    with store._connection() as connection:
+        original_certificate = read_cohort_baseline_receipt(store, connection, record).certificate
+    assert original_export == canonical_json_bytes(original_certificate)
     reopened = CompetitionStore(store.directory, store.policy)
     assert reopened.baseline() == record
     head = reopened.reviewed_promotion_head(review.candidate.round_sha256, maximum_bytes=1_000_000)
@@ -159,6 +170,7 @@ def test_native_winner_history_reopens_and_repeats_without_payloads(
         )
         == record
     )
+    assert exported.read_bytes() == original_export
     assert rows(reopened)["promotions"] == rows(store)["promotions"]
     with reopened._connection() as connection:
         receipt = json.loads(

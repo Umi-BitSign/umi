@@ -16,6 +16,7 @@ from umi.competition_reward_opportunity import (
     select_signed_early_release_revision,
     verify_signed_early_release,
 )
+from umi.competition_reward_timing import IMMEDIATE_ACTIVATION_RULE, activation_effective_block
 from umi.competition_reward_transition_timing import (
     REWARD_TRANSITION_WAIT_MS,
     RewardPredecessorLiveAge,
@@ -105,7 +106,10 @@ def test_exact_elapsed_boundary_is_not_block_count_or_coverage(
 
 
 @pytest.mark.parametrize("automatic", [False, True])
-def test_release_reaches_shared_consumers_and_repeats_immutably(opportunity_case, automatic):
+@pytest.mark.parametrize("immediate", [False, True])
+def test_release_reaches_shared_consumers_and_repeats_immutably(
+    opportunity_case, automatic, immediate
+):
     c = opportunity_case
     selected = initial(c)
     original_bytes = canonical_json_bytes(selected.adoptions[0])
@@ -117,8 +121,9 @@ def test_release_reaches_shared_consumers_and_repeats_immutably(opportunity_case
         issued_at_block=202,
         reason="Configured successor release policy",
         live_age=age(c) if automatic else None,
+        activation_rule=IMMEDIATE_ACTIVATION_RULE if immediate else None,
     )
-    assert body.schema_.endswith("/6" if automatic else "/5")
+    assert body.schema_.endswith("/7" if immediate else "/6" if automatic else "/5")
     assert type(body.early_release) is (RewardAutomaticRelease if automatic else RewardEarlyRelease)
     signed = SignedRewardModelAdoption(adoption=body, signatures=signatures(body))
     updated = select_signed_early_release_revision(selected, signed, **args)
@@ -128,6 +133,7 @@ def test_release_reaches_shared_consumers_and_repeats_immutably(opportunity_case
         update={
             "cohort_sha256": body.cohort_sha256,
             "package_sha256": body.package_sha256,
+            "allocation_sha256": body.allocation_sha256,
             "reward_adoption_sha256": digest(body),
             "effective_allocation_sha256": body.effective_allocation_sha256,
             "prior_opportunity_sha256": digest(body.early_release),
@@ -138,6 +144,24 @@ def test_release_reaches_shared_consumers_and_repeats_immutably(opportunity_case
         verify_signed_early_release(updated, **args, successor=successor, current_block=201)
     roundtrip = RewardModelAdoption.model_validate_json(canonical_json_bytes(body))
     assert roundtrip == body
+    decision = RewardControlDecision(
+        schema="umi-reward-control-decision/3",
+        series_sha256=digest(c.series),
+        sequence=2,
+        predecessor_sha256=digest(predecessor(c)),
+        kind="activate",
+        observed_at_block=202,
+        activation=successor,
+    )
+    expected = (
+        203
+        if immediate
+        else (
+            203 + c.series.maximum_proof_lag_blocks + c.series.maximum_transaction_lifetime_blocks
+        )
+    )
+    assert body.activation_age is None
+    assert activation_effective_block(c.series, decision, 203, updated) == expected
 
 
 @pytest.mark.parametrize(

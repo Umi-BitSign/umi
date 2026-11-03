@@ -7,7 +7,7 @@ for promotion into successive public baselines.
 ## Miners: start here
 
 - **Submit a public model:** follow the [model submission steps](docs/miners/model.md#model-files-for-recoverable-cohorts), including the separate admission-status check. Install the [published model client](docs/miners/connection.md#install-or-update-the-model-submission-client), even if you already run an endpoint miner.
-- **Check what is required now:** [current miner operation](docs/CURRENT_MINER_OPERATION.md) explains submission, certification and reward activation.
+- **Check what is required now:** [current miner operation](docs/CURRENT_MINER_OPERATION.md) distinguishes intake, evaluation and active rewards.
 - **Register a hotkey:** use the official [Bittensor registration guide](https://www.bittensor.com/docs/guides/mining) for subnet **78**. Registration alone does not submit a model or earn a competition reward.
 - **Maintain an existing endpoint:** use the [connection guide](docs/miners/connection.md) and [model integration guide](docs/miners/model.md). Endpoint enrollment is not a public-model submission.
 
@@ -27,12 +27,14 @@ for promotion into successive public baselines.
 
 ## Network phase
 
-Public competition intake is live. The selected cohort's signed history and
-readiness establish whether it accepts new submissions; an expired nominal block
-target alone does not close intake. Follow the announced intake deadline when one
-is selected. Certification and challenge start are separate from intake closure.
+Public competition intake is live only for cohorts whose current authenticated
+routes accept new submissions. Check the selected cohort's effective tracks,
+deadline and admission readiness; a global status flag does not open every
+cohort. Intake closure, certification, evaluation and reward activation are
+separate states.
 
-Public-model cohorts use direct R2 delivery. Read the
+Public-model cohorts use direct R2 model delivery and require their authenticated
+successor plans before opening. Read the
 [current miner operation guide](docs/CURRENT_MINER_OPERATION.md), the
 [cohort catalog](https://api.umi.vision/v1/competition/cohorts) and the selected
 cohort's signed history/readiness before submitting. Use the published model
@@ -46,8 +48,9 @@ means the model has been scored or has active rewards. The
 exact command and explains each stage.
 
 The [current upgrade manifest](deploy/miner-upgrade/current.json) selects the
-published client and its authenticated policy/runtime bindings. The `main` branch is reviewed source, not an activation signal. Live behavior is defined by the
-signed deployment, cohort history and finalized chain state. Historical bridge
+published client and its authenticated policy/runtime bindings. The
+`main` branch is reviewed source, not an activation signal. Live behavior is defined
+by the signed deployment, cohort history and finalized chain state. Historical bridge
 instructions do not describe current competition payouts.
 
 ## Development

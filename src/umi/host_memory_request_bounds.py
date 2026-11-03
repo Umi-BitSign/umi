@@ -203,23 +203,47 @@ def check_stage_json(raw, *, kind="input"):
     are not copied; only short object keys are decoded. Syntax validation here
     prevents malformed framing from bypassing the shape counters.
     """
-    bounds = stage_bounds()
+    return _check_json_shape(
+        raw, bounds=stage_bounds(), kind=kind, aggregate=_evidence_values.get(), capture=True
+    )
+
+
+def count_json_shape(raw, *, bounds, kind="input", value_limit=None):
+    """Count under explicit prospective bounds without selecting legacy semantics.
+
+    This pure scanner changes no stage ContextVar, retained shape identity or
+    native proof context. The caller owns prospective accounting and reuse.
+    """
+    return _check_json_shape(
+        raw,
+        bounds=bounds,
+        kind=kind,
+        aggregate=None,
+        capture=False,
+        selected_value_limit=value_limit,
+    )
+
+
+def _check_json_shape(raw, *, bounds, kind, aggregate, capture, selected_value_limit=None):
     if bounds is None:
-        _capture_shape(raw, kind, None)
+        if capture:
+            _capture_shape(raw, kind, None)
         return
     if len(raw) > getattr(bounds, "maximum_" + kind + "_bytes"):
         raise ValueError("requests-stage JSON exceeds its qualified byte bound")
-    aggregate = _evidence_values.get()
     fingerprint = None if aggregate is None else hashlib.sha256(raw).digest()
     if aggregate is not None and fingerprint in aggregate["seen"]:
         values = aggregate["seen"][fingerprint]
-        _capture_shape(raw, kind, values, fingerprint)
+        if capture:
+            _capture_shape(raw, kind, values, fingerprint)
         return values
     value_limit = (
         bounds.maximum_json_values
         if aggregate is None
         else min(bounds.maximum_json_values, aggregate["remaining"])
     )
+    if selected_value_limit is not None:
+        value_limit = min(value_limit, selected_value_limit)
     caps = {
         "records": bounds.maximum_records,
         "objects": bounds.maximum_objects,
@@ -311,5 +335,6 @@ def check_stage_json(raw, *, kind="input"):
     if aggregate is not None:
         aggregate["seen"][fingerprint] = values
         aggregate["remaining"] -= values
-    _capture_shape(raw, kind, values, fingerprint)
+    if capture:
+        _capture_shape(raw, kind, values, fingerprint)
     return values

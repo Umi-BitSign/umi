@@ -13,9 +13,11 @@ import asyncio
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import re
 import stat
+import time
 import weakref
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -337,6 +339,10 @@ class HostMemoryAdmission:
             from .host_model_execution import ModelExecutionMemoryPolicy
 
             self.policy = ModelExecutionMemoryPolicy.model_validate_json(raw)
+        elif schema == "umi-host-execution-memory-admission/1":
+            from .host_execution_memory import ExecutionMemoryPolicy
+
+            self.policy = ExecutionMemoryPolicy.model_validate_json(raw)
         else:
             self.policy = HostMemoryAdmissionPolicy.model_validate_json(raw)
         self.policy_sha256 = expected_sha256
@@ -347,7 +353,7 @@ class HostMemoryAdmission:
         self._validate_all()
         # Startup and every later grant remeasure current memory. Idle Python
         # heaps remain in MemAvailable accounting after logical leases close.
-        if not self.model_execution_stage and (
+        if (not self.model_execution_stage or self.joint_execution_stage) and (
             _available_memory()
             < self.policy.minimum_available_bytes
             + self.policy.reserved_bytes
@@ -357,7 +363,14 @@ class HostMemoryAdmission:
 
     @property
     def model_execution_stage(self) -> bool:
-        return self.policy.schema_ == "umi-host-model-execution-admission/1"
+        return self.policy.schema_ in {
+            "umi-host-model-execution-admission/1",
+            "umi-host-execution-memory-admission/1",
+        }
+
+    @property
+    def joint_execution_stage(self) -> bool:
+        return self.policy.schema_ == "umi-host-execution-memory-admission/1"
 
     @property
     def requests_stage(self) -> bool:
@@ -376,6 +389,11 @@ class HostMemoryAdmission:
             raise AdmissionBindingError("operation is outside the qualified C5 requests stage")
 
     def bind_runtime(self, role, protocol_policy, series, authority):
+        if self.joint_execution_stage and (
+            role not in {"intake", "phase_reviewer", "settlement"}
+            or protocol_policy != self.policy.protocol_policy_sha256
+        ):
+            raise AdmissionBindingError("runtime identity is outside the joint execution policy")
         if self.requests_stage and (
             role not in {"intake", "phase_reviewer"}
             or protocol_policy != self.policy.protocol_policy_sha256
@@ -416,7 +434,9 @@ class HostMemoryAdmission:
         parent = self._open_root()
         try:
             files = (*self.policy.slots, self.policy.transaction_lock)
-            if not self.requests_stage and not self.model_execution_stage:
+            if not self.requests_stage and (
+                not self.model_execution_stage or self.joint_execution_stage
+            ):
                 files += (self.policy.settlement_gate, *self.policy.settlement_signals)
             for slot in files:
                 os.close(self._open_slot(parent, slot))
@@ -477,6 +497,17 @@ class HostMemoryAdmission:
                     background_reservation_bytes=self.policy.background_reservation_bytes,
                     shortfall_bytes=max(0, required - available),
                 )
+            if self.joint_execution_stage:
+                # A dead owner releases flock before a surviving rootless
+                # container disappears. The next shared heavy operation must
+                # wait for actual cleanup, even when spare RAM could cover both.
+                orphan_hold = selected.lane == "transient" and containers > 0
+                self.last_model_admission["exclusive_orphan_hold"] = orphan_hold
+                self.last_model_admission["orphan_container_count"] = (
+                    self.last_model_admission["populated_containers"] if orphan_hold else 0
+                )
+                if orphan_hold:
+                    return None
             if available < required:
                 return None
             lease = HostMemoryLease(descriptor, selected)
@@ -595,7 +626,9 @@ class HostMemoryAdmission:
                             line.split()
                             for line in _cgroup_value(descriptor, "cgroup.events").splitlines()
                         )
-                        if events.get("populated") != "1":
+                        if events.get("populated") not in {"0", "1"}:
+                            raise AdmissionBindingError("native container population is unknown")
+                        if events["populated"] == "0":
                             continue
                         limit = _cgroup_value(descriptor, "memory.max")
                         if not limit.isdecimal() or not 0 < int(limit) <= 1024**4:
@@ -640,9 +673,18 @@ class HostMemoryAdmission:
                         count += 1
                     finally:
                         os.close(descriptor)
-                except FileNotFoundError:
-                    # A deleted scope cannot allocate another native byte.
-                    continue
+                except FileNotFoundError as error:
+                    # Missing controller metadata does not prove container exit.
+                    # Only a now-absent exact target can leave the accounting.
+                    try:
+                        surviving = _open_cgroup_directory(target)
+                    except FileNotFoundError:
+                        continue
+                    else:
+                        os.close(surviving)
+                        raise AdmissionBindingError(
+                            "native container metadata is missing while its cgroup remains"
+                        ) from error
         self.last_model_admission = dict(
             populated_containers=count,
             container_ceiling_bytes=total + credit_total,
@@ -657,6 +699,8 @@ class HostMemoryAdmission:
         self.authorize(operation, cohort, phase, lane=lane)
         if lane not in {"owner_export", "transient"}:
             raise ValueError("retained settlement requires role/cohort admission")
+        if self.joint_execution_stage:
+            self.last_model_admission = None
         parent = self._open_root()
         transaction = None
         try:
@@ -675,7 +719,7 @@ class HostMemoryAdmission:
             os.close(parent)
 
     def try_settlement(self, cohort: str, role: str) -> HostMemoryLease | None:
-        if self.requests_stage or self.model_execution_stage:
+        if self.requests_stage or (self.model_execution_stage and not self.joint_execution_stage):
             raise AdmissionBindingError("settlement is outside requests-stage qualification")
         if role not in {"coordinator", "reviewer"}:
             raise ValueError("settlement capacity requires a configured replica")
@@ -767,12 +811,46 @@ class HostMemoryAdmission:
     ) -> HostMemoryLease:
         # No blocking flock in a worker thread: cancellation cannot leave a
         # future acquisition running after the waiter has abandoned ownership.
+        started, last_report = time.monotonic(), None
         while True:
             lease = (
                 self.try_acquire(lane, operation=operation, cohort=cohort, phase=phase)
                 if self.requests_stage
                 else self.try_acquire(lane)
             )
+            if self.joint_execution_stage:
+                now = time.monotonic()
+                if lease is not None or last_report is None or now - last_report >= 10:
+                    observation = self.last_model_admission or {}
+                    orphan = observation.get("exclusive_orphan_hold", False)
+                    logging.getLogger("umi.competition.progress").info(
+                        "%s",
+                        json.dumps(
+                            dict(
+                                schema="umi-execution-memory-admission-observation/1",
+                                status="admitted" if lease is not None else "waiting",
+                                lane=lane,
+                                completed=int(lease is not None),
+                                total=1,
+                                elapsed_seconds=round(now - started, 3),
+                                eta_seconds=0 if lease is not None else None,
+                                eta_basis=(
+                                    "capacity_granted"
+                                    if lease is not None
+                                    else "awaiting_native_model_container_cleanup"
+                                    if orphan
+                                    else "awaiting_shared_execution_capacity"
+                                ),
+                                stalled_or_retrying=lease is None,
+                                observed_unix_ms=int(time.time() * 1000),
+                                policy_sha256=self.policy_sha256,
+                                **observation,
+                            ),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    )
+                    last_report = now
             if lease is not None:
                 return lease
             await asyncio.sleep(0.1)

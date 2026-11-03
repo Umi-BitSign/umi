@@ -29,6 +29,11 @@ from .concurrency import wait_for_owned
 from .host_memory_admission import HostMemoryAdmission
 from .host_memory_request_bounds import stage_evidence_budget
 from .host_memory_runtime import selected_memory
+from .host_memory_workload_profile import (
+    WorkloadQualificationPending,
+    check_workload_input,
+    selected_workload,
+)
 from .open_competition import Hotkey
 from .private_files import Directory
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -201,6 +206,12 @@ def phase_review_routes(
         async def body():
             raw = bytearray()
             async for part in request.stream():
+                workload = selected_workload()
+                if (
+                    workload is not None
+                    and len(raw) + len(part) > workload.bounds.maximum_input_bytes
+                ):
+                    raise WorkloadQualificationPending("input_byte_bound", kind="input")
                 if len(raw) + len(part) > maximum_request_bytes:
                     raise HTTPException(413, "phase review request too large")
                 raw.extend(part)
@@ -226,6 +237,7 @@ def phase_review_routes(
             await capacity.acquire()
             acquired = True
             raw = await asyncio.wait_for(body(), timeout=10)
+            check_workload_input(raw)
             try:
                 value = request_model.model_validate_json(raw)
             except ValueError as error:
@@ -328,6 +340,12 @@ class PhaseReviewHTTPClient(Generic[RequestT]):
                 raise ValueError("phase owner response is not JSON")
             result = bytearray()
             async for part in response.aiter_bytes():
+                workload = selected_workload()
+                if (
+                    workload is not None
+                    and len(result) + len(part) > workload.bounds.maximum_input_bytes
+                ):
+                    raise WorkloadQualificationPending("input_byte_bound", kind="input")
                 if len(result) + len(part) > self.maximum_bytes:
                     raise ValueError("phase owner response exceeds its byte bound")
                 result.extend(part)

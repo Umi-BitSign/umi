@@ -12,11 +12,13 @@ from umi.competition_geometric_rewards import cohort_reward_parameters
 from umi.competition_public_results_directory import atomic_write, owned_directory
 from umi.competition_reward_adoption import (
     RewardAdoptionSelection,
+    RewardEarlyRelease,
     RewardModelAdoption,
     SignedRewardModelAdoption,
 )
 from umi.competition_reward_adoption_handoff import prepare_reward_adoption_boot_candidates
 from umi.competition_reward_coordinator_boot import RewardCoordinatorConfig
+from umi.competition_reward_timing import IMMEDIATE_ACTIVATION_RULE
 from umi.open_competition import digest, identity, sign_object
 from umi.protocol import canonical_json_bytes
 
@@ -44,6 +46,7 @@ def selection(config_case, tmp_path, request):
     boot = config_case.config
     large = getattr(request, "param", None) == "cpu_large"
     timed = large or getattr(request, "param", None) == "cpu"
+    immediate = getattr(request, "param", None) == "immediate"
     cohort = next(p for p in boot.series.cohorts if p.sequence == (8 if timed else 7))
     package = large_cpu_package() if large else package_boundary(["0.595", "0.594"], baseline="0.6")
     if timed and not large:
@@ -159,6 +162,26 @@ def selection(config_case, tmp_path, request):
         issued_at_block=boot.series.recovery.authority.issued_at_block,
         lifetime="until_first_verified_live_reward_then_locked",
     )
+    if immediate:
+        body = RewardModelAdoption.model_validate_json(
+            canonical_json_bytes(
+                body.model_copy(
+                    update={
+                        "schema_": "umi-standing-model-reward-adoption/7",
+                        "activation_rule": IMMEDIATE_ACTIVATION_RULE,
+                        "early_release": RewardEarlyRelease(
+                            schema="umi-reward-early-release/1",
+                            predecessor_decision_sha256="21" * 32,
+                            predecessor_activation_sha256="22" * 32,
+                            successor_cohort_sha256=body.cohort_sha256,
+                            successor_package_sha256=body.package_sha256,
+                            manifest_sha256=digest(boot.manifest),
+                            reason="Exact fixture release with unchanged public reward projection",
+                        ),
+                    }
+                )
+            )
+        )
     signed = SignedRewardModelAdoption(adoption=body, signatures=signatures(body))
     selected = RewardAdoptionSelection(
         schema="umi-standing-reward-adoption-selection/1", adoptions=(signed,)
@@ -185,7 +208,7 @@ def selection(config_case, tmp_path, request):
     )
 
 
-@pytest.mark.parametrize("selection", ["quality", "cpu", "cpu_large"], indirect=True)
+@pytest.mark.parametrize("selection", ["quality", "cpu", "cpu_large", "immediate"], indirect=True)
 def test_selected_signed_adoption_reuses_completed_projection_after_restart_and_eviction(
     selection, monkeypatch
 ):

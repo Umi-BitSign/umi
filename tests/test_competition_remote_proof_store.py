@@ -354,6 +354,8 @@ def test_migration_changed_source_requires_explicit_exact_byte_repair(tmp_path, 
     original.write("history", "ab" * 32, context={}, fields={"proof": b"original"})
     selected = RewardProofArchive(tmp_path / "selected", remote=store(tmp_path / "state", server))
     migrate_proof_archive(original, selected)
+    # The directory also retains its publication lock, which migration skips.
+    # Replace an actual payload so the source-identity repair path is exercised.
     path = next((original.root / "objects").glob("*.json"))
     replacement = path.with_suffix(".replacement")
     replacement.write_bytes(path.read_bytes())

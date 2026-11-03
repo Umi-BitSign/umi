@@ -10,6 +10,7 @@ from umi.competition_geometric_rewards import cohort_reward_parameters
 from umi.competition_reward_adoption import RewardAdoptionSelection, SignedRewardModelAdoption
 from umi.competition_reward_adoption_delivery import RewardPackageSelection
 from umi.competition_reward_opportunity import prepare_early_release_revision
+from umi.competition_reward_timing import IMMEDIATE_ACTIVATION_RULE
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
 
@@ -43,7 +44,7 @@ def owner(tmp_path, case, *, name="producer", selected=None):
     )
 
 
-def revision(case, *, automatic=False):
+def revision(case, *, automatic=False, activation_rule=None):
     body = prepare_early_release_revision(
         initial(case),
         series=case.series,
@@ -54,19 +55,23 @@ def revision(case, *, automatic=False):
         issued_at_block=202,
         reason="Configured successor release policy",
         live_age=age(case) if automatic else None,
+        activation_rule=activation_rule,
     )
     return SignedRewardModelAdoption(adoption=body, signatures=signatures(body))
 
 
 @pytest.mark.parametrize("automatic", [False, True])
+@pytest.mark.parametrize("immediate", [False, True])
 def test_signed_extension_reaches_independent_consumers_and_restart(
-    tmp_path, opportunity_case, automatic
+    tmp_path, opportunity_case, automatic, immediate
 ):
     c = opportunity_case
     producer = owner(tmp_path, c)
     reader = owner(tmp_path, c, name="consumer")
     old = canonical_json_bytes(reader.selected.adoptions[0])
-    signed = revision(c, automatic=automatic)
+    signed = revision(
+        c, automatic=automatic, activation_rule=IMMEDIATE_ACTIVATION_RULE if immediate else None
+    )
     selected = producer.publish(signed)
     assert reader.refresh() == selected
     assert canonical_json_bytes(reader.selected.adoptions[0]) == old

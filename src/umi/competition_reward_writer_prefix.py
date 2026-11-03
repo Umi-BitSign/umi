@@ -79,7 +79,7 @@ def review_empty_original(reader, journal_owner):
     if reader.journal.root != journal_owner.root / "history":
         raise ValueError("empty original differs from original logical history")
     with reader.journal.read_transaction() as db:
-        frontier_tables, frontier_records = reader.folded_frontier.unpopulated_layout(db)
+        folded_tables, folded_records = reader.folded_frontier.unpopulated_layout(db)
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         empty_tables = {
             "holds",
@@ -92,7 +92,7 @@ def review_empty_original(reader, journal_owner):
         }
         allowed = (
             empty_tables
-            | frontier_tables
+            | folded_tables
             | {
                 "binding",
                 "records",
@@ -114,7 +114,7 @@ def review_empty_original(reader, journal_owner):
                 raise HistoryCheckpointRepairRequired(
                     "original history retains work or source metadata"
                 )
-        if set(db.execute("SELECT kind,id FROM records")) != frontier_records | {
+        if set(db.execute("SELECT kind,id FROM records")) != folded_records | {
             ("control_history_checkpoint_owner", "owner")
         }:
             raise HistoryCheckpointRepairRequired(

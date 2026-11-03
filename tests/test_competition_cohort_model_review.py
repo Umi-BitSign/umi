@@ -99,14 +99,29 @@ def reviews(prepared, tmp_path):
     )
 
 
-async def test_committed_vote_returns_after_restart_with_owner_rpc_and_files_offline(reviews):
+async def test_committed_vote_returns_after_restart_with_owner_rpc_and_files_offline(
+    reviews, monkeypatch
+):
+    from umi import competition_cohort_model_review as native_review
+
     r = reviews
-    first = await r.create("Charlie").attest(r.request)
+    reviewer = r.create("Charlie")
+    completions = []
+
+    def completed(kind, *, inputs, result):
+        assert reviewer.journal.get("model_vote", inputs["slot"]) == result.model_dump(
+            mode="json", by_alias=True
+        )
+        completions.append((kind, result))
+
+    monkeypatch.setattr(native_review, "productive_operation_completed", completed)
+    first = await reviewer.attest(r.request)
     r.state.online = False
     (r.root / "Charlie/approvals").rename(r.root / "Charlie/offline")
     r.owner.archive.rename(r.owner.archive.with_name("offline-artifacts"))
     assert await r.create("Charlie").attest(r.request) == first
     assert len(r.state.signing) == 1
+    assert completions == [("model_vote", first)]
 
 
 async def test_unfinished_signing_resumes_original_review_after_ten_hour_delay(reviews):

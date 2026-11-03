@@ -6,7 +6,7 @@ import secrets
 from collections.abc import Awaitable, Callable
 from functools import partial
 
-from .canonical_stream import canonical_json_matches
+from .canonical_stream import canonical_json_matches_digests
 from .competition_cohort_admission_review import review_cohort_participation
 from .competition_cohort_coordinator import (
     CohortDecisionInput,
@@ -42,7 +42,7 @@ from .competition_work_progress import (
 )
 from .concurrency import run_owned_thread, wait_for_owned
 from .host_memory_request_bounds import check_stage_json
-from .open_competition import digest, identity, verify_signature
+from .open_competition import _DIGEST_DOMAIN, digest, identity, verify_competition_digest
 from .policy import ScoringPolicy
 from .protocol import canonical_json_bytes
 
@@ -95,7 +95,7 @@ class RemoteRequestProgressReviewer:
     @review_read
     async def _read(
         self, progress: CohortPhaseProgress
-    ) -> tuple[RequestReviewExport, NativeRequestReview]:
+    ) -> tuple[RequestReviewExport, NativeRequestReview, str]:
         progress = CohortPhaseProgress.model_validate_json(canonical_json_bytes(progress))
         bindings = {c.cohort_sha256: c.authority_sha256 for c in self.cohorts}
         if (
@@ -121,16 +121,36 @@ class RemoteRequestProgressReviewer:
         ) as validation:
             if type(raw) is not bytes or not 0 < len(raw) <= self.maximum_bytes:
                 raise ValueError("request response exceeds its byte bound")
+            from .host_memory_workload_profile import check_workload_input
+
+            check_workload_input(raw)
             check_stage_json(raw)
             validation.advance()
             signed = SignedRequestReviewResponse.model_validate_json(raw)
             validation.advance()
             response, signature = signed.response, signed.signature
-            if not canonical_json_matches(signed, raw) or identity(signature.hotkey) != self.owner:
+            if identity(signature.hotkey) != self.owner:
+                raise ValueError("request response is not canonical or changes its selected owner")
+            with WorkProgress(
+                "request_response_canonical_objects",
+                len(response.evidence.objects),
+                unit="objects",
+                cohort=progress.cohort_sha256,
+            ) as canonical:
+                matches, (response_sha256, exported_sha256) = canonical_json_matches_digests(
+                    signed,
+                    raw,
+                    (response, response.evidence),
+                    _DIGEST_DOMAIN,
+                    progress=lambda value, selected=response.evidence: (
+                        canonical.advance() if value is selected else None
+                    ),
+                )
+            if not matches:
                 raise ValueError("request response is not canonical or changes its selected owner")
             validation.advance()
             del raw
-            verify_signature(response, signature)
+            verify_competition_digest(response_sha256, signature)
             validation.advance()
             exported = response.evidence
             if (
@@ -155,21 +175,14 @@ class RemoteRequestProgressReviewer:
                 maximum_bytes=self.maximum_bytes,
             )
         )
-        return exported, replay
+        return exported, replay, exported_sha256
 
     @review_operation(reads=2)
     async def review(self, progress: CohortPhaseProgress) -> RequestProgressReviewRecord:
-        exported, original = await self._read(progress)
-        # Pin the complete canonical evidence before releasing its large object
-        # graph. Both reads authenticate their full inputs; the selected host
-        # reuses successful unchanged semantic checks under its own durable
-        # verification scope. The digest also detects changes outside the
-        # compact native review result.
-        with WorkProgress(
-            "request_export_digest", 1, unit="exports", cohort=progress.cohort_sha256
-        ) as hashing:
-            exported_sha256 = digest(exported)
-            hashing.advance()
+        exported, original, exported_sha256 = await self._read(progress)
+        # The exact evidence digest was computed during canonical wire checking.
+        # Release its large object graph before independent archive review; the
+        # second freshly challenged read compares this same full evidence identity.
         records, seals = exported.records, exported.seals
         del exported
         observations = [
@@ -234,12 +247,7 @@ class RemoteRequestProgressReviewer:
                 )
         if execution_boundary(await self.provider.collect()).block < progress.observed_at_block:
             raise ValueError("request completion is ahead of owned finality")
-        repeated, replay = await self._read(progress)
-        with WorkProgress(
-            "request_repeated_export_digest", 1, unit="exports", cohort=progress.cohort_sha256
-        ) as hashing:
-            repeated_sha256 = digest(repeated)
-            hashing.advance()
+        _repeated, replay, repeated_sha256 = await self._read(progress)
         if repeated_sha256 != exported_sha256 or replay != original:
             raise OSError("request history changed during independent review")
         return original.record
@@ -248,7 +256,7 @@ class RemoteRequestProgressReviewer:
     async def decision(
         self, transition: CohortRecoveryTransition, evidence: CohortDecisionInput
     ) -> str:
-        exported, original = await self._read(evidence.progress.progress)
+        exported, original, _ = await self._read(evidence.progress.progress)
         if evidence.observation != original.record.service.observation:
             raise ValueError("request decision changed its original finalized observation")
         sources = {digest(d): d for d in exported.decisions}

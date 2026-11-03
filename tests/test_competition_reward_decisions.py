@@ -14,6 +14,7 @@ from umi.competition_cohort_recovery import (
     SignedCohortRecoveryAuthority,
     StandingCohortRecoveryAuthority,
 )
+from umi.competition_reward_control import RewardControlExpired
 from umi.competition_reward_decisions import (
     RewardActivation,
     RewardControlDecision,
@@ -408,7 +409,7 @@ async def test_expired_or_edited_proof_and_absence_cannot_select_old_history(
     monkeypatch.setattr(
         "umi.competition_reward_control.time.monotonic_ns", lambda: obs.expires_monotonic_ns + 1
     )
-    with pytest.raises(ValueError, match="proof adapter"):
+    with pytest.raises(RewardControlExpired, match="fresh current proof required"):
         c.reader.select(obs, c.source)
 
 

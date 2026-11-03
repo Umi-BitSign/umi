@@ -1,6 +1,5 @@
 """Scheduling over isolated synthetic endpoints; native capture is qualified separately."""
 
-import ast
 import asyncio
 import errno
 import hashlib
@@ -26,6 +25,7 @@ from umi.open_competition import digest, identity
 from umi.private_files import PrivateStateBusyError, lock_private_file
 from umi.r2_evidence import R2EvidenceHTTPError
 
+from .logging_helpers import progress_payloads
 from .test_competition_reward_opportunity import chain as chain
 from .test_competition_reward_opportunity import chain_config as chain_config
 from .test_competition_reward_opportunity import control as control
@@ -310,12 +310,14 @@ async def test_credit_progress_separates_finite_saved_replay_after_restart(
     restarted, _ = h.owner()
     with caplog.at_level("INFO", logger="umi.competition_reward_coverage_collector"):
         restored = await restarted.step()
-    emitted = [
-        ast.literal_eval(r.getMessage().removeprefix("coverage_credit_progress "))
-        for r in caplog.records
-        if r.getMessage().startswith("coverage_credit_progress ")
-    ]
-    phases = {report["phase"]: report for report in emitted}
+    phases = {
+        report["phase"]: report
+        for report in progress_payloads(
+            caplog.records,
+            logger="umi.competition_reward_coverage_collector",
+            event="coverage_credit_progress",
+        )
+    }
     assert phases["retained_interval_replay"]["credited_delta_ms"] == expected
     zero = {k: 0 for k in h.validators}
     assert phases["recent_block_capture"]["credited_delta_ms"] == zero
@@ -371,11 +373,11 @@ def test_coverage_retry_logs_bounded_r2_http_status_without_response_data(
     except R2EvidenceHTTPError as error:
         with caplog.at_level("INFO", logger="umi.competition_reward_coverage_collector"):
             _log_retry(error, phase="replay", operation="restore_and_credit_interval")
-    report = [
-        ast.literal_eval(record.getMessage().removeprefix("coverage_retry "))
-        for record in caplog.records
-        if record.getMessage().startswith("coverage_retry ")
-    ]
+    report = progress_payloads(
+        caplog.records,
+        logger="umi.competition_reward_coverage_collector",
+        event="coverage_retry",
+    )
     assert len(report) == 1
     assert report[0]["r2_http_status"] == status
     assert report[0]["reason_codes"] == ["r2_http_failure"]
@@ -403,11 +405,11 @@ def test_coverage_retry_identifies_real_private_mutex_without_secrets(
                 _log_retry(wrapped, phase="backfill", operation="capture", block=100)
     finally:
         os.close(owner)
-    reports = [
-        ast.literal_eval(record.getMessage().removeprefix("coverage_retry "))
-        for record in caplog.records
-        if record.getMessage().startswith("coverage_retry ")
-    ]
+    reports = progress_payloads(
+        caplog.records,
+        logger="umi.competition_reward_coverage_collector",
+        event="coverage_retry",
+    )
     assert len(reports) == 1
     report = reports[0]
     assert report["private_mutex"] == (

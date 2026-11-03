@@ -25,7 +25,8 @@ from .competition_cohort_history import verify_cohort_history
 from .competition_cohort_intake import history_tip
 from .competition_cohort_model_award import read_model_acceptances
 from .competition_cohort_order_signer import CohortOrderHistory
-from .competition_cohort_recovery import RecoverableCohortPlan
+from .competition_cohort_quality_migration import retained_quality_owner_operation
+from .competition_cohort_recovery import ModelRewardCohortAuthority, RecoverableCohortPlan
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_cohort_request_closure import CohortRequestClosure
 from .competition_cohort_request_inventory import request_inventory_observations
@@ -70,6 +71,7 @@ from .host_memory_runtime import (
     memory_operation,
     selected_memory,
 )
+from .host_productive_operation import productive_settlement_operation
 from .open_competition import Signature, digest, identity
 from .private_files import ensure_private_directory, publish_private_model, read_private_model
 from .protocol import canonical_json_bytes
@@ -122,6 +124,7 @@ class CohortSettlementService:
             "role": config.role,
             "proposer": identity(config.proposer_hotkey),
         }
+        self._quality_migration_binding = binding
         self.verification_reuse = VerificationReuse(
             promotion.directory / "verification" / digest(config.series) / "native",
             owner={
@@ -346,6 +349,8 @@ class CohortSettlementService:
         retransmit already retained votes. It must never sample or sign a new
         phase using those ports after releasing its native input inventory.
         """
+        if self.model_artifacts is not None:
+            self.model_artifacts.release_frozen_reference()
         if self.phases is not None:
             # Coordinator peer closures point back to their exchange/phases.
             # Break that cycle explicitly rather than waiting for cyclic GC.
@@ -640,6 +645,10 @@ class CohortSettlementService:
             if participant.record.request.signed_submission.submission.track == "model"
             and digest(participant.record.request.signed_submission.submission) in completed
         )
+        if participants and isinstance(
+            review.history.authority.authority, ModelRewardCohortAuthority
+        ):
+            await self.model_artifacts.ensure_frozen_reference(review.roster.round)
         for participant, certificate in zip(participants, certificates, strict=True):
             await self.model_artifacts.ensure(
                 participant, certificate, certification_history=review.history
@@ -814,14 +823,18 @@ class CohortSettlementService:
         self.reviewed_terminal_tip = state.tip_sha256
         return "reviewing"
 
+    @productive_settlement_operation
     @verification_owner_operation
+    @retained_quality_owner_operation
     async def maintain(self):
         self.provider.ensure_observer_running()
         history = await self._selected_history()
         state, _ = self.store.status(self.cohort)
         return await self._maintain_selected(history, state)
 
+    @productive_settlement_operation
     @verification_owner_operation
+    @retained_quality_owner_operation
     async def tick(self) -> str:
         self.provider.ensure_observer_running()
         history = await self._selected_history()

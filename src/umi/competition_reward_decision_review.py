@@ -7,12 +7,14 @@ does not grant authority to commit control or submit weights on the chain.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
 from pydantic import Field
 
 from .competition_cohort_model_award import ModelArtifactVerifier
+from .competition_cohort_reward_allocation import CohortRewardAllocation
 from .competition_cohort_reward_package import (
     DEFAULT_PACKAGE_BYTES,
     CohortRewardPackage,
@@ -23,6 +25,7 @@ from .competition_reward_adoption import (
     initial_reward_boundary,
     verify_reward_adoption,
 )
+from .competition_reward_allocation_export import export_reward_allocations
 from .competition_reward_control_archive import (
     OwnedHistoricalRewardControl,
     validate_historical_reward_control,
@@ -118,6 +121,7 @@ def review_reward_decision(
     verify_model_artifact: ModelArtifactVerifier | None = None,
     revision_clearance=None,
     live_lock=None,
+    allocation_sink: Callable[[CohortRewardAllocation], None] | None = None,
 ) -> ReviewedRewardDecision:
     """Replay at the proposal's original finalized block; elapsed time is irrelevant.
 
@@ -254,8 +258,9 @@ def review_reward_decision(
         )
         if digest(allocation) != activation.allocation_sha256:
             raise ValueError("reward proposal allocation differs from native package replay")
+        effective = allocation
         if activation.reward_adoption_sha256 is not None:
-            verify_reward_adoption(
+            _, effective = verify_reward_adoption(
                 reader.reward_adoptions,
                 activation.reward_adoption_sha256,
                 series=series,
@@ -263,7 +268,11 @@ def review_reward_decision(
                 activation=activation,
                 package=package,
                 current_block=decision.observed_at_block,
+                include_effective_allocation=True,
             )
+        # Export the values already derived above before the review can authorize
+        # signing. The writer's later preparation may use a different file root.
+        export_reward_allocations(allocation_sink, allocation, effective)
     intent = RewardDecisionIntent(
         schema="umi-reward-decision-intent/1",
         decision=decision,

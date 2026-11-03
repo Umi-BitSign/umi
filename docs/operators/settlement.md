@@ -86,27 +86,31 @@ restore/repair error; this command cannot bypass those fences.
 This is an owner-local metadata change. Deploy through the admission supervisor's
 selected qualified host and preserve its existing queue directories. Existing
 miner/client messages, validator proofs, signed cohorts, automatic release
-selection and C6 reward evidence keep their formats; no miner or validator
+selection and retained reward evidence keep their formats; no miner or validator
 reinstallation is required for this local retention projection.
 
 ## Operator early reward release
 
 The normal standing reward path waits for the predecessor's signed minimum
-validator opportunity. An operator can release a certified successor earlier
-by adding `umi-reward-early-release/1` to a quorum-signed model reward adoption
-`/5`. It names the exact effective predecessor decision and activation, signed
-manifest, successor cohort and certified package, plus a retained reason. This
-decision waives only the predecessor opportunity minimum; it does not claim
-coverage, change certified scores or grant transaction authority.
+validator opportunity. New operator-or-timeout releases use quorum-signed model
+reward adoption `/7`, with `activation_rule=at_finalized_control_commitment`.
+The operator trigger includes `umi-reward-early-release/1`, naming the exact
+effective predecessor decision and activation, signed manifest, successor cohort
+and certified package, plus a retained reason. Operator approval `/2` signs that
+same activation rule. The successor becomes selectable when its exact activation
+control commitment is finalized, without another fixed proof-lag/transaction-life
+START delay or a cohort-age requirement. Native prior-transaction reconciliation,
+nonce checks, signature quorum and finalized matching-row verification remain
+required; this adoption neither claims coverage nor grants transaction authority.
 
-The explicit automatic alternative is adoption `/6`, containing
-`umi-reward-early-release/2` with trigger `predecessor_live_for_24h`. Its signed
+The automatic trigger in adoption `/7` contains `umi-reward-early-release/2`
+with trigger `predecessor_live_for_24h`. Its signed
 evidence binds a matching predecessor weight row at the row's actual finalized
 write block and a later finalized timestamp at least 24 hours after it. This
 counts elapsed chain time, not accumulated validator coverage and not time since
 intake or certification. The native producer retains the earliest proved live
 anchor and reuses its checkpoint; later polls need only a current observation.
-An operator approval uses the immediate `/5` path. Explicit progression holds
+An operator approval uses the immediate release path. Explicit progression holds
 take precedence over either trigger, and the successor still needs its completed
 certification and authenticated adoption. A ready clock alone never starts scoring,
 closes intake or submits weights. Legacy manifests and interval certificates keep
@@ -125,10 +129,33 @@ Keep private review envelopes within the installed transport and parser bounds:
 an adoption request can contain up to 32 MiB of original proof and 16 MiB of
 metadata, hex encoded, plus the bounded signed intent. It carries no wallet keys.
 
-The recurring producer discovers completed packages before the economics gate,
-reviews each package through the existing native verification owner, and retains
-its exact original issuance before requesting signatures. Both roles reuse their
-durable votes after restart. To request immediate release of an exact completed
+The recurring producer discovers completed packages before the economics gate
+and retains its exact prepared original before expensive native review. That
+checkpoint fixes issuance and evidence for interruption/restart; it grants no
+signing or publication authority. Both roles reuse their durable votes after
+restart. If review outlives the current proof's validity, the owner collects a
+new authenticated current observation after the completed work. It keeps the
+pinned proposal and semantic receipts, requires the same predecessor and a block
+at least as recent as issuance, and preserves all progression holds. The producer
+reuses that observation through signing and refreshes it again only if it expires
+before publication. Invalid or foreign observations remain errors.
+
+Deploy the compatible adoption `/7` and approval `/2` readers before enabling
+new production: coordinator, independent reward reviewers, standing writer,
+native reference publisher and public model-score adoption projection must all
+select the supported source. Carry the complete signed lineage through the
+existing adoption feed or static boot/supplemental handoff. Package delivery and
+reward/replay readers must parse it too. Preserve installed layouts, current and
+next-boot selections, state bindings and existing signatures. Verify the published
+release/host selection and actual consumer adoption; a source test is not rollout.
+
+Upload-only miner submissions and model-client wire formats do not change.
+Translation-reference followers keep their existing signed policy/channel format;
+verify the resulting policy publication and observed row adoption separately.
+Package/model verification receipts, current-proof age limits and real transaction
+reconciliation remain compatible. Do not repeat completed model or history work.
+
+To request immediate release of an exact completed
 successor, without restarting the coordinator, run:
 
 ```sh
@@ -140,31 +167,39 @@ configured key file's existing account, then verifies and publishes the signed
 document as root. Root-owned and service-account-owned mode-0400 keys are both
 supported; do not copy the key, change its ownership, or make the approval
 directory writable by the signer. The child uses the selected operator source
-and Python interpreter. Upgrade this operator command through the supported
-source installation before using an older installation with a service-owned key;
-the running miner, reviewer and writer formats remain compatible and need no
-restart for this command-only correction.
+and Python interpreter. Before this command creates a new `/2` approval, upgrade
+all affected readers through their supported source and service update paths as
+listed above, and verify their installed adoption `/7` and approval `/2` support.
+Keep progression held during the rollout; enable the producer last, after those
+consumers are ready. Preserve the successor cohort's challenge hold. The named-key
+signing behavior does not remove this reader-upgrade prerequisite.
 
-It sends no transaction and does not bypass independent review or quorum. An exact retry
-reuses the recorded approval without reopening the key or signing again. A held
+It sends no transaction and does not bypass independent review or quorum. A new
+approval uses `/2` and explicitly requests selection at finalized commitment.
+An exact retry reuses the recorded approval without reopening the key or signing
+again, including an original `/1` approval with its original timing. A held
 cohort refuses approval; remove a hold only through its separately authorized
 admission/settlement transition. Without approval, the producer waits for the
 24-hour native live-row boundary. A missing old anchor requests recovery of one
 explicit row-write endpoint, never a new full-history pass.
 
 For installations still using static adoption selection, build the first adoption with
-`prepare_initial_early_release_adoption` so the release needs one quorum vote.
+`prepare_initial_early_release_adoption` with
+`activation_rule="at_finalized_control_commitment"` so the release needs one
+quorum vote and explicitly selects its START semantics.
 For an already selected adoption, use `prepare_early_release_revision`, sign
 its exact bytes with the configured recovery quorum and append them with
-`select_signed_early_release_revision`. Reuse a previously authenticated
+`select_signed_early_release_revision`, passing the same explicit activation rule
+to the proposal builder. Reuse a previously authenticated
 finalized issuance anchor where its binding still applies. Both builders leave
 the certified package untouched and require the exact signed predecessor.
 For the automatic alternative, pass `live_age` from
 `predecessor_live_age_from_owned_control`; do not construct it from RPC-reported
 timestamps or a local clock. The same native signature, selection and consumer
-handoff paths carry either release. Install the compatible `/6` readers before
-selecting an automatic adoption; older supported readers reject that schema
-without changing their retained `/1`–`/5` evidence.
+handoff paths carry either release. Install compatible `/7` readers before
+selecting either prospective release. Retain `/6` readers for historical automatic
+adoptions and `/1`–`/5` readers for their original evidence; do not reinterpret
+their signed timing.
 
 Coordinator and writer boots may select a `reward_adoption_feed` object with
 `path` (an absolute shared selection-file path) and `maximum_bytes` (default
@@ -234,7 +269,15 @@ ETA cover the two selected routes and their actual bytes. A missing peer vote
 is pending independent review, not completed quorum. Transport health alone
 does not confirm native acceptance, adoption or a finalized weight row.
 
-If an already selected early release omitted the cohort age attestation, obtain
+Legacy approval `/1`, adoption `/1`–`/6` and already reserved transition originals
+retain their signed bytes and timing after upgrade. The independent reviewer
+reconstructs each proposal using its explicit version, not the latest producer
+default. Selecting a new adoption never accelerates an old control decision.
+These readers remain required while retained history or pending legacy work uses
+them. Existing `/5` and `/6` early releases waive only predecessor opportunity;
+they still use the original START delay unless their signed age rule waives it.
+
+If an already selected legacy early release omitted the cohort age attestation, obtain
 the cohort-start timestamp at the plan's signed `not_before_block` and a fresh
 finalized control observation through the native proof owner. Convert those
 owned facts with `activation_age_from_owned_control`, then use
@@ -354,6 +397,14 @@ publication stops new reward transitions. The publisher reads structured
 system-manager `ExecStart`, matches the actual process, service account and
 cgroup, and reads only its bounded, single-link, root-owned 0444 config.
 The default mirror retains those exact bytes.
+Independent reward readers parse only the complete series, policy, manifest,
+intake/execution authority and progression-hold contract from those authenticated
+bytes. They do not instantiate another service's private storage configuration
+or traverse its queues, databases and credentials. The startup owner and mirror
+publisher retain full configuration validation. Upgrade both coordinator and
+peer reward readers through their signed source path; do not grant a peer access
+to primary private directories to make hold parsing succeed. The hold view is
+read-only and cannot be used to start an admission or settlement service.
 It supports module entry points, installed console scripts and existing
 `runpy` wrappers with either literal `sys.argv` or trailing arguments. A config
 changed after the owner started requires the supported owner restart; a stale
@@ -454,6 +505,20 @@ the owner's fresh signature and exact inputs; independent registration proofs
 and current finality remain required. The observer's receipts cannot authorize
 the independent reviewer. Updaters retain these directories with the original
 signing state; existing startup configurations need no new field.
+
+The configured owner assembles request-review responses from those authenticated
+canonical originals, hashing the challenged response as it writes the wire bytes.
+It checks the selected owner's cryptographic signature against that same digest.
+The reviewer combines exact canonical-byte comparison with response/evidence
+hashing; later comparison reuses that locally computed evidence digest. This is
+an encoding optimization, with unchanged wire schemas, signing domains, native
+proofs and two-read challenge protocol. Mixed old/new owner and reviewer releases
+remain compatible. Keep their existing journals and verification roots during
+supported source upgrades; do not discard receipts to obtain the optimization.
+`request_export_canonical_objects` reports processed source bytes and objects,
+elapsed time, a measured ETA when available and a labeled transfer planning range
+before samples exist. Its ETA covers export assembly only; independent review and
+certification remain separate stages.
 
 
 The lifecycle's execution-rate sampler observes authenticated cached identities
@@ -741,6 +806,42 @@ and native verification rules. Each independent owner establishes its own result
 Current history, finality, authority, signature creation and chain selection keep
 their native checks. A stored object alone does not establish valid miner work.
 
+Closed participant quality uses the additive `closed_participant_quality_v1`
+receipt in that same owner-private store. The first successful outcome checkpoints
+its exact terminal dependencies, signed authority, prepared round and runtime,
+suite, policy, execution window and any CPU-efficiency adoption. Later sample,
+attestation, transition, package and reward reviews reuse model outcomes across
+phase changes and restart, after their fresh authority and closure checks. This
+includes historical untimed results and prospectively adopted timing results; it changes
+neither measured quality nor signed result bytes. Endpoint outcomes retain their
+current-history authorization context. Lost or damaged completed receipts report
+repair; they do not silently become first scoring work. Intact participant
+checkpoints remain reusable.
+
+For retained untimed model results that predate the participant receipt,
+settlement maintenance and collection select the same owner's original journal
+binding, successful `closed_quality_collect_intent` and matching
+`closed_quality_certificate`. The native receipt path restores the exact outcome
+after checking its original inputs and existing execution receipts. This path
+does not recompute quality, replay proofs, create signatures or rewrite the
+retained journal. A remote certificate alone cannot establish this owner's
+completed work. Missing or conflicting local completion records, changed inputs,
+or missing lower-level receipts report the specific repair and retain completed
+work. This migration applies to untimed model results; explicit migration mode
+refuses unsupported contracts. Keep this compatibility reader while a supported
+settlement journal retains successful untimed results without outcome receipts.
+
+Install the compatible source through the supported selection path for settlement
+coordinators, independent reviewers and every reward-package consumer, including
+the validator writer. Preserve their private verification directories and configured
+owner namespaces. The first outcome receipt reuses existing archived-execution
+and closure verdicts: this upgrade does not change their verification ABI or
+require another proof/payload-verification pass. No signed schema, miner submission
+client or model runner changes are required. Existing miner and validator readers
+continue to accept the same result bytes; an older consumer remains correct but
+still reconstructs outcomes until its runtime is updated. Verify selected release
+pointers and installed source adoption before claiming the optimization is live.
+
 Recovery history exports authenticate the committed prefix once within the
 owning SQLite snapshot. The export carries those exact checked certificates and
 derived tip forward, checks the separately supplied genesis quorum and repeated
@@ -770,6 +871,15 @@ object file identities and metadata; unchanged payloads need no repeated hashing
 or evidence replay. Dependency coverage and resource budgets are still counted
 when a verdict is reused. Payloads are read when a new consumer actually needs them.
 A completed participant's verdict survives interruption before full closure.
+
+Settlement dependency replay batches archive selection and conflict metadata in
+one short read snapshot. It releases the SQLite transaction before checking
+external immutable objects, and retains the read-only connection solely for its
+`data_version` change fence. An unchanged journal needs no second selection scan;
+a concurrent commit triggers a bounded fresh check of exactly those keys. A new
+conflict, changed archive precedence or replaced journal refuses reuse. Immutable
+object identities, dependency coverage and current authority remain checked, so
+this reduces repeated journal bookkeeping without skipping dependency validation.
 
 Recurring evaluator partial exports retain small source facts in
 `<request-export-directory>/.model-partial-export`. For an unfinished public-model
@@ -2247,8 +2357,8 @@ all original signed work and already-earned credit through closure and replay.
 The recoverable cohort implementation separates model payout from reference-model
 promotion. Native geometric rewards use `umi-cohort-recovery-authority/4` with
 `baseline_or_better_geometric_bands_first_complete/1` and signed
-`model_reward_parameters`. C7 uses these quality-allocation parameters; C8 and
-later preserve them and add the version-4 CPU rule described below:
+`model_reward_parameters`. Cohort sequence 7 uses these quality-allocation
+parameters; sequence 8 and later preserve them and add the version-4 CPU rule below:
 
 ```json
 {
@@ -2269,8 +2379,8 @@ baseline gives a 59.40% cutoff. The candidate and baseline run on the same
 cohort's suite; their measured scores are unchanged. This grace affects reward
 eligibility only. A weaker model cannot replace the incumbent reference.
 
-C6 retains its finalized 0.75 multiplier at both levels and strict baseline
-eligibility. Use `cohort_reward_parameters(sequence)` for new authorities and
+Cohort sequence 6 retains its finalized 0.75 multiplier at both levels and strict
+baseline eligibility. Use `cohort_reward_parameters(sequence)` for new authorities and
 adoptions; historical schema constructor defaults remain unchanged. Width
 can be any integer from 1 through 10000 basis points. Each decay multiplier can
 independently range from 0 through 10000: zero gives all weight at that level to
@@ -2289,13 +2399,13 @@ first completed certified acceptance. Exclusion affects public-model rewards
 only; independent service-work earnings remain unchanged. Normalize the full
 public pool over the remaining models and occupied bands. Version1 and version2
 parameters retain their original behavior and bytes. Version2 adds the score
-duplicate rule; version3 adds the signed baseline grace for C7 and later.
+duplicate rule; version3 adds the signed baseline grace from cohort sequence 7.
 
 ### Prospective CPU-efficiency rewards
 
 `cohort_reward_parameters(sequence)` selects
 `umi-geometric-reward-parameters/4` with
-`cpu_efficiency_rule: cold_cpu_relative_latency/1` from C8 onward. Quality
+`cpu_efficiency_rule: cold_cpu_relative_latency/1` from cohort sequence 8. Quality
 eligibility, first-content acceptance, one-basis-point score deduplication and
 quality ranks are calculated first. For each evaluator and case, form the
 candidate/reference cold execution-time ratio, with a one-millisecond denominator
@@ -2317,7 +2427,7 @@ reservation. Its conservative schema envelope is 65,011,584 bytes: up to 512
 models, 64 bounded timing summaries per model, unchanged 4,096-digit exact quality
 components, individual or batch acceptance proofs and 65,535 recipients. Timing
 ratio components are limited to 20 digits; each original quality component stays
-exact. The old independent 1 MiB readers cannot carry supported larger C8
+exact. The old independent 1 MiB readers cannot carry supported larger timed
 allocations. Upgrade all consumers together. Portable reward packages retain their
 separately selected aggregate byte and memory budgets; this file ceiling does not
 raise those budgets or authorize a package that exceeds them.
@@ -2333,13 +2443,14 @@ Operator request-start `/2` binds its digest; an older start approval cannot
 silently approve a changed timing rule. Normal holds and operator start authority
 remain effective.
 
-New C8+ model preparation refuses to create an untimed round with
+New model preparation at sequence 8 or later refuses to create an untimed round with
 `cpu_efficiency_measurement_policy_missing`, before participant restoration or
 promotion reads. The same requirement applies to a new preparation observation
 and operator start. Retained historical rounds still decode and replay exactly;
 an untimed retained round cannot be backfilled or newly certified under the
 prospective rule. Already active request execution and historical replay remain
-on their original path. C7 and endpoint-only rounds gain no timing prerequisite.
+on their original path. Earlier sequences and endpoint-only rounds gain no
+timing prerequisite.
 
 Use the existing resumable adoption operator and its standing series timer.
 Select a private `cpu_efficiency_adoptions_directory` on the admission host,
@@ -2353,7 +2464,7 @@ canonical bytes.
 
 The root-owned `umi-model-batch-adoption-series/1` control selects
 `cpu_efficiency_operator_request_reference`, naming the retained standing
-operator decision for this fixed C8+ rule. The existing configuration/history
+operator decision for this fixed prospective rule. The existing configuration/history
 producer carries that decision as `cpu_efficiency_standing_request` with its
 exact path and SHA256. Before the first CPU job it also supplies a bounded
 current intake snapshot as `cpu_efficiency_anchor_history_file`; an already
@@ -2362,7 +2473,7 @@ same authority. Retained jobs reuse their original snapshot without another
 owner request. Its normal `run-series` pass prepares one CPU contract
 per recovery authority, not one per model or cohort, and uses the owner's actual
 original or separately authorized CPU runtime. Future authority generations
-receive the same default automatically; C7 is excluded. This CPU runtime
+receive the same default automatically from sequence 8. This CPU runtime
 identity is unrelated to the chain's routinely changing runtime/spec version.
 
 Reviewers receive the bounded authenticated
@@ -2388,7 +2499,7 @@ selected `owner`, and every configured `reviewers` target. Each target binds
 role, service unit/account and actual selected config path/hash. This reuses
 the normal actor publication and quorum workflow; the command opens no wallet.
 
-First new C8+ preparation and operator start read the same signed
+First new timed preparation and operator start read the same signed
 `<cpu_efficiency_adoptions_directory>/<authority>.json`. The contract is
 retained in the resulting round. Existing rounds never reread this selection or
 change their bytes, and installing the standing timer does not authorize intake
@@ -2478,7 +2589,7 @@ RAM working set. Residual pages, changed identities, failed ownership or failed
 cleanup require explicit repair. Reuse, cancellation and slot eviction retain
 ownership until bounded work drains. Existing preparation telemetry exposes
 counted cache work and scoped ETAs without adding a release stage. Drain legacy
-C7/untracked readers before the first timed C8 invocation. Cache evidence binds
+untracked readers before the first timed invocation. Cache evidence binds
 the exact model and invocation, and journal ingestion binds that invocation to
 the retained execution attempt.
 
@@ -2506,8 +2617,8 @@ support is not proof of installed selection, accepted signing or live rewards.
 The signed Python runtime includes `umi.host_cpu_partition` for root startup
 restoration and `umi.host_cpu_probe` for the existing reviewer to invoke with its
 installed interpreter and `-I -B`. Render the templates in `deploy/cpu-timing/`
-only after C7 releases the affected pool and a qualified plan exists. Preserve
-reviewer service accounts, startup commands, rootless namespace restoration,
+only after untimed work releases the affected pool and a qualified plan exists.
+Preserve reviewer service accounts, startup commands, rootless namespace restoration,
 wallets, journals, storage and the original memory-admission files.
 
 The dedicated `umiexecution.slice` holds the existing reviewer services on
@@ -2537,8 +2648,8 @@ Controller ceilings remain root-owned; restoration reads back exclusive
 partition activation. Its completion explicitly records `qualified=false` and
 `contract_selected=false`.
 
-After C7 drains, qualify actual delegation, rootless migration, cgroupfs layout,
-probe overhead and cleanup, memory reserves, bundle-cache eviction and equivalent
+After untimed work drains, qualify actual delegation, rootless migration,
+cgroupfs layout, probe overhead and cleanup, memory reserves, bundle-cache eviction and equivalent
 behavior under the intended concurrent lane/load configuration. Persist those
 results and publish selected profiles through the supported update/adoption
 path. These source changes and restoration completion do not authorize challenge
@@ -2563,10 +2674,10 @@ revision lineage, pending transactions and the finalized activation lock must
 be qualified across coordinator, reviewer, coverage and writer before cutover.
 Public status must identify the selected authority, cohort and adoption.
 
-The standing offer path holds C6 and later cohorts until they select the announced
-parameters for their sequence: the finalized version2 C6 settings, or the
-version3 C7 settings or version4 C8+ settings above. A matching native signed authority or
-a matching separately signed reward adoption satisfies this guard. The guard
+The standing offer path holds sequence 6 and later cohorts until they select the
+announced parameters for their sequence: finalized version2 settings for sequence 6,
+version3 for sequence 7, and version4 from sequence 8. A matching native signed
+authority or a matching separately signed reward adoption satisfies this guard. The guard
 logs `reward_offer_waiting_for_announced_economics` once per cohort per process
 while an adoption is absent or has different parameters; it never constructs
 an original-rule activation for that cohort. Prepare and sign an adoption only
@@ -2578,8 +2689,8 @@ signed cohort history or scoring results.
 `prepare_initial_reward_adoption` and `prepare_initial_early_release_adoption`
 select the announced sequence-specific parameters when none are supplied.
 Explicit historical parameters remain readable, while the offer guard refuses
-a new C7+ activation using C6's decay or omitting its grace. These paths still
-require the original certified package, configured signatures and supported
+a new activation from sequence 7 using the older 0.75 decay or omitting its grace.
+These paths still require the original certified package, configured signatures and supported
 consumer handoff before activation.
 
 Select the complete signed adoption lineage in `reward_adoptions` on the
@@ -2834,6 +2945,53 @@ settlement; ordinary object identity and authority checks still apply. Retained
 older acceptances without this publication remain supported by the final
 settlement path.
 
+The frozen reference is a separate execution dependency. Before native award or
+reward replay, settlement, reward reviewers and the validator writer prepare the
+exact model named by the retained round. An applied certified baseline receipt
+selects the original source cohort, submission and acceptance; the current
+promotion head or an older transport inventory cannot substitute another model.
+The original `model-reward-preparation` request and acceptance must therefore
+remain replicated for a reference inherited from an earlier cohort. Applying a
+baseline also exports its original quorum certificate under
+`model-reward-references/<target-cohort>/<model>.json`; an idempotent repeat
+exports it for an existing applied baseline without another observation or
+payload check. The `model-evidence` profile distributes all three original
+documents to each settlement, reward-review and validator-writer promotion
+directory. Reward-only stores without a promotion head verify that certificate
+against the already frozen round solely to locate bytes; they do not append or
+invent promotion history. Existing verified local archives need no new metadata
+export. Original NC declarations and signed consent stay unchanged.
+
+For automatic restoration, select `reference_preservation_directory` in the
+existing `direct_model_review` configuration. It is a narrowly writable alias of
+the **same device and inode** as `promotion_directory/model-reward-artifacts`,
+not another model archive. Keep ordinary readers' canonical bind read-only and
+give only the selected preservation owner a writable alias in its service
+namespace. The existing bounded boot-disk cache is required. Native R2
+materialization prepares only that reference, and native preservation publishes
+the canonical bundle and receipt. Admission budgets both temporary copies,
+filesystem rounding, inode headroom and the configured free-space reserve;
+per-write checks preserve the reserve as other services grow. Completed local
+receipts are reused after restart. Only the exact temporary transfer slot is
+removed after canonical publication, including recovery from an interrupted
+cleanup; the durable R2 verification records remain outside that slot.
+
+Shared archive leases protect the reference during native replay and recurring
+use. Existing archive entries are never owned by this worker. Once every
+selected process sharing the archive has adopted this lease path, the owner may
+select `reference_working_set_reclamation: true`; changing references, releasing
+settlement inputs and normal shutdown then reclaim worker-created bytes after
+the last reader releases them. The recurring writable settlement owner also
+retires a released generation after its last read-only peer exits. The retained
+ownership record must match the
+exact directory generation. This setting defaults to false for compatibility
+with older readers; cleanup reports `archive_consumer_lease_rollout_not_selected`
+while canonical bytes remain retained. Do not enable it on a mixed deployment.
+Verify the actual writable alias, read-only reader behavior, published updater
+selection and installed consumers before claiming automatic restoration or
+reclamation is deployed. Miner submission formats and signed award/reward
+packages remain unchanged.
+
 Completed request evidence continues to be exported independently while these
 checks run. Final cohort quality decisions, allocation and signatures still
 require the original certified request closure and reference release. Background
@@ -3073,8 +3231,8 @@ eligible selected cohorts. It skips histories whose intake phase has closed.
 The earliest effective block comes from that signed history, and each reviewer
 independently checks current authority before signing.
 
-Use this series path for the initial configured C7–C10 jobs as well as later
-successors; no new manual authorization is needed for every cohort. Each job
+Use this series path for every configured successor job; no new manual
+authorization is needed for every cohort. Each job
 retains its exact original history and operator plan under
 `<state_directory>/<cohort>/`. Completed jobs reuse their votes and completion
 evidence; a missing selected service file is an explicitly counted restoration
@@ -3156,7 +3314,7 @@ open. Earlier host schemas retain their original behavior for recovery replay.
 
 ### Research-model training permissions and terms selection
 
-Apply the [conditional C7+ training-data rulings](../contributors/models.md#training-data-and-research-model-licensing)
+Apply the [conditional training-data rulings](../contributors/models.md#training-data-and-research-model-licensing)
 per model. Permitted NC-trained models and inherited NC checkpoints use
 `CC-BY-NC-SA-4.0` with fresh consent to the
 [NC supplement](../MODEL_CONTRIBUTION_TERMS_NC_V1.md). Permissive-only models keep
@@ -4507,7 +4665,8 @@ R2 credential file. The configuration protects that one credential once; it does
 not require a duplicate secret file. Metadata, verification, signing and other
 mutable stores must still be disjoint.
 
-For an originally mixed C7+ intake that is becoming public-model-only, select
+For an originally mixed intake at sequence 7 or later that is becoming
+public-model-only, select
 `model_only: true` in the candidate on the owner and every independent reviewer.
 This issues `umi-cohort-model-delivery-adoption/2`, explicitly binding
 `eligible_tracks: ["model"]` and `service_pool_bps: 0`. Omitting that flag keeps
@@ -5474,6 +5633,64 @@ references them. Retire their migration guidance only after the last such
 dependency is removed. A retained helper or qualification receipt does not
 require selecting that policy for an aggregate-budget upgrade.
 
+For a qualified host that must serialize native graph work with model inference,
+select `umi-host-execution-memory-admission/1` explicitly. This policy has exactly
+four slots: one owner export/preparation slot, one shared transient graph/model
+slot, and one retained slot for each of the two settlement replicas. All consumers
+select the same policy bytes and transaction lock. Keep export independent of
+transient work so a reviewer can fetch an export while holding its graph slot.
+The policy binds the protocol, evaluation runtime, workload profile, actual
+container roots and qualification. It permits a qualified minimum available
+memory of at least 4 GiB; it does not change the legacy `/2` policy's 24 GiB floor.
+The model's signed memory allowance remains required in full.
+
+Unfinished participant-admission review and model-artifact review use that same
+transient slot while retaining their existing signer and journal locks. A
+committed vote returns through its native retry path before taking a new grant
+or contacting the owner or RPC. The ordinary admission worker and model worker
+may select different records; observe a complete native operation when measuring
+a bounded intake canary, and let its owned work drain before ending the sample.
+
+Selected installed hosts emit `umi-native-productive-operation/1` only after a
+native admission/model vote is durably committed, an owner model preparation or
+export returns, or terminal settlement maintenance/tick succeeds. Events retain
+compact input/result identities and the selected workload profile; their `1/1`
+count means one completed operation. Qualification must bind the original
+journald cursor and trusted unit, invocation, PID and boot metadata to the actual
+selected source and launch. A self-reported source field, an old signed result,
+or a running process alone is not a fresh-operation witness. These events add no
+signing or proof checks and cannot establish full workload capacity by themselves.
+
+The selected `umi-host-memory-workload-profile/1` binds the actual service role,
+protocol, evaluation runtime and optional exact series/authority pair. Its
+predecode limits cover JSON bytes, values, depth and record inventories. It also
+bounds queued HTTP bytes, simultaneous requests and preparation workers, since
+several decoded copies can coexist even when they refer to the same input.
+Per-account private count stores reuse authenticated unchanged input identities;
+they are separate from native proof receipts and do not change verdict keys.
+Exceeding the profile or losing a completed count is a pending capacity/repair
+condition, reported as retryable HTTP 503 where applicable. It is not a failed
+model score. A single-graph measurement does not qualify a concurrent batch.
+
+Every grant accounts for the other occupied slots, background allowance and
+surviving container ceilings. A populated model container whose lease has ended
+blocks the next shared transient grant even if memory is otherwise available.
+Admission reports this as waiting for native model-container cleanup; admission
+does not kill containers or infer ownership. The execution worker reconciles its
+exact retained attempts before current chain, phase and cache work, including
+after restart when their cohort has closed. Cleanup uses the original job lock
+and native sandbox ownership checks. Retain stopped/completed receipts so retry
+does not repeat cleanup.
+
+Adopting this policy requires a supported service/configuration handoff. Drain
+the old policy's users and surviving owned invocations before selecting a new
+namespace; a new unused slot does not fence an old consumer. Carry the selection
+through startup, memory-grant collectors, CPU timing and unattended recovery.
+Keep historical peaks as evidence. Any smaller prospective service liability
+must be bound to a qualified workload, exact source/configuration and enforced
+kernel ceiling; closing a lease does not prove that Python returned its pages.
+The model-only lane-expansion command cannot alter this four-slot policy.
+
 An explicitly selected stopped-writer upgrade can retain an older journal that
 contains only raw block inputs with no completed native results. Select
 `--preserve-unverified-original` on the root writer broker for that layout. It
@@ -5530,7 +5747,7 @@ matching exported certified histories), separate `output_directory` and
 capacity; the metadata read has its own explicit bound. All four directories must
 be private, owned and disjoint. The publisher has no network or signing need.
 
-For C7 and later, set optional `reward_coordinator_config` to the selected
+From cohort sequence 7, set optional `reward_coordinator_config` to the selected
 root-owned, mode-0444 reward coordinator boot. The publisher authenticates that
 boot's signed adoption lineage and consumes only its compact digest-addressed
 effective allocations. It retains a separate adopted-score completion and uses
@@ -5538,10 +5755,10 @@ the original native completion as its source, so changing reward terms never
 replays model work or rewrites original certification. The public `/3` result
 names the original allocation, selected adoption and effective allocation, with
 the measured baseline and exact eligibility threshold. This is certified reward
-metadata, not confirmation that weights are live. C6's existing correction
+metadata, not confirmation that weights are live. Sequence 6's existing correction
 overlay and retained original bytes remain unchanged.
-With this selection enabled, a C7+ original-rule result stays unpublished until
-its announced signed adoption is available; a native allocation already carrying
+With this selection enabled, an original-rule result from sequence 7 onward stays
+unpublished until its announced signed adoption is available; a native allocation already carrying
 the announced parameters needs no second adoption. Archived completed public
 results remain reusable when later standing series become current.
 
@@ -5625,8 +5842,10 @@ selections, bounded history/vote/model/order buffers and future allocations that
 do not own a slot. Logical object release does not imply that Python returned its
 resident pages to the operating system.
 
-With host memory admission enabled, startup requires current available memory
-above the 24 GiB floor plus all slot reservations and background allowance.
+With the ordinary `/2` host memory policy enabled, startup requires current
+available memory above the 24 GiB floor plus all slot reservations and background
+allowance. The explicitly qualified joint policy uses its selected floor and the
+same full startup accounting.
 Each serialized grant rechecks
 current available memory against the floor, background allowance, candidate
 reservation and the full reservations of all occupied slots. This deliberately

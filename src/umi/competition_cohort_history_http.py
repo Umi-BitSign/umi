@@ -132,6 +132,9 @@ class CohortHistoryReader:
         # bounded serialization cache holds bytes only within this operation.
         if type(raw) is not bytes or len(raw) > MAX_EXPORT_BYTES:
             raise ValueError("owner history exceeds delivery capacity")
+        from .host_memory_workload_profile import check_workload_input
+
+        check_workload_input(raw)
         signed = SignedCohortHistoryResponse.model_validate_json(raw)
         if (
             canonical_json_bytes(signed) != raw

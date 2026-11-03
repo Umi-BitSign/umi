@@ -80,3 +80,76 @@ def canonical_json_matches(value: BaseModel | Any, expected: bytes) -> bool:
     sink = _ComparisonSink(expected)
     _dump(value, sink)
     return sink.equal and sink.position == len(expected)
+
+
+class _AggregateDigestComparison:
+    """Compare once while hashing selected nested aggregates in bounded chunks."""
+
+    def __init__(self, expected, selected, prefix, progress):
+        self.expected, self.selected, self.prefix = expected, selected, prefix
+        self.progress = progress
+        self.buffer = bytearray()
+        self.position = 0
+        self.equal = True
+        self.active = []
+        self.digests = {}
+
+    def _flush(self):
+        if not self.buffer:
+            return
+        self._consume(self.buffer)
+        self.buffer.clear()
+
+    def _consume(self, chunk):
+        self.equal = self.equal and self.expected.startswith(chunk, self.position)
+        self.position += len(chunk)
+        for _, hashing in self.active:
+            hashing.update(chunk)
+
+    def write(self, chunk):
+        if len(chunk) >= 65536:
+            self._flush()
+            self._consume(chunk)
+        else:
+            self.buffer.extend(chunk)
+            if len(self.buffer) >= 65536:
+                self._flush()
+        return len(chunk)
+
+    def aggregate_enter(self, value):
+        if any(value is target for target in self.selected):
+            self._flush()
+            if id(value) in self.digests:
+                raise ValueError("canonical aggregate selection is repeated")
+            self.active.append((value, hashlib.sha256(self.prefix)))
+
+    def aggregate_leave(self, value):
+        if any(value is target for target in self.selected):
+            self._flush()
+            actual, hashing = self.active.pop()
+            if actual is not value:
+                raise ValueError("canonical aggregate selection is not nested")
+            self.digests[id(value)] = hashing.hexdigest()
+
+    def aggregate_item(self, value):
+        if self.progress is not None:
+            self.progress(value)
+
+
+def canonical_json_matches_digests(value, expected, selected, prefix, *, progress=None):
+    """Validate exact canonical bytes and hash selected envelopes in that pass.
+
+    Digests are returned only for exact selected model instances encountered by
+    the canonical aggregate traversal. Unsupported/custom aggregate serializers
+    cannot quietly produce a digest for an unvisited nested field. Callers must
+    reject a false match before using any returned digest as authenticated input.
+    """
+    sink = _AggregateDigestComparison(expected, selected, prefix, progress)
+    _dump(value, sink)
+    sink._flush()
+    if sink.active or any(id(target) not in sink.digests for target in selected):
+        raise ValueError("canonical digest selection was not traversed")
+    return (
+        sink.equal and sink.position == len(expected),
+        tuple(sink.digests[id(target)] for target in selected),
+    )

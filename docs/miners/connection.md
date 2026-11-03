@@ -166,15 +166,15 @@ to conceal a repair requirement.
 
 ## Upgrade an existing miner
 
-The endpoint upgrade manifest can retain an earlier cohort for endpoint work
-and recovery. Public-model submissions use the separate model client below.
+The endpoint upgrade manifest can retain an earlier endpoint cohort for unfinished
+work and recovery. Public-model-only cohorts use the separate model client below.
 Their original signed plans may still display endpoint/model at
 50/50; the later signed model-delivery adoption selects the effective model-only
 profile. The cohort catalog reports `effective_eligible_tracks` and
 `effective_service_pool_bps` from that adoption. The endpoint updater must not
 enroll an endpoint into a cohort whose effective profile is model-only. Once its
-endpoint obligations have ended, a miner can remain offline while retaining its
-old journals; public-model participation does not require a running endpoint.
+endpoint cohort's work is closed, a miner can remain offline while retaining its
+old journals.
 
 Linux miners managed by systemd use one updater. Choose only whether
 you intend to participate in the public-model track:
@@ -341,9 +341,8 @@ coordinator repairs that archive. Keep retrying the original claim; do not sign
 a replacement to work around a temporary hold.
 
 The updater installs itself at `/usr/local/libexec/umi-miner-upgrade`. Use that
-same installed file for later cohorts when their matching manifest is published.
-Follow the selected manifest's supported tracks; endpoint configuration does not
-submit a public model:
+same installed file for later cohorts when their matching supported endpoint
+manifest is published. Its endpoint profile does not select model-client intake:
 
 ```sh
 sudo /usr/local/libexec/umi-miner-upgrade --public-model-track yes
@@ -443,7 +442,7 @@ already-running uploads and recovery. Do not remove their directories while a
 process uses them. A failed new installation does not erase earlier releases.
 
 The installer reads `deploy/miner-upgrade/current.json` for the exact client
-source, including while its endpoint profile names a retained earlier cohort. The
+source, including while that manifest retains an older endpoint cohort. The
 client selects model participation from the requested cohort's signed history.
 It does not install new code in the background; a new server deployment alone
 does not update an installed client.
