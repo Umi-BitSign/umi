@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+
 from umi.competition_chain import FinalizedRegistrationProvider
 from umi.competition_service_supervision import run_supervised_server
 
