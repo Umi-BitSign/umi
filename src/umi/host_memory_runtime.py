@@ -503,12 +503,8 @@ class WorkloadASGIBinding:
 
     @staticmethod
     def _group(scope):
-        path = scope.get("path", "")
-        if scope.get("method") not in ("GET", "HEAD") or any(
-            marker in path for marker in ("/direct-model-uploads/", "/model-uploads/")
-        ):
-            return "write"
-        return "read"
+        # Read-only status polling must not consume the mutation waiters.
+        return "read" if scope.get("method") in ("GET", "HEAD") else "write"
 
     def _enter_wait(self, group):
         if self.closing:
@@ -676,6 +672,28 @@ class WorkloadASGIBinding:
         finally:
             self._leave_wait(ticket["group"])
 
+    @staticmethod
+    def _public_share_path(path):
+        if path in {
+            "/v1/competition/status",
+            "/v1/competition/cohorts",
+            "/v1/competition/service-work",
+        }:
+            return True
+        parts = path.split("/")
+        if (
+            len(parts) not in (7, 8)
+            or parts[:4] != ["", "v1", "competition", "cohorts"]
+            or parts[5] != "direct-model-uploads"
+        ):
+            return False
+        if len(parts) == 8 and parts[6] != "by-upload":
+            return False
+        return all(
+            len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+            for value in (parts[4], parts[-1])
+        )
+
     def _share_key(self, scope):
         # These routes depend only on public state. Nonce/authorization routes
         # are deliberately absent. Share only the currently running response.
@@ -683,12 +701,7 @@ class WorkloadASGIBinding:
             not self.maximum_waiting
             or not self.capture_limit
             or scope.get("method") != "GET"
-            or scope.get("path")
-            not in {
-                "/v1/competition/status",
-                "/v1/competition/cohorts",
-                "/v1/competition/service-work",
-            }
+            or not self._public_share_path(scope.get("path", ""))
         ):
             return None
         headers = tuple((name.lower(), value) for name, value in scope.get("headers", ()))

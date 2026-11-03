@@ -7,7 +7,6 @@ import time
 from pathlib import Path
 
 import pytest
-
 from umi.host_memory_runtime import WorkloadASGIBinding
 
 from .test_host_workload_asgi import controller, receiver, success
@@ -50,6 +49,102 @@ def invoke(bound, scope, *, send=None, body=b""):
 def test_control_only_waiting_still_requires_a_positive_bounded_timeout():
     with pytest.raises(ValueError, match="public timeout"):
         binding(None, reads=0, controls=8, timeout=0)
+
+
+def direct_status(value="b", *, by_upload=False):
+    base = "/v1/competition/cohorts/" + "a" * 64 + "/direct-model-uploads/"
+    return base + ("by-upload/" if by_upload else "") + value * 64
+
+
+@pytest.mark.parametrize("by_upload", [False, True])
+async def test_identical_direct_status_polls_share_one_current_response(by_upload):
+    release, entered = asyncio.Event(), []
+
+    async def app(scope, receive, send):
+        entered.append(scope)
+        await release.wait()
+        await success(send)
+
+    bound = binding(app)
+    scope = request(direct_status(by_upload=by_upload))
+    first, first_messages, _ = invoke(bound, scope)
+    await until(lambda: entered)
+    second, messages, calls = invoke(bound, scope)
+    await until(lambda: bound.waiting == 1)
+    assert (
+        bound.inflight == 1 and bound.reserved <= bound.workload.profile.maximum_queued_input_bytes
+    )
+    release.set()
+    await asyncio.gather(first, second)
+    assert len(entered) == 1 and messages == first_messages and not calls
+    await invoke(bound, scope)[0]
+    assert len(entered) == 2  # Completion never becomes a stale status cache.
+    assert bound.shared_bytes == bound.inflight == bound.waiting == bound.reserved == 0
+
+
+@pytest.mark.parametrize(
+    "difference", ["reservation", "cohort", "query", "authorization", "cookie"]
+)
+async def test_direct_status_sharing_preserves_identity_and_private_inputs(difference):
+    release, entered = asyncio.Event(), []
+
+    async def app(scope, receive, send):
+        entered.append(scope)
+        await release.wait()
+        await success(send)
+
+    bound = binding(app)
+    left, right = request(direct_status()), request(direct_status())
+    if difference == "reservation":
+        right["path"] = direct_status("c")
+    elif difference == "cohort":
+        right["path"] = right["path"].replace("a" * 64, "d" * 64)
+    elif difference == "query":
+        right["query_string"] = b"nonce=different"
+    else:
+        right["headers"] = [(difference.encode(), b"private")]
+    first = invoke(bound, left)[0]
+    await until(lambda: entered)
+    second = invoke(bound, right)[0]
+    await until(lambda: bound.waiting == 1)
+    release.set()
+    await asyncio.gather(first, second)
+    assert len(entered) == 2
+
+
+async def test_status_polling_cannot_consume_mutating_upload_waiters():
+    release, entered = asyncio.Event(), []
+
+    async def app(scope, receive, send):
+        entered.append(scope["path"])
+        if len(entered) == 1:
+            await release.wait()
+        await success(send)
+
+    bound = binding(app, reads=2, controls=1)
+    first = invoke(bound, request(direct_status()))[0]
+    await until(lambda: entered)
+    reads = [invoke(bound, request(direct_status(value)))[0] for value in ("c", "d")]
+    await until(lambda: bound.waiting_groups["read"] == 2)
+    write_path = direct_status() + "/parts"
+    mutation, _, body_reads = invoke(bound, request(write_path, method="POST"))
+    await until(lambda: bound.waiting_groups["write"] == 1)
+    assert not body_reads and bound.inflight == 1
+    release.set()
+    await asyncio.gather(first, mutation, *reads)
+    assert entered[1] == write_path and bound.inflight == bound.waiting == 0
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/competition/cohorts/" + "a" * 64 + "/direct-model-uploads/not-a-digest",
+        "/v1/competition/cohorts/" + "a" * 64 + "/direct-model-uploads/" + "b" * 64 + "/parts",
+        "/v1/competition/cohorts/" + "a" * 64 + "/direct-model-uploads/by-upload/not-a-digest",
+    ],
+)
+def test_unrecognized_upload_paths_are_not_response_shared(path):
+    assert binding(None)._share_key(request(path)) is None
 
 
 async def test_selected_production_byte_bounds_allow_coalescing_and_one_owned_graph():
@@ -100,7 +195,7 @@ async def test_control_burst_and_fifo_allow_uploads_and_reads_to_advance():
     assert bound.waiting == bound.inflight == bound.reserved == 0
 
 
-async def test_upload_control_get_uses_control_queue_without_reading_a_body():
+async def test_upload_status_get_uses_read_queue_without_reading_a_body():
     release, entered = asyncio.Event(), []
 
     async def app(scope, receive, send):
@@ -115,11 +210,11 @@ async def test_upload_control_get_uses_control_queue_without_reading_a_body():
     poll = invoke(bound, request("/read"))[0]
     control, _, body_reads = invoke(bound, request("/v1/competition/direct-model-uploads/id"))
     await until(lambda: bound.waiting == 2)
-    assert bound.waiting_groups == {"read": 1, "write": 1}
+    assert bound.waiting_groups == {"read": 2, "write": 0}
     assert not body_reads
     release.set()
     await asyncio.gather(owner, poll, control)
-    assert "direct-model-uploads" in entered[1]
+    assert entered[1:] == ["/read", "/v1/competition/direct-model-uploads/id"]
 
 
 async def test_cancel_queued_request_and_grant_race_release_capacity():
