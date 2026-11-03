@@ -742,10 +742,26 @@ async def run_pipeline(
         else:
             direct.configure_model_reviews(o, client, signatures)
 
-        # The priority owner attempts the latest submission before its two
-        # superseded generations. Independent acceptance is still required.
+        # Intake preservation runs the real owner in the background, which can
+        # advance its fair cursor. Wait for the actual target dispatch before
+        # checking that independent acceptance remains required.
         o.outages.add("dave.example")
-        assert (await o.service.models.poll_once())["entries_pending"] == 1
+        target = (h.cohort, digest(submitted.signed_submission.submission))
+        attempted = []
+        original_one = o.service.models._one
+
+        async def observe_attempt(cohort, sub):
+            attempted.append((cohort, digest(sub)))
+            return await original_one(cohort, sub)
+
+        with monkeypatch.context() as dispatch:
+            dispatch.setattr(o.service.models, "_one", observe_attempt)
+            for _ in range(2 * len(h.intake.config.cohorts) + 1):
+                first_review = await o.service.models.poll_once()
+                if target in attempted:
+                    break
+        assert target in attempted
+        assert first_review["entries_pending"] == 1
         with pytest.raises(PendingModelArtifacts):
             o.service.models.owner.retained(
                 h.cohort, digest(submitted.signed_submission.submission)
