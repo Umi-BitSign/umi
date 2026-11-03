@@ -458,6 +458,14 @@ def verified_replay(stage, result_model, *, restore=None):
                                 else canonical_json_bytes(value)
                             )
                             if not isinstance(raw, bytes) or _sha(raw) != dependency.sha256:
+                                if dependency.kind == "pulses":
+                                    # A changed reveal pulse is fresh authority.
+                                    # Keep its native signature failure distinct
+                                    # from repair of an otherwise valid receipt.
+                                    # Unchanged pulses retain their prior verdict.
+                                    from .competition_endpoint_execution import RetainedRevealPulse
+
+                                    RetainedRevealPulse.model_validate_json(raw).verified()
                                 valid = False
                                 break
                             if dependency.kind in {"objects", "source"}:

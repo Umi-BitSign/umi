@@ -975,6 +975,7 @@ async def test_counted_publication_forecasts_use_exact_export_and_survive_retry(
         ledger = ForecastLedger(tmp_path / "forecast-accounting")
         history = h.intake.history(h.cohort)
         signed_calls = tuple(h.calls)
+        completed_delivery_attempts = None
         for _ in range(2):
             with (
                 forecast_scope(
@@ -989,6 +990,10 @@ async def test_counted_publication_forecasts_use_exact_export_and_survive_retry(
             ):
                 await control.publisher(history)
                 outer.advance()
+            if completed_delivery_attempts is None:
+                completed_delivery_attempts = len(attempts)
+            else:
+                assert len(attempts) == completed_delivery_attempts
         result = ledger.status(key)
         assert result["completion_examples"] == 1
         assert result["sample_kind"] == "prediction_outcome"
@@ -1001,7 +1006,7 @@ async def test_counted_publication_forecasts_use_exact_export_and_survive_retry(
         )
         assert result["missed_forecasts"] >= 1
         assert result["elapsed_including_gaps_seconds"] >= 3600
-        assert result["repeat_attempt_forecasts_excluded"] >= 1
+        assert result["repeat_attempt_forecasts_excluded"] == 0
         assert tuple(h.calls) == signed_calls
         assert (
             len(
