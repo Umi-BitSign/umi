@@ -100,7 +100,7 @@ async def test_control_burst_and_fifo_allow_uploads_and_reads_to_advance():
     assert bound.waiting == bound.inflight == bound.reserved == 0
 
 
-async def test_upload_control_get_uses_control_queue_without_reading_a_body():
+async def test_upload_status_poll_preserves_the_mutation_queue():
     release, entered = asyncio.Event(), []
 
     async def app(scope, receive, send):
@@ -109,17 +109,33 @@ async def test_upload_control_get_uses_control_queue_without_reading_a_body():
             await release.wait()
         await success(send)
 
-    bound = binding(app)
+    bound = binding(app, reads=2, controls=1)
     owner = invoke(bound, request("/owner"))[0]
     await until(lambda: entered)
     poll = invoke(bound, request("/read"))[0]
-    control, _, body_reads = invoke(bound, request("/v1/competition/direct-model-uploads/id"))
+    status, _, status_reads = invoke(bound, request("/v1/competition/direct-model-uploads/id"))
     await until(lambda: bound.waiting == 2)
-    assert bound.waiting_groups == {"read": 1, "write": 1}
-    assert not body_reads
+    assert bound.waiting_groups == {"read": 2, "write": 0}
+    control, _, control_reads = invoke(
+        bound, request("/v1/competition/direct-model-uploads/id/parts", method="POST")
+    )
+    await until(lambda: bound.waiting == 3)
+    assert bound.waiting_groups == {"read": 2, "write": 1}
+    assert not status_reads and not control_reads
     release.set()
-    await asyncio.gather(owner, poll, control)
-    assert "direct-model-uploads" in entered[1]
+    await asyncio.gather(owner, poll, status, control)
+    assert entered[1].endswith("/parts")
+
+
+@pytest.mark.parametrize("suffix", ["b" * 64, "by-upload/" + "b" * 64])
+def test_public_upload_status_can_share_only_equivalent_unauthenticated_requests(suffix):
+    bound = binding(None)
+    scope = request("/v1/competition/cohorts/" + "a" * 64 + "/direct-model-uploads/" + suffix)
+    key = bound._share_key(scope)
+    assert key is not None
+    assert bound._share_key(dict(scope, headers=[(b"authorization", b"private")])) is None
+    assert bound._share_key(dict(scope, query_string=b"nonce=private")) != key
+    assert bound._share_key(dict(scope, path=scope["path"] + "/files")) is None
 
 
 async def test_cancel_queued_request_and_grant_race_release_capacity():
