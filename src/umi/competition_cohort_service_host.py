@@ -32,6 +32,7 @@ from .competition_cohort_direct_model_owner import (
     DirectModelUploadOwnerConfig,
     DirectModelUploadOwners,
 )
+from .competition_cohort_direct_model_review_policy import DirectModelReviewPolicyContinuation
 from .competition_cohort_dispatch_host import ServiceDispatchConfig
 from .competition_cohort_intake import CohortAdmissionClosed, CohortIntake, history_tip
 from .competition_cohort_legacy_model_admission import LegacyModelAdmissionPayloads
@@ -162,6 +163,7 @@ class DirectModelUploadHostConfig(StrictProtocolModel):
     r2_credentials_file: Directory
     r2_bucket: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")]
     standing_review_policy: StandingModelReviewPolicy
+    standing_review_policy_continuation: DirectModelReviewPolicyContinuation | None = None
     maximum_uploads_per_cohort: Annotated[int, Field(ge=1, le=4096)] = 1024
     # Compatibility declaration only; current retry history is metadata-bounded.
     maximum_attempts_per_upload: Annotated[int, Field(ge=2, le=64)] = 16
@@ -173,6 +175,13 @@ class DirectModelUploadHostConfig(StrictProtocolModel):
     )
     cleanup_batch_size: Annotated[int, Field(ge=1, le=16)] = 2
     r2_timeout_seconds: Annotated[int, Field(ge=1, le=300)] = 60
+
+    @model_serializer(mode="wrap")
+    def preserve_original_review_selection(self, handler):
+        value = handler(self)
+        if self.standing_review_policy_continuation is None:
+            value.pop("standing_review_policy_continuation", None)
+        return value
 
     def stores(self) -> tuple[Path, ...]:
         return tuple(
@@ -805,6 +814,9 @@ class ServiceAdmissionHost:
                         "reserved_participation"
                     ),
                     object_ready=object_ready,
+                    review_policy_continuation=direct.standing_review_policy_continuation,
+                    review_policy_authority=c.series.recovery,
+                    review_policy_plan=plan,
                 )
             self.direct_uploads = DirectModelUploadOwners(
                 owners,

@@ -49,6 +49,15 @@ The supported updated client must select that revision from published signed
 metadata; installing a client or publishing these documents alone does not
 activate it.
 
+When updating a direct-upload owner's standing review policy, retain its exact
+predecessor in `standing_review_policy_continuation` together with the signed
+license adoption. The owner authenticates the authority, cohort and rights
+selection before opening the existing journal. Its original binding, upload
+records and completed verification remain unchanged; new reviews use the
+selected rights revision. Cohorts before the adoption's first sequence keep
+their original review policy. This continuation is required while an existing
+upload journal binds the predecessor policy, including after restart.
+
 The retained [version-1 NC supplement](../MODEL_CONTRIBUTION_TERMS_NC_V1.md) and training-rights
 contract intentionally retain the original review's SHA-256:
 `9f6694015a84f453ef8298afac4fd9c5dedfc741e74eb0ac3b6833f045b83502`.
