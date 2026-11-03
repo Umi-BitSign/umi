@@ -102,6 +102,31 @@ generation and the same grouped handoff. The rollout is complete only after the
 automatic updater preserves the new selection and native work uses it; creating
 the policy or passing source tests does not establish adoption.
 
+### Retained artifact reviews after a rights-policy update
+
+Select the compatible reviewer, settlement, reference-restoration and native
+reward readers before adding `direct_model_review.review_policy_history` to
+their protected configurations. Each entry retains the signed recovery
+`authority` and its `continuation` (`predecessor` standing review policy and
+signed `license_adoption`). Keep earlier entries when selecting another rights
+revision. The active entry must match the selected series authority and current
+standing policy. Older configurations omit this optional field and retain their
+original serialization.
+
+The independent reviewer applies the current source and NC-consent rules using
+the already verified document bytes. It can then reproduce a retained proposal's
+historical review-policy identity only when both original evidence digests
+match. Preserve original proposal bytes, signatures and successful payload
+verification. Historical policy identity does not excuse NC training under
+permissive terms. Cohorts preceding the conditional-license adoption keep their
+original review semantics.
+
+Use the existing controlled configuration/source handoff, preserving journals,
+service accounts, capacity selections and cohort holds. A source-only update
+does not add the history selection automatically. Confirm installed readers
+reconstruct actual retained proposals before reporting adoption. The upload and
+consent request formats and approved-row follower protocol are unchanged.
+
 ### Cohort artifact certificate readers
 
 Batch artifact certification adds an authenticated membership proof to each

@@ -187,6 +187,8 @@ class SettlementServiceConfig(StrictProtocolModel):
             model_delivery_adoptions=self.model_delivery_adoptions,
         )
         direct = self.direct_model_review
+        if direct is not None:
+            direct.policies_for(self.series, self.policy)
         if (
             self.legacy_model_storage
             and direct is not None

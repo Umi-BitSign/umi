@@ -232,6 +232,7 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
                 config.policy,
                 config.proposer_hotkey,
                 verification_root=root / "direct-model-byte-verification",
+                series=config.series,
             )
         )
         legacy_readers = (

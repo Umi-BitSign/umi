@@ -23,6 +23,13 @@ class DirectModelReviewPolicyContinuation(StrictProtocolModel):
     license_adoption: SignedModelLicenseTermsAdoption
 
 
+class ModelReviewPolicyHistoryEntry(StrictProtocolModel):
+    """Retain the authority that authenticated an earlier review selector."""
+
+    authority: SignedCohortRecoveryAuthority
+    continuation: DirectModelReviewPolicyContinuation
+
+
 @lru_cache(maxsize=32)
 def _verified_continuation(raw, current_raw, policy_raw, authority_raw):
     continuation = DirectModelReviewPolicyContinuation.model_validate_json(raw)
@@ -75,3 +82,85 @@ def direct_model_review_policies(continuation, current, *, policy, authority, pl
     if digest(plan) not in adoption.cohort_sha256s:
         raise ValueError("direct review continuation belongs to another cohort")
     return current, predecessor
+
+
+def model_review_policy_history(entries, current, *, policy, series):
+    """Authenticate rendering identities without relaxing current rights checks."""
+    if not entries:
+        return {}, ()
+    policies, selected, first = {}, None, None
+    for entry in entries:
+        historical = current.model_copy(
+            update={
+                "training_rights_policy_sha256": (
+                    entry.continuation.license_adoption.adoption.training_rights_policy_sha256
+                )
+            }
+        )
+        predecessor, adoption = _verified_continuation(
+            canonical_json_bytes(entry.continuation),
+            canonical_json_bytes(historical),
+            canonical_json_bytes(policy),
+            canonical_json_bytes(entry.authority),
+        )
+        for value in (historical, predecessor):
+            policies[digest(value)] = value
+        if first is None or adoption.issued_at_block < first[0]:
+            first = adoption.issued_at_block, predecessor
+        if historical == current and entry.authority == series.recovery:
+            if selected is not None and selected != entry.continuation:
+                raise ValueError("review policy history has conflicting current selectors")
+            selected = entry.continuation
+    if selected is None:
+        raise ValueError("review policy history lacks the current authenticated selector")
+    effective = {}
+    for plan in series.cohorts:
+        effective[digest(plan)], _ = direct_model_review_policies(
+            selected, current, policy=policy, authority=series.recovery, plan=plan
+        )
+        if plan.sequence < selected.license_adoption.adoption.first_cohort_sequence:
+            effective[digest(plan)] = first[1]
+    return effective, tuple(policies.values())
+
+
+def retained_review_inputs(inputs, acceptance, policies):
+    """Reproduce the original proposal after its current rights review passes.
+
+    Only the authenticated historical policy identity changes in the rendered
+    metadata. Original documents, decisions and manifest stay exact. Both
+    acceptance digests must match; no historical identity grants NC consent.
+    """
+
+    def matches(value):
+        return (
+            value.model_sha256 == acceptance.model_sha256
+            and digest(value.rights_evidence) == acceptance.rights_evidence_sha256
+            and digest(value.reconstruction_evidence) == acceptance.reconstruction_evidence_sha256
+        )
+
+    if matches(inputs):
+        return inputs
+    if not policies:
+        return inputs
+    original_policy = inputs.rights_evidence["decision"]["review_policy_sha256"]
+    for standing in policies:
+        historical_policy = digest(standing)
+        if historical_policy == original_policy:
+            continue
+        candidate = inputs.model_copy(
+            update={
+                "rights_evidence": dict(
+                    inputs.rights_evidence,
+                    decision=dict(
+                        inputs.rights_evidence["decision"],
+                        review_policy_sha256=historical_policy,
+                    ),
+                ),
+                "reconstruction_evidence": dict(
+                    inputs.reconstruction_evidence, review_policy_sha256=historical_policy
+                ),
+            }
+        )
+        if matches(candidate):
+            return candidate
+    raise ValueError("model proposal differs from its authenticated review policy history")

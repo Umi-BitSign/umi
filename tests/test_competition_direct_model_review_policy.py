@@ -13,8 +13,13 @@ from umi.competition_cohort_direct_model_owner import (
     DirectModelUploadOwner,
     DirectModelUploadOwnerConfig,
 )
+from umi.competition_cohort_direct_model_review import (
+    DirectModelArtifactReviewer,
+    DirectModelReviewSourceConfig,
+)
 from umi.competition_cohort_direct_model_review_policy import (
     DirectModelReviewPolicyContinuation,
+    ModelReviewPolicyHistoryEntry,
     direct_model_review_policies,
 )
 from umi.competition_cohort_model_static_review import (
@@ -27,6 +32,8 @@ from umi.competition_cohort_recovery import ModelDeliveryProfile, SignedCohortRe
 from umi.competition_model_license import prepare_model_license_adoption
 from umi.competition_model_training_rights import (
     CONDITIONAL_TRAINING_RIGHTS_SHA256,
+    LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256,
+    LEGACY_NC_CONTRIBUTION_TERMS_SHA256,
     NC_CONTRIBUTION_TERMS_SHA256,
 )
 from umi.open_competition import BundleFile, ModelBundle, SignedModelLicenseTermsAdoption, digest
@@ -286,3 +293,229 @@ def test_continued_policy_rejects_unadopted_stem_relabelled_permissive(selection
         build_standing_model_review_from_documents(
             bundle, selection.policy, resolve(selection)[0], raw
         )
+
+
+def historical_reviewer(selection, tmp_path, *, entries=None):
+    if entries is None:
+        entries = (
+            ModelReviewPolicyHistoryEntry(
+                authority=selection.authority, continuation=selection.continuation
+            ),
+        )
+    return DirectModelArtifactReviewer(
+        DirectModelReviewSourceConfig(
+            schema="umi-direct-model-review-source/2",
+            r2_credentials_file=str(tmp_path / "unused-credentials"),
+            r2_bucket="model-tests",
+            standing_review_policy=selection.current,
+            review_policy_history=entries,
+            materialization_protected_roots=(str(tmp_path / "protected"),),
+        ),
+        selection.policy,
+        None,
+        multipart=SimpleNamespace(),
+        series=SimpleNamespace(
+            recovery=selection.authority, cohorts=(selection.old_plan, selection.plan)
+        ),
+    )
+
+
+def expected_review(inputs, cohort):
+    return SimpleNamespace(
+        model_sha256=inputs.model_sha256,
+        cohort_sha256=cohort,
+        rights_evidence_sha256=digest(inputs.rights_evidence),
+        reconstruction_evidence_sha256=digest(inputs.reconstruction_evidence),
+    )
+
+
+@pytest.mark.parametrize("noncommercial", [False, True])
+def test_saved_proposal_reconstructs_exact_evidence_after_current_review(
+    selection, tmp_path, monkeypatch, noncommercial
+):
+    if noncommercial:
+        raw = documents([stem_source()])
+        bundle = reviewed_bundle(tmp_path, raw, selection.continuation.license_adoption)
+    else:
+        bundle = bundle_at(tmp_path / "model")
+        raw = {
+            record.path: (tmp_path / "model" / record.path).read_bytes()
+            for record in bundle.files
+            if record.role in {"license", "provenance"}
+        }
+    original = build_standing_model_review_from_documents(
+        bundle, selection.policy, selection.previous, raw
+    )
+    before = canonical_json_bytes(original)
+    reviewer = historical_reviewer(selection, tmp_path)
+    monkeypatch.setattr(
+        "umi.competition_cohort_direct_model_review.verify_remote_model",
+        lambda *a, **kw: pytest.fail("model payload reverified"),
+    )
+    result = reviewer.inputs_for_acceptance(
+        original, expected_review(original, digest(selection.plan))
+    )
+    assert canonical_json_bytes(result) == before == canonical_json_bytes(original)
+    assert reviewer.review_policies[digest(selection.old_plan)] == selection.previous
+    assert reviewer.review_policies[digest(selection.plan)] == selection.current
+    if noncommercial:
+        assert result.rights_evidence["decision"]["training_rights_policy_sha256"] == (
+            CONDITIONAL_TRAINING_RIGHTS_SHA256
+        )
+
+
+def test_saved_policy_identity_cannot_exempt_current_nc_requirements(selection, tmp_path):
+    raw = documents([stem_source()])
+    bundle = reviewed_bundle(tmp_path, raw)
+    # A retained or caller-proposed old rendering cannot confer source rights.
+    from umi.competition_cohort_model_acceptance import ModelArtifactReviewInputs
+
+    old = ModelArtifactReviewInputs(
+        model_sha256=digest(bundle),
+        rights_evidence={
+            "decision": {"review_policy_sha256": digest(selection.previous)},
+            "original_documents": [
+                dict(path=path, text=data.decode()) for path, data in raw.items()
+            ],
+        },
+        reconstruction_evidence={
+            "original_manifest": bundle.model_dump(mode="json", by_alias=True)
+        },
+    )
+    reviewer = historical_reviewer(selection, tmp_path)
+    with pytest.raises(StaticModelReviewHeld, match="requires_authenticated_nc_route"):
+        reviewer.inputs_for_acceptance(old, expected_review(old, digest(selection.plan)))
+
+
+def test_unknown_historical_policy_and_changed_documents_cannot_match_saved_proposal(
+    selection, tmp_path
+):
+    bundle = bundle_at(tmp_path / "model")
+    raw = {
+        record.path: (tmp_path / "model" / record.path).read_bytes()
+        for record in bundle.files
+        if record.role in {"license", "provenance"}
+    }
+    original = build_standing_model_review_from_documents(
+        bundle, selection.policy, selection.previous, raw
+    )
+    reviewer = historical_reviewer(selection, tmp_path)
+    unknown = original.model_copy(
+        update={
+            "rights_evidence": dict(
+                original.rights_evidence,
+                decision=dict(original.rights_evidence["decision"], review_policy_sha256="ef" * 32),
+            ),
+            "reconstruction_evidence": dict(
+                original.reconstruction_evidence, review_policy_sha256="ef" * 32
+            ),
+        }
+    )
+    with pytest.raises(ValueError, match="authenticated review policy history"):
+        reviewer.inputs_for_acceptance(original, expected_review(unknown, digest(selection.plan)))
+    changed = original.model_copy(
+        update={
+            "rights_evidence": dict(
+                original.rights_evidence,
+                original_documents=[
+                    dict(item, text=item["text"] + "changed")
+                    for item in original.rights_evidence["original_documents"]
+                ],
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="document differs"):
+        reviewer.inputs_for_acceptance(changed, expected_review(original, digest(selection.plan)))
+
+
+def test_review_history_refuses_tampered_authority_and_reuses_current_review(
+    selection, tmp_path, monkeypatch
+):
+    bad = selection.continuation.license_adoption.model_copy(
+        update={
+            "adoption": selection.continuation.license_adoption.adoption.model_copy(
+                update={"reason": "changed"}
+            )
+        }
+    )
+    entry = ModelReviewPolicyHistoryEntry(
+        authority=selection.authority,
+        continuation=selection.continuation.model_copy(update={"license_adoption": bad}),
+    )
+    with pytest.raises(ValueError):
+        historical_reviewer(selection, tmp_path, entries=(entry,))
+    reviewer = historical_reviewer(selection, tmp_path)
+    bundle = bundle_at(tmp_path / "model")
+    raw = {
+        record.path: (tmp_path / "model" / record.path).read_bytes()
+        for record in bundle.files
+        if record.role in {"license", "provenance"}
+    }
+    current = build_standing_model_review_from_documents(
+        bundle, selection.policy, selection.current, raw
+    )
+    monkeypatch.setattr(
+        "umi.competition_cohort_direct_model_review.build_standing_model_review_from_documents",
+        lambda *a, **kw: pytest.fail("unchanged rights review repeated"),
+    )
+    assert (
+        reviewer.inputs_for_acceptance(current, expected_review(current, digest(selection.plan)))
+        is current
+    )
+
+
+def test_multiple_rights_updates_retain_old_proposals_and_original_cohort_semantics(
+    selection, tmp_path
+):
+    old_authority = selection.authority
+    previous = selection.previous.model_copy(
+        update={"training_rights_policy_sha256": LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256}
+    )
+    body = prepare_model_license_adoption(
+        policy=selection.policy,
+        authority=old_authority,
+        noncommercial_terms_sha256=LEGACY_NC_CONTRIBUTION_TERMS_SHA256,
+        training_rights_policy_sha256=LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256,
+        operator_decision_sha256="cd" * 32,
+        issued_at_block=180,
+        reason="Earlier authenticated source review selector",
+    )
+    old = ModelReviewPolicyHistoryEntry(
+        authority=old_authority,
+        continuation=DirectModelReviewPolicyContinuation(
+            predecessor=selection.previous,
+            license_adoption=SignedModelLicenseTermsAdoption(
+                adoption=body, signatures=signatures(body)
+            ),
+        ),
+    )
+    # A later authority must retain the actual old authority with its selector.
+    authority = old_authority.authority.model_copy(update={"issued_at_block": 151})
+    selection.authority = SignedCohortRecoveryAuthority(
+        authority=authority, signatures=signatures(authority)
+    )
+    current_adoption = selection.continuation.license_adoption.adoption.model_copy(
+        update={"authority_sha256": digest(authority)}
+    )
+    newest = ModelReviewPolicyHistoryEntry(
+        authority=selection.authority,
+        continuation=DirectModelReviewPolicyContinuation(
+            predecessor=previous,
+            license_adoption=SignedModelLicenseTermsAdoption(
+                adoption=current_adoption, signatures=signatures(current_adoption)
+            ),
+        ),
+    )
+    reviewer = historical_reviewer(selection, tmp_path, entries=(old, newest))
+    bundle = bundle_at(tmp_path / "model")
+    raw = {
+        record.path: (tmp_path / "model" / record.path).read_bytes()
+        for record in bundle.files
+        if record.role in {"license", "provenance"}
+    }
+    original = build_standing_model_review_from_documents(bundle, selection.policy, previous, raw)
+    assert (
+        reviewer.inputs_for_acceptance(original, expected_review(original, digest(selection.plan)))
+        == original
+    )
+    assert reviewer.review_policies[digest(selection.old_plan)] == selection.previous

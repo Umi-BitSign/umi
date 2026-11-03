@@ -360,6 +360,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
             if model is None:
                 raise ValueError("direct model review requires model signing")
             verify_standing_review_policy(direct.standing_review_policy, self.policy)
+            direct.policies_for(self.series, self.policy)
         validate_legacy_model_selections(
             self.legacy_model_storage,
             series=self.series,

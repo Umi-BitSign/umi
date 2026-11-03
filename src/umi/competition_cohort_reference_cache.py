@@ -40,6 +40,7 @@ class CohortReferenceModelCache:
             None,
             multipart=artifacts.multipart,
             verification_root=artifacts.verification_root,
+            series=getattr(artifacts, "series", None),
         )
 
     def execution_source(self, job, role, bundle, request=None):
