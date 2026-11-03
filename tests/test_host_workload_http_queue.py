@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 import pytest
+
 from umi.host_memory_runtime import WorkloadASGIBinding
 
 from .test_host_workload_asgi import controller, receiver, success
