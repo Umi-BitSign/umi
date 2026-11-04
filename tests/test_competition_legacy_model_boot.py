@@ -263,9 +263,14 @@ async def test_actual_boot_passes_series_sources_and_preserves_c5_fallback(
     class ReachedVerifier(Exception):
         pass
 
-    def artifacts(config, policy, owner, *, verification_root):
+    def artifacts(config, policy, owner, *, verification_root, series):
+        assert series == c.config.series
         return SimpleNamespace(
-            config=config, policy=policy, multipart=remote, verification_root=verification_root
+            config=config,
+            policy=policy,
+            multipart=remote,
+            verification_root=verification_root,
+            series=series,
         )
 
     def verifier(*args, **kwargs):
@@ -387,9 +392,14 @@ async def test_actual_consumer_boot_forwards_selected_shared_store(
     class ReachedVerifier(Exception):
         pass
 
-    def artifacts(config, policy, owner, *, verification_root):
+    def artifacts(config, policy, owner, *, verification_root, series):
+        assert series == c.config.series
         return SimpleNamespace(
-            config=config, policy=policy, multipart=remote, verification_root=verification_root
+            config=config,
+            policy=policy,
+            multipart=remote,
+            verification_root=verification_root,
+            series=series,
         )
 
     def verifier(*args, **kwargs):
