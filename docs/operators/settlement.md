@@ -1223,13 +1223,14 @@ start the coverage/history owner at launch, retain the complete finalized interv
 from its original authority block, and monitor catch-up during intake, paid work
 and certification. Selecting workers alone does not start a missing capture owner.
 
-When a retained proof frame is missing, the online capture owner overlaps the
-next block's native capture with the current block's durable source publication
-and proof export. This uses at most two frames inside the selected byte and count
-window; a one-frame window keeps capture sequential. Each successful native check
-owns its checkpoint through persistence. Application remains in block order, and
-failure or cancellation drains started work before releasing the history owner.
-The overlap does not change proof formats, signed clocks or completed receipts.
+When a retained proof frame is missing, native capture remains serialized, while
+durable source publication and proof export overlap across the selected byte and
+count window. Without a profile the window holds at most two frames; a one-frame
+profile keeps the whole path sequential. Each successor waits for its predecessor's
+validated native observation. Every successful check owns its checkpoint and
+export through persistence. Application remains in block order, and failure or
+cancellation drains started work before releasing the history owner. The overlap
+does not change proof formats, signed clocks or completed receipts.
 
 Proof export batches independent objects and their original recipes across fields,
 within the existing byte bound and a 256-object batch limit. The immutable frame

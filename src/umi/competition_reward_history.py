@@ -640,18 +640,25 @@ class RewardControlHistoryReader:
             progress.advance(1)
         return observation, retained
 
-    def _start_preparation(self, provider, height):
+    def _start_preparation(self, provider, height, *, previous=None, parent_hash=None, stop=None):
         prepared = _HistoryPreparation()
-        prepared.task = asyncio.create_task(self._prepare_durable(provider, height, prepared))
+        prepared.task = asyncio.create_task(
+            self._capture_and_export(provider, height, prepared, previous, parent_hash, stop)
+        )
         return prepared
 
-    async def _prepare_durable(self, provider, height, prepared):
+    async def _prepare_durable(self, provider, height, prepared, *, parent_hash=None):
         # One owned task spans native verification through durable success. The
         # caller may cancel or fail publication, but must drain this task before
         # releasing ownership. A successful prefetched check is never discarded.
         try:
             observation, retained = await self._prepare(provider, height)
             if isinstance(observation, dict):
+                snapshot = FinalizedSnapshotRef(**observation["snapshot"])
+                if snapshot.block_number != height or (
+                    parent_hash is not None and snapshot.parent_hash != parent_hash
+                ):
+                    raise ValueError("control history has a gap or a different parent")
                 prepared.observation = observation
                 prepared.ready.set()
                 return observation
@@ -660,7 +667,9 @@ class RewardControlHistoryReader:
                 expected_control_hotkey=self.hotkey,
                 expected_chain_config_sha256=self.config_sha256,
             )
-            if observation.slot.snapshot.block_number != height:
+            if observation.slot.snapshot.block_number != height or (
+                parent_hash is not None and observation.slot.snapshot.parent_hash != parent_hash
+            ):
                 raise ValueError("control history has a gap or a different parent")
             prepared.observation = observation
             prepared.ready.set()
@@ -695,84 +704,92 @@ class RewardControlHistoryReader:
             # Also wake the owner on failure before native observation exists.
             prepared.ready.set()
 
-    async def _advance_capture_locked(self, provider, last, *, prefetch=True, stop=None):
-        """Overlap owned capture and durable publication within the admitted frame budget.
+    async def _capture_and_export(self, provider, height, prepared, previous, parent_hash, stop):
+        """Own one admitted frame through native success and durable delivery."""
+        try:
+            if previous is not None:
+                await previous.ready.wait()
+                observation = previous.observation
+                if observation is None:
+                    # The owner drains and reports the predecessor's failure in
+                    # height order. Re-raising its exception in another task
+                    # would overwrite the original native traceback.
+                    return None
+                if isinstance(observation, dict):
+                    parent_hash = observation["snapshot"]["block_hash"]
+                else:
+                    parent_hash = observation.slot.snapshot.block_hash
+                # Do not retain a released predecessor's raw frame.
+                previous = observation = None
+            if stop is not None and stop.is_set():
+                return None
+            value = await self._prepare_durable(provider, height, prepared, parent_hash=parent_hash)
+            if stop is not None and stop.is_set():
+                return None
+            observation = prepared.observation
+            if isinstance(observation, dict):
+                await self._validate_checkpoint_tip(provider, value)
+                if await run_owned_thread(self.checkpoints.load, height) != value:
+                    raise HistoryCheckpointRepairRequired("checkpoint changed during finality")
+                value = await self._ensure_checkpoint_export(value)
+                self.progress.restored_completed += 1
+            elif self.export_archive is not None:
+                await run_owned_thread(self._export, observation, self.export_archive)
+                value = {**value, "exports": [self._export_identity()]}
+                await run_owned_thread(
+                    partial(
+                        self.checkpoints.remember, value, repair_reason="new_export_destination"
+                    )
+                )
+            if self.export_archive is not None:
+                self.progress.record("exported", height)
+            return value
+        finally:
+            prepared.ready.set()
 
-        Both callers already own the history/journal locks. Each preparation owns
-        its verified result through persistence; only this loop applies in order.
-        A stopping parallel caller drains children before releasing those locks.
+    async def _advance_capture_locked(self, provider, last, *, maximum_in_flight=2, stop=None):
+        """Pipeline capture, persistence and export inside the admitted frame budget.
+
+        Native capture remains serialized. Each following capture waits for its
+        predecessor's validated native observation, while persistence and export
+        finish independently. Only this owner applies the durable results in order.
         """
-        pending = following = None
+        pending = []
         try:
             await self._restore_prefix(provider, last)
-            if self._next <= last and (stop is None or not stop.is_set()):
-                pending = self._start_preparation(provider, self._next)
+            admitted = self._next
             while self._next <= last and (stop is None or not stop.is_set()):
-                await pending.ready.wait()
-                if stop is not None and stop.is_set():
-                    break
-                observation = pending.observation
-                if observation is None:
-                    # Propagate the original preparation failure. No
-                    # subsequent block may start before this validation.
-                    await await_owned_task(pending.task)
-                    raise RuntimeError("history preparation produced no result")
-                if isinstance(observation, dict):
-                    snapshot = FinalizedSnapshotRef(**observation["snapshot"])
-                else:
-                    snapshot = observation.slot.snapshot
-                if snapshot.block_number != self._next or (
-                    self._tip is not None and snapshot.parent_hash != self._tip.snapshot.block_hash
+                while (
+                    admitted <= last
+                    and len(pending) < maximum_in_flight
+                    and (stop is None or not stop.is_set())
                 ):
-                    raise ValueError("control history has a gap or a different parent")
-                if prefetch and self._next < last and (stop is None or not stop.is_set()):
-                    # Native proof work may overlap persistence/export.
-                    # Each child owns its own success checkpoint, even
-                    # if its predecessor fails or this caller cancels.
-                    following = self._start_preparation(provider, self._next + 1)
-                value = await await_owned_task(pending.task)
-                if stop is not None and stop.is_set():
-                    break
-                if isinstance(observation, dict):
-                    # A following native worker may already be active.
-                    # Keep its timer running across this cheap restore;
-                    # restored blocks never enter the rate numerator.
-                    await self._validate_checkpoint_tip(provider, value)
-                    if await run_owned_thread(self.checkpoints.load, self._next) != value:
-                        raise HistoryCheckpointRepairRequired("checkpoint changed during finality")
-                    value = await self._ensure_checkpoint_export(value)
-                    self.progress.restored_completed += 1
-                elif self.export_archive is not None:
-                    await run_owned_thread(self._export, observation, self.export_archive)
-                    value = {**value, "exports": [self._export_identity()]}
-                    await run_owned_thread(
-                        partial(
-                            self.checkpoints.remember,
-                            value,
-                            repair_reason="new_export_destination",
+                    pending.append(
+                        self._start_preparation(
+                            provider,
+                            admitted,
+                            previous=pending[-1] if pending else None,
+                            parent_hash=None
+                            if self._tip is None
+                            else self._tip.snapshot.block_hash,
+                            stop=stop,
                         )
                     )
-                if self.export_archive is not None:
-                    self.progress.record("exported", self._next)
-                if stop is not None and stop.is_set():
+                    admitted += 1
+                value = await await_owned_task(pending[0].task)
+                if value is None or (stop is not None and stop.is_set()):
                     break
                 self._apply_checkpoint(value)
-                pending, following = following, None
-                if pending is None and self._next <= last and (stop is None or not stop.is_set()):
-                    pending = self._start_preparation(provider, self._next)
+                del pending[0]
         finally:
-            for prepared in (pending, following):
-                if prepared is not None:
-                    # Drain complete native+checkpoint ownership. A
-                    # secondary failure cannot replace the caller's
-                    # publication error or cancellation. Retrieving a
-                    # completed failure with result() again would
-                    # replace its original traceback with this cleanup.
-                    with suppress(asyncio.CancelledError, Exception):
-                        if not prepared.task.done():
-                            await await_owned_task(prepared.task)
-                        elif not prepared.task.cancelled():
-                            prepared.task.exception()
+            for prepared in pending:
+                # Keep every started success through its durable checkpoint and
+                # export. Secondary failures cannot replace the owner's error.
+                with suppress(asyncio.CancelledError, Exception):
+                    if not prepared.task.done():
+                        await await_owned_task(prepared.task)
+                    elif not prepared.task.cancelled():
+                        prepared.task.exception()
             self._source_tokens.clear()
             self._prepared_encodings.clear()
 
