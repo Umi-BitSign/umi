@@ -2892,15 +2892,33 @@ authorization controls must already be reviewed and signed. The command does
 not fetch or create missing launch inputs.
 
 Host staging retains earlier signed releases and interrupted staging directories.
-The default capacity is 32 entries. If these remain recovery or service dependencies,
-review disk capacity and use `--maximum-host-stage-slots 64` (or another positive
-local capacity) on the upgrade command. The staging API accepts the same
-`maximum_host_stage_slots` option for maintenance tooling. The explicit value is
-checked before any service stop; it changes only local retention capacity. Signed
-host authentication, exact tree checks, parent locking and prior releases remain
-unchanged. Repeating an already installed exact host does not consume another slot.
+Default admission uses the target filesystem's available bytes and inodes, with
+no lifetime release-count limit. While holding the parent lock, the installer
+accounts for each signed file's rounded allocation, all new files/directories,
+and an additional allocation unit per entry for filesystem metadata. It uses
+unreserved filesystem space even when running as root.
+
+Pass `--minimum-host-stage-free-bytes` and `--minimum-host-stage-free-inodes` to
+preserve additional local operating reserves. These default to zero additional
+reserve; separately configured storage guards and their stricter reserves still
+apply. Maintenance callers use `minimum_free_bytes` and `minimum_free_inodes`
+on the staging API. Capacity refusal occurs before creating a partial directory
+or stopping the service and reports the available, required and reserved amounts.
+
+An explicit `--maximum-host-stage-slots` (or API `maximum_host_stage_slots`) remains
+supported as an additional count ceiling for older callers. It includes retained
+partial stages and never overrides filesystem capacity. Signed host authentication,
+exact tree checks, parent locking and prior releases remain unchanged. Repeating
+an already installed exact host allocates nothing and works at exhausted capacity.
 Do not delete an earlier host merely to satisfy this count: inspect services,
 configuration, virtual environments and recovery consumers before retiring it.
+
+This behavior belongs to the installer runtime executing the command. Older
+installed runtimes retain their count ceiling until the supported signed host
+upgrade selects this implementation. For that transition, their existing explicit
+slot override remains usable after admitting the new host within local reserves.
+Routine signed validator container updates and miner updates use separate staging
+paths; they do not invoke this host installer or inherit its former count ceiling.
 
 
 An applied common-bootstrap journal requires its original signed manifest and
