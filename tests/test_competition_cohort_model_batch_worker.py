@@ -1,8 +1,11 @@
 """Native batch ownership, durable recovery and bounded async lifetimes."""
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from functools import partial
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -137,6 +140,40 @@ async def test_real_batch_preserves_prior_individual_publication_and_older_inten
     assert late.certificate.batch_proof.certificate.batch.certified_at_block == 230
     assert earlier.accepted_at_block == 220
     assert reopened.export(r.cohort, digest(r.subs[1]), r.worker.output) == late
+
+
+def test_parallel_exports_wait_for_same_owner_publication(batch_owner, monkeypatch):
+    from umi import private_files
+
+    r = batch_owner
+    certificates = [
+        r.owner.publish(certify(r.owner, r.cohort, sub, r.inputs), capture_at(220))
+        for sub in r.subs
+    ]
+    entered, release = Event(), Event()
+    original = private_files._publish_locked
+
+    def slow_objects(path, *args, **kwargs):
+        if path.parent.name == "objects" and not entered.is_set():
+            entered.set()
+            assert release.wait(5), "publication fixture did not release its native lock"
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(private_files, "_publish_locked", slow_objects)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(r.owner.export, r.cohort, digest(r.subs[0]), r.worker.output)
+        try:
+            assert entered.wait(5)
+            second = pool.submit(r.owner.export, r.cohort, digest(r.subs[1]), r.worker.output)
+            with pytest.raises(FutureTimeout):
+                second.result(timeout=0.5)
+        finally:
+            release.set()
+        assert first.result(timeout=5) == certificates[0]
+        assert second.result(timeout=5) == certificates[1]
+    for sub, publication in zip(r.subs, certificates, strict=True):
+        path = r.worker.output / "model-reward-acceptances" / r.cohort / (digest(sub) + ".json")
+        assert path.read_bytes() == canonical_json_bytes(publication.certificate)
 
 
 @pytest.mark.parametrize("deadline", ["open", "absent", "closed"])

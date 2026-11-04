@@ -13,8 +13,10 @@ from .competition_cohort_intake import CohortIntake
 from .competition_cohort_recovery import verify_recovery_authority
 from .competition_model_license import verify_model_license_selection
 from .competition_model_training_rights import (
-    CONDITIONAL_TRAINING_RIGHTS_SHA256,
+    LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256,
+    LEGACY_NC_CONTRIBUTION_TERMS_SHA256,
     NC_CONTRIBUTION_TERMS_SHA256,
+    validate_model_training_terms,
 )
 from .competition_public_results_directory import atomic_write, owned_directory, read_owned_file
 from .competition_verification_reuse import metadata_completion, remember_metadata_completion
@@ -27,22 +29,32 @@ MAX_LICENSE_METADATA_BYTES = 1024 * 1024
 NC_TERMS_URL = (
     "https://raw.githubusercontent.com/Umi-BitSign/umi/main/docs/MODEL_CONTRIBUTION_TERMS_NC_V1.md"
 )
+NC_TERMS_V2_URL = (
+    "https://raw.githubusercontent.com/Umi-BitSign/umi/main/docs/MODEL_CONTRIBUTION_TERMS_NC_V2.md"
+)
+_TERMS_URLS = {
+    LEGACY_NC_CONTRIBUTION_TERMS_SHA256: NC_TERMS_URL,
+    NC_CONTRIBUTION_TERMS_SHA256: NC_TERMS_V2_URL,
+}
 
 
 class PublicModelLicenseAdoption(StrictProtocolModel):
     signed_adoption: SignedModelLicenseTermsAdoption
     sha256: Hex32
     terms_sha256: Hex32
-    terms_url: Literal[NC_TERMS_URL] = NC_TERMS_URL
+    terms_url: Literal[NC_TERMS_URL, NC_TERMS_V2_URL] = NC_TERMS_URL
 
     @model_validator(mode="after")
     def exact_metadata(self):
         body = self.signed_adoption.adoption
+        validate_model_training_terms(
+            rights_policy_sha256=body.training_rights_policy_sha256,
+            supplemental_terms_sha256=body.noncommercial_terms_sha256,
+        )
         if (
             self.sha256 != hashlib.sha256(canonical_json_bytes(self.signed_adoption)).hexdigest()
             or self.terms_sha256 != body.noncommercial_terms_sha256
-            or self.terms_sha256 != NC_CONTRIBUTION_TERMS_SHA256
-            or body.training_rights_policy_sha256 != CONDITIONAL_TRAINING_RIGHTS_SHA256
+            or self.terms_url != _TERMS_URLS[self.terms_sha256]
         ):
             raise ValueError("published model license metadata differs from reviewed selection")
         return self
@@ -91,6 +103,7 @@ def project_model_license_adoptions(history, policy, selections):
                 signed_adoption=signed,
                 sha256=hashlib.sha256(canonical_json_bytes(signed)).hexdigest(),
                 terms_sha256=body.noncommercial_terms_sha256,
+                terms_url=_TERMS_URLS.get(body.noncommercial_terms_sha256, NC_TERMS_URL),
             )
         )
     return PublicModelLicenseAdoptions(
@@ -100,6 +113,27 @@ def project_model_license_adoptions(history, policy, selections):
         authority_sha256=digest(authority),
         status="available" if items else "not_selected",
         items=tuple(sorted(items, key=lambda item: item.sha256)),
+    )
+
+
+def model_license_client_view(projection, *, include_supported_revisions=False):
+    """Keep default responses readable by the installed V1-only model client.
+
+    Updated clients opt into all supported revisions. This filters a retained
+    projection only; HTTP requests never verify signatures or read native state.
+    """
+    if include_supported_revisions:
+        return projection
+    compatible = tuple(
+        item
+        for item in projection.items
+        if item.signed_adoption.adoption.training_rights_policy_sha256
+        == LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256
+    )
+    if compatible == projection.items:
+        return projection
+    return projection.model_copy(
+        update={"items": compatible, "status": "available" if compatible else "not_selected"}
     )
 
 

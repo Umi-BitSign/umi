@@ -302,6 +302,7 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                         config.policy,
                         config.owner_hotkey,
                         verification_root=root / "direct-model-byte-verification",
+                        series=config.series,
                     )
                 )
                 legacy_readers = (
@@ -325,6 +326,9 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                         config.direct_model_review.standing_review_policy
                         if legacy_readers is not None and config.direct_model_review is not None
                         else None
+                    ),
+                    review_inputs_for_acceptance=(
+                        None if direct_artifacts is None else direct_artifacts.inputs_for_acceptance
                     ),
                 )
                 await run_owned_thread(

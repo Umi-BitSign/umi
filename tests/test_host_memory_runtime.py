@@ -1,6 +1,7 @@
 """Admission integration tests with tiny graphs and no native/live state."""
 
 import asyncio
+import json
 import threading
 import weakref
 from contextlib import nullcontext
@@ -449,6 +450,43 @@ def test_compacted_os_error_preserves_bounded_diagnostics(error):
     assert compact.args == error.args
     assert str(compact) == str(error)
     assert compact.filename == error.filename
+
+
+def test_compaction_logs_original_source_without_private_exception_text(caplog):
+    namespace = {"__name__": "umi.diagnostic_test"}
+    exec(
+        "def reject():\n"
+        "    try:\n"
+        "        raise OSError('private archive and capability URL')\n"
+        "    except OSError as cause:\n"
+        "        raise ValueError('private model and reference') from cause\n",
+        namespace,
+    )
+    try:
+        namespace["reject"]()
+    except ValueError as original:
+        compact = runtime.compact_memory_error(original)
+        assert original.__traceback__ is None
+        assert compact.__context__ is None and compact.__cause__ is None
+    record = next(row for row in caplog.records if row.name == runtime.__name__)
+    details = json.loads(record.getMessage().split("details=", 1)[1])
+    assert [row["reason_code"] for row in details] == ["validation_failed", "os_error"]
+    assert all(row["source_frames"][-1]["module"] == "umi.diagnostic_test" for row in details)
+    assert "private" not in record.getMessage()
+    assert compact.args == ("private model and reference",)
+
+
+def test_diagnostic_failure_does_not_prevent_error_frame_cleanup(monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise OSError("logging unavailable")
+
+    monkeypatch.setattr(runtime.logging.getLogger(runtime.__name__), "warning", unavailable)
+    try:
+        raise ValueError("native refusal")
+    except ValueError as original:
+        compact = runtime.compact_memory_error(original)
+        assert original.__traceback__ is None
+        assert compact.args == ("native refusal",)
 
 
 def test_qualified_conservative_headroom_allows_downstream_owner(provisioned, monkeypatch):

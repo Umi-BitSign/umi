@@ -14,6 +14,8 @@ from umi.competition_cohort_model_static_review import (
 )
 from umi.competition_model_training_rights import (
     CONDITIONAL_TRAINING_RIGHTS_SHA256,
+    LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256,
+    LEGACY_NC_CONTRIBUTION_TERMS_SHA256,
     NC_CONTRIBUTION_TERMS_SHA256,
     ResearchRightsWarranty,
 )
@@ -176,6 +178,123 @@ def test_missing_nc_notice_holds_only_the_new_model_review(reviewed, policy):
     without = {key: value for key, value in documents.items() if key != "NOTICE"}
     with pytest.raises(StaticModelReviewHeld, match="nc_required_document_missing:NOTICE"):
         review((changed, standing, without, source), policy)
+
+
+def test_retained_v1_bundle_keeps_original_rights_evidence_and_download_terms(reviewed, policy):
+    from umi.competition_cohort_public_results import PUBLIC_RELEASE_TERMS
+
+    bundle, standing, documents, source = reviewed
+    current = review(reviewed, policy)
+    body = bundle.license_adoption.adoption.model_copy(
+        update={
+            "training_rights_policy_sha256": LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256,
+            "noncommercial_terms_sha256": LEGACY_NC_CONTRIBUTION_TERMS_SHA256,
+        }
+    )
+    legacy = bundle.model_copy(
+        update={
+            "license_adoption": SignedModelLicenseTermsAdoption(
+                adoption=body, signatures=signatures(body)
+            ),
+        }
+    )
+    result = review((legacy, standing, documents, source), policy)
+    decision = result.rights_evidence["decision"]
+    assert decision["contribution_terms_sha256"] == LEGACY_NC_CONTRIBUTION_TERMS_SHA256
+    assert decision["training_rights_policy_sha256"] == LEGACY_CONDITIONAL_TRAINING_RIGHTS_SHA256
+    assert (
+        decision["declared_training_rights_review"]["source_decisions"]
+        == (
+            current.rights_evidence["decision"]["declared_training_rights_review"][
+                "source_decisions"
+            ]
+        )
+    )
+    assert {
+        LEGACY_NC_CONTRIBUTION_TERMS_SHA256,
+        NC_CONTRIBUTION_TERMS_SHA256,
+    } <= PUBLIC_RELEASE_TERMS
+    crossed = legacy.model_copy(
+        update={
+            "license_adoption": SignedModelLicenseTermsAdoption(
+                adoption=body.model_copy(
+                    update={"training_rights_policy_sha256": CONDITIONAL_TRAINING_RIGHTS_SHA256}
+                ),
+                signatures=signatures(
+                    body.model_copy(
+                        update={"training_rights_policy_sha256": CONDITIONAL_TRAINING_RIGHTS_SHA256}
+                    )
+                ),
+            ),
+        }
+    )
+    with pytest.raises(StaticModelReviewHeld, match="conditional_model_terms_not_supported"):
+        review((crossed, standing, documents, source), policy)
+
+
+def test_stem_nc_detection_is_prospective_for_bare_permissive_bundles(reviewed, policy):
+    bundle, standing, original_documents, source = reviewed
+    documents = dict(original_documents)
+    provenance = json.loads(documents["PROVENANCE.json"])
+    provenance["sources"][0].update(
+        name="ASL STEM Wiki", license_id="MIT", responsible_use_requests=[]
+    )
+    documents["PROVENANCE.json"] = canonical_json_bytes(provenance)
+    documents["NOTICE"] += b" ASL STEM Wiki."
+    records = tuple(
+        record.model_copy(
+            update={
+                "size_bytes": len(documents[record.path]),
+                "sha256": hashlib.sha256(documents[record.path]).hexdigest(),
+            }
+        )
+        if record.path in documents
+        else record
+        for record in bundle.files
+    )
+    bare = bundle.model_copy(
+        update={
+            "schema_": "umi-model-bundle/1",
+            "license_adoption": None,
+            "license_id": "CC-BY-SA-4.0",
+            "files": records,
+        }
+    )
+    # Preserve the old classifier's outcome for this old, bare signed format.
+    previous = review((bare, standing, documents, source), policy)
+    assert previous.rights_evidence["schema"] == "umi-standing-model-rights-review/1"
+    selected = StandingModelReviewPolicy.model_validate(
+        standing.model_dump(mode="json", by_alias=True)
+        | {"training_rights_policy_sha256": CONDITIONAL_TRAINING_RIGHTS_SHA256}
+    )
+    with pytest.raises(StaticModelReviewHeld, match="authenticated_nc_route"):
+        review((bare, selected, documents, source), policy)
+    assert canonical_json_bytes(review((bare, standing, documents, source), policy)) == (
+        canonical_json_bytes(previous)
+    )
+
+
+def test_legacy_standing_policy_canonical_bytes_and_digest_are_unchanged(policy):
+    # Complete wire record from the original policy schema, including its defaults.
+    original = {
+        "schema": "umi-standing-model-artifact-review-policy/1",
+        "competition_policy_sha256": digest(policy),
+        "contribution_terms_sha256": policy.contribution_terms_sha256,
+        "standing_approval_record_sha256": "ab" * 32,
+        "approved_by": "operator@example.test",
+        "approved_at_utc": "2026-10-01T00:00:00Z",
+        "maximum_document_bytes": 2097152,
+        "maximum_total_document_bytes": 8388608,
+        "complete_declared_bundle_rights_approved": True,
+        "licenses_and_notices_reviewed": True,
+        "public_redistribution_and_evaluation_approved": True,
+    }
+    previous = canonical_json_bytes(original)
+    restored = StandingModelReviewPolicy.model_validate_json(previous)
+    assert restored.model_dump(mode="json", by_alias=True) == original
+    assert canonical_json_bytes(restored) == previous
+    assert digest(restored) == digest(original)
+    assert b"training_rights_policy_sha256" not in previous
 
 
 def test_legacy_prose_review_keeps_exact_original_rights_record(nc_case, policy, reviewed):

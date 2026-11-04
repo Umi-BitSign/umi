@@ -241,7 +241,21 @@ def test_independent_hold_reader_never_traverses_owner_private_paths(
     raw = canonical_json_bytes(value)
     path = Path(getattr(c.config, role + "_config"))
     c.save(path, raw)
-    before = path.stat()
+
+    def retained_identity(info):
+        # Ordinary reads may advance filesystem access time.
+        return (
+            info.st_dev,
+            info.st_ino,
+            info.st_mode,
+            info.st_uid,
+            info.st_gid,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
+
+    before = retained_identity(path.stat())
     probes = []
     for name in ("is_symlink", "resolve", "stat", "lstat"):
         original = getattr(Path, name)
@@ -261,7 +275,7 @@ def test_independent_hold_reader_never_traverses_owner_private_paths(
     assert c.reader.held(c.cohorts[1])
     assert not c.reader.held(c.cohorts[2])
     assert probes == []
-    assert path.stat() == before and path.read_bytes() == raw
+    assert retained_identity(path.stat()) == before and path.read_bytes() == raw
     with monkeypatch.context() as repeated:
         repeated.setattr(controls, "_admission", lambda *a: pytest.fail("admission reloaded"))
         repeated.setattr(controls, "_settlement", lambda *a: pytest.fail("settlement reloaded"))

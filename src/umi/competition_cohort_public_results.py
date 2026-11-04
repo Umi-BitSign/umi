@@ -25,7 +25,7 @@ from .competition_cohort_service_allocation import allocate_service_quality
 from .competition_cohort_service_certification import CertifiedServiceAllocation
 from .competition_cohort_service_quality import ClosedServiceQuality, ServiceTerms
 from .competition_model_license import verify_cohort_model_terms
-from .competition_model_training_rights import NC_CONTRIBUTION_TERMS_SHA256
+from .competition_model_training_rights import SUPPORTED_NC_CONTRIBUTION_TERMS_SHA256S
 from .competition_work_progress import WorkProgress
 from .open_competition import CompetitionPolicy, Hotkey, ModelBundle, digest, identity
 from .protocol import Hex32, StrictProtocolModel
@@ -36,7 +36,7 @@ PUBLIC_RELEASE_TERMS = frozenset(
     {
         "451b8ccf3c592fa4336bcf062594321a0e14f2443613a80f33dc6ee4acb5a0e0",  # v3
         "01e1e3b5953d41cf07ac5f70ff5caae5b223d70c3219d4eeca259fff036996a1",  # v4
-        NC_CONTRIBUTION_TERMS_SHA256,
+        *SUPPORTED_NC_CONTRIBUTION_TERMS_SHA256S,
     }
 )
 Count = Annotated[int, Field(ge=0)]

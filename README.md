@@ -37,7 +37,8 @@ Public-model cohorts use direct R2 model delivery and require their authenticate
 successor plans before opening. Read the
 [current miner operation guide](docs/CURRENT_MINER_OPERATION.md), the
 [cohort catalog](https://api.umi.vision/v1/competition/cohorts) and the selected
-cohort's signed history/readiness before submitting.
+cohort's signed history/readiness before submitting. Use the published model
+client and the license terms authenticated for that cohort and model.
 
 The original submission receipt always says `pending_attestation`. It does not
 change when a certificate is issued. Run `query-cohort-admission` with the original

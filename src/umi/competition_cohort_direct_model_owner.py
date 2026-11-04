@@ -298,8 +298,31 @@ class DirectModelUploadOwner:
         participation_ready=None,
         continuation_ready=None,
         object_ready=None,
+        review_policy_continuation=None,
+        review_policy_authority=None,
+        review_policy_plan=None,
     ) -> None:
         self.config = DirectModelUploadOwnerConfig.model_validate_json(canonical_json_bytes(config))
+        binding_review_policy = self.config.standing_review_policy
+        if review_policy_continuation is not None:
+            from .competition_cohort_direct_model_review_policy import direct_model_review_policies
+
+            if (
+                policy is None
+                or binding_review_policy is None
+                or review_policy_authority is None
+                or review_policy_plan is None
+                or digest(review_policy_plan) != self.config.cohort_sha256
+            ):
+                raise ValueError("direct review continuation requires its exact cohort authority")
+            effective, binding_review_policy = direct_model_review_policies(
+                review_policy_continuation,
+                binding_review_policy,
+                policy=policy,
+                authority=review_policy_authority,
+                plan=review_policy_plan,
+            )
+            self.config = self.config.model_copy(update={"standing_review_policy": effective})
         if not callable(authorize) or not callable(sign):
             raise ValueError("direct upload owner requires authorization and signing")
         self.multipart, self.authorize, self.sign = multipart, authorize, sign
@@ -346,7 +369,7 @@ class DirectModelUploadOwner:
                 "r2_endpoint": multipart.signer.endpoint,
                 "r2_bucket": multipart.signer.bucket,
                 "standing_review_policy_sha256": (
-                    None if c.standing_review_policy is None else digest(c.standing_review_policy)
+                    None if binding_review_policy is None else digest(binding_review_policy)
                 ),
             },
             maximum_uploads=c.maximum_uploads,

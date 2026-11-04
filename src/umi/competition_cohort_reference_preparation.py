@@ -488,6 +488,7 @@ class SettlementReferencePreparation:
             None,
             multipart=self.artifacts.multipart,
             verification_root=self.artifacts.verification_root,
+            series=getattr(self.artifacts, "series", None),
         )
         materializer = LegacyCohortModelCache(reader, self.legacy) if source.legacy else reader
         await run_owned_thread(

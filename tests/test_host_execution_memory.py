@@ -202,7 +202,8 @@ async def test_public_intake_binds_actual_joint_runtime_and_bounds_each_asgi_roo
         request_replay_bytes=4 * GIB,
     )
     config = SimpleNamespace(
-        recoverable_service=SimpleNamespace(admission_owner=owner, series=series)
+        recoverable_service=SimpleNamespace(admission_owner=owner, series=series),
+        api_limits=service.CompetitionApiLimits(capacity_wait_seconds=0.01),
     )
     monkeypatch.setattr(
         service, "CompetitionServiceConfig", SimpleNamespace(model_validate_json=lambda _: config)
@@ -211,6 +212,8 @@ async def test_public_intake_binds_actual_joint_runtime_and_bounds_each_asgi_roo
     entered, middleware, responses = [], [], []
 
     class App:
+        state = SimpleNamespace()
+
         def add_middleware(self, factory, **kwargs):
             middleware.append(factory(self, **kwargs))
 

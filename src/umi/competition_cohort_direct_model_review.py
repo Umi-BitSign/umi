@@ -20,6 +20,11 @@ from .competition_artifacts import (
     _remember_preserved_verification,
     verify_preserved_bundle,
 )
+from .competition_cohort_direct_model_review_policy import (
+    ModelReviewPolicyHistoryEntry,
+    model_review_policy_history,
+    retained_review_inputs,
+)
 from .competition_cohort_direct_model_upload import (
     direct_model_object_key,
     preserved_model_object_key,
@@ -53,7 +58,14 @@ from .competition_remote_model_verification import (
 )
 from .competition_transport_verification import TransferProgress
 from .concurrency import run_owned_thread
-from .open_competition import CompetitionPolicy, Hotkey, digest, identity, validate_bundle_policy
+from .open_competition import (
+    CompetitionPolicy,
+    Hotkey,
+    ModelBundle,
+    digest,
+    identity,
+    validate_bundle_policy,
+)
 from .private_files import (
     Directory,
     _read_bounded_private_bytes,
@@ -75,6 +87,7 @@ class DirectModelReviewSourceConfig(StrictProtocolModel):
     r2_credentials_file: Directory
     r2_bucket: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")]
     standing_review_policy: StandingModelReviewPolicy
+    review_policy_history: tuple[ModelReviewPolicyHistoryEntry, ...] = ()
     r2_timeout_seconds: Annotated[int, Field(ge=1, le=300)] = 60
     verification_directory: Directory | None = None
     verification_concurrency: Annotated[int, Field(ge=1, le=16)] = 10
@@ -98,6 +111,8 @@ class DirectModelReviewSourceConfig(StrictProtocolModel):
     @model_serializer(mode="wrap")
     def preserve_legacy(self, handler):
         value = handler(self)
+        if not self.review_policy_history:
+            value.pop("review_policy_history", None)
         if self.materialization_boot_disk_cache is None:
             value.pop("materialization_boot_disk_cache", None)
         if not self.reference_working_set_reclamation:
@@ -139,6 +154,13 @@ class DirectModelReviewSourceConfig(StrictProtocolModel):
         return (
             Path(self.r2_credentials_file),
             *((Path(self.verification_directory),) if self.verification_directory else ()),
+        )
+
+    def policies_for(self, series, policy):
+        if self.review_policy_history and series is None:
+            raise ValueError("review policy history requires its selected cohort series")
+        return model_review_policy_history(
+            self.review_policy_history, self.standing_review_policy, policy=policy, series=series
         )
 
 
@@ -185,6 +207,7 @@ class DirectModelArtifactReviewer:
         *,
         multipart: R2MultipartClient | None = None,
         verification_root: Path | None = None,
+        series=None,
     ) -> None:
         self.config = DirectModelReviewSourceConfig.model_validate_json(
             canonical_json_bytes(config)
@@ -196,6 +219,10 @@ class DirectModelArtifactReviewer:
         }:
             raise ValueError("direct model owner is outside policy")
         verify_standing_review_policy(self.config.standing_review_policy, self.policy)
+        self.series = series
+        self.review_policies, self.historical_review_policies = self.config.policies_for(
+            series, self.policy
+        )
         if multipart is None:
             loaded = load_r2_credentials(Path(self.config.r2_credentials_file))
             multipart = R2MultipartClient(
@@ -266,7 +293,11 @@ class DirectModelArtifactReviewer:
         """Reuse completed byte checks while retaining independent document review."""
 
         bundle, payload, object_key = self._source(request, preserved=preserved)
-        standing = self.config.standing_review_policy
+        standing = self.review_policies.get(
+            request.acceptance.cohort_sha256, self.config.standing_review_policy
+        )
+        if self.review_policies and request.acceptance.cohort_sha256 not in self.review_policies:
+            raise ValueError("artifact review is outside its authenticated policy history scope")
         documents = tuple(
             record.path for record in bundle.files if record.role in {"license", "provenance"}
         )
@@ -290,10 +321,30 @@ class DirectModelArtifactReviewer:
                 context=self._verification_context(request),
                 document_paths=documents,
             )
-        return (
-            build_standing_model_review_from_documents(bundle, self.policy, standing, verified),
-            head,
-        )
+        inputs = build_standing_model_review_from_documents(bundle, self.policy, standing, verified)
+        return self.inputs_for_acceptance(inputs, request.acceptance), head
+
+    def inputs_for_acceptance(self, inputs, acceptance):
+        if self.historical_review_policies:
+            standing = self.review_policies.get(acceptance.cohort_sha256)
+            if standing is None:
+                raise ValueError(
+                    "artifact review is outside its authenticated policy history scope"
+                )
+            if inputs.rights_evidence["decision"]["review_policy_sha256"] != digest(standing):
+                # A retained local approval still needs the changed rights
+                # checks. Reuse its authenticated documents, never model bytes.
+                bundle = ModelBundle.model_validate_json(
+                    canonical_json_bytes(inputs.reconstruction_evidence["original_manifest"])
+                )
+                documents = {
+                    item["path"]: item["text"].encode("utf-8")
+                    for item in inputs.rights_evidence["original_documents"]
+                }
+                inputs = build_standing_model_review_from_documents(
+                    bundle, self.policy, standing, documents
+                )
+        return retained_review_inputs(inputs, acceptance, self.historical_review_policies)
 
     @asynccontextmanager
     async def _verification_slot(self, key):

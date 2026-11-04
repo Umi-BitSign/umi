@@ -47,17 +47,15 @@ def default_model_license_proposal(*, policy, authority, decision):
     assembly/publication. Existing signed authorities are never rewritten.
     """
     from .competition_model_training_rights import (
-        CONDITIONAL_TRAINING_RIGHTS_SHA256,
-        NC_CONTRIBUTION_TERMS_SHA256,
+        validate_model_training_terms,
     )
 
     decision = ModelLicenseOperatorDecision.model_validate_json(canonical_json_bytes(decision))
-    if (
-        authority.policy_sha256 != digest(policy)
-        or decision.noncommercial_terms_sha256 != NC_CONTRIBUTION_TERMS_SHA256
-        or decision.training_rights_policy_sha256 != CONDITIONAL_TRAINING_RIGHTS_SHA256
-        or decision.source_message_sha256 == "0" * 64
-    ):
+    validate_model_training_terms(
+        rights_policy_sha256=decision.training_rights_policy_sha256,
+        supplemental_terms_sha256=decision.noncommercial_terms_sha256,
+    )
+    if authority.policy_sha256 != digest(policy) or decision.source_message_sha256 == "0" * 64:
         raise ValueError("model licensing decision differs from supported conditional rights")
     return ModelLicenseTermsAdoption(
         schema="umi-model-license-terms-adoption/1",

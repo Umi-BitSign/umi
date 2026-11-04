@@ -1,7 +1,10 @@
 """Durability, explicit loss repair and shared authority scope lifecycle."""
 
 import json
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from threading import Event
 
 import pytest
@@ -64,6 +67,45 @@ def test_missing_completed_receipt_is_explicit_repair(tmp_path, policy, caplog):
     assert len(calls) == 2
     events = [json.loads(r.message) for r in caplog.records if r.message.startswith("{")]
     assert any(e.get("state") == "repair_required" for e in events)
+
+
+def test_other_process_cannot_repeat_in_progress_native_work(tmp_path):
+    first = VerificationReuse(tmp_path / "owner", owner="one")
+    second = VerificationReuse(tmp_path / "owner", owner="one")
+    # Independent processes fail fast on the file lock. Same-process threads
+    # intentionally serialize and reuse completed work (covered by throughput
+    # tests), so waiting for such a thread while retaining its lock deadlocks.
+    code = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from umi.competition_verification_reuse import VerificationReuse
+from umi.private_files import PrivateStateBusyError
+try:
+    with VerificationReuse(Path(sys.argv[2]), owner="one").exclusive():
+        raise AssertionError("another process borrowed an in-progress native scope")
+except PrivateStateBusyError:
+    print("busy")
+"""
+    with first.exclusive():
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                "-c",
+                code,
+                str(Path(__file__).parents[1] / "src"),
+                str(tmp_path / "owner"),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=15,
+        )
+    assert result.stdout.strip() == "busy"
+    with second.exclusive():
+        pass
 
 
 def test_other_thread_waits_for_in_progress_native_work_before_entering(tmp_path):

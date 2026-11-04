@@ -252,10 +252,11 @@ async def test_actual_boot_constructs_selected_direct_verifier_and_preserves_sta
     class ReachedVerifier(Exception):
         pass
 
-    def direct(config, policy, owner, *, verification_root):
+    def direct(config, policy, owner, *, verification_root, series):
         assert config == h.source
         assert policy == h.candidate.policy
         assert verification_root.name == "direct-model-byte-verification"
+        assert series == h.candidate.series
         constructed.append((owner, verification_root))
         raise ReachedVerifier
 

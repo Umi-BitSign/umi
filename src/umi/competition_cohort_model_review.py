@@ -109,6 +109,7 @@ class ModelArtifactReviewer:
         | None = None,
         legacy_readers: LegacyModelStorageReaders | None = None,
         legacy_standing_policy: StandingModelReviewPolicy | None = None,
+        review_inputs_for_acceptance=None,
     ):
         self.config = ModelReviewConfig.model_validate_json(canonical_json_bytes(config))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
@@ -132,6 +133,7 @@ class ModelArtifactReviewer:
             raise ValueError("legacy model readers differ from the private review authority")
         self.legacy_readers = legacy_readers
         self.legacy_standing_policy = legacy_standing_policy
+        self.review_inputs_for_acceptance = review_inputs_for_acceptance
         if legacy_standing_policy is not None:
             if legacy_readers is None:
                 raise ValueError("legacy standing review requires authenticated R2 readers")
@@ -346,6 +348,8 @@ class ModelArtifactReviewer:
             # R2 byte provenance never approves the owner's rights
             # claims. These exact privately reviewed documents must
             # match the original /1 body before any remote work.
+            if self.review_inputs_for_acceptance is not None:
+                inputs = self.review_inputs_for_acceptance(inputs, a)
             ModelAcceptanceIntent(acceptance=a, inputs=inputs)
             legacy = self.legacy_readers
             if legacy is not None and legacy.has_cohort(a.cohort_sha256):

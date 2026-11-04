@@ -113,7 +113,7 @@ class DocumentationNavigationTests(unittest.TestCase):
             "Open-competition intake and rewards are not active yet", contributor_guide
         )
 
-    def test_durable_guides_do_not_bake_in_cohort_numbers(self):
+    def test_durable_guides_do_not_bake_in_dated_cohort_schedules(self):
         guides = (
             "OPEN_COMPETITION.md",
             "competition/launch.md",
@@ -128,7 +128,15 @@ class DocumentationNavigationTests(unittest.TestCase):
         for relative in guides:
             with self.subTest(path=relative):
                 text = (ROOT / "docs" / relative).read_text()
-                self.assertIsNone(re.search(r"\bC\d+(?:\b|[-+])", prose(text)))
+                # Cohort-specific signed policy/compatibility boundaries belong
+                # in these guides. Expired launch schedules do not.
+                self.assertIsNone(
+                    re.search(
+                        r"\bC\d+\b[^\n.]*\b(?:opens?|closes?|starts?)\s+(?:at|on)\s+\d",
+                        prose(text),
+                        re.IGNORECASE,
+                    )
+                )
 
     def test_operator_store_consumers_show_the_exact_public_launch(self):
         publisher = fenced_json_after(
@@ -155,16 +163,12 @@ class DocumentationNavigationTests(unittest.TestCase):
         self.assertEqual(publisher_launch, exchange_launch)
 
     def test_small_front_door_without_dated_runbooks(self):
-        # Immutable signed terms remain at their published paths for consent
-        # verification. Additional versions are evidence, not extra setup guides.
-        retained_terms = {
-            "MODEL_CONTRIBUTION_TERMS.md",
-            "MODEL_CONTRIBUTION_TERMS_V2.md",
-            "MODEL_CONTRIBUTION_TERMS_V3.md",
-            "MODEL_CONTRIBUTION_TERMS_V4.md",
-            "MODEL_CONTRIBUTION_TERMS_NC_V1.md",
-        }
-        guides = [p for p in (ROOT / "docs").glob("*.md") if p.name not in retained_terms]
+        # Signed terms are immutable verification inputs, not competing guides.
+        guides = [
+            path
+            for path in (ROOT / "docs").glob("*.md")
+            if not path.name.startswith("MODEL_CONTRIBUTION_TERMS")
+        ]
         self.assertLessEqual(len(guides), 4)
         self.assertEqual(
             [

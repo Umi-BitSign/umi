@@ -11,6 +11,7 @@ import json
 from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Lock as _Lock
 from typing import TYPE_CHECKING
 
 from pydantic import RootModel
@@ -213,6 +214,7 @@ class CohortModelAcceptances:
         legacy_payloads: LegacyModelAdmissionPayloads | None = None,
     ):
         self.intake, self.archive = intake, archive
+        self._export_lock = _Lock()
         if verify_request is not None and not callable(verify_request):
             raise ValueError("model acceptance artifact verifier is not callable")
         self.verify_request = verify_request
@@ -933,29 +935,35 @@ class CohortModelAcceptances:
         """Publish certificate and original documents for replication, certificate last."""
         self.intake._allowed(cohort)
         publication = self.retained(cohort, submission)
-        for body in (
-            publication.inputs.rights_evidence,
-            publication.inputs.reconstruction_evidence,
-        ):
-            # The typed document wrapper is unnecessary in endpoint object exports.
-            publish_private_model(
-                destination / "objects" / (digest(body) + ".json"),
-                RootModel(body),
-                maximum_bytes=16 * 1024**2,
-            )
-        # Independent settlement signers can verify preserved bytes now, before
-        # request closure. This contains no labels or new signing authority.
+        # Prepare outside the publication lock so artifact review remains
+        # parallel and never holds this lock while entering the intake journal.
         request = self.review_request(cohort, submission)
         if request.acceptance != publication.certificate.acceptance:
             raise ValueError("model preparation differs from retained acceptance")
-        publish_private_model(
-            destination / "model-reward-preparation" / cohort / (submission + ".json"),
-            request,
-            maximum_bytes=16 * 1024**2,
-        )
-        publish_private_model(
-            destination / "model-reward-acceptances" / cohort / (submission + ".json"),
-            publication.certificate,
-            maximum_bytes=256 * 1024,
-        )
+        # The directory's native lock still excludes other owners/processes.
+        # Batch threads belonging to this owner wait here instead of treating
+        # their own shared objects directory as unavailable model artifacts.
+        with self._export_lock:
+            for body in (
+                publication.inputs.rights_evidence,
+                publication.inputs.reconstruction_evidence,
+            ):
+                # The typed wrapper is unnecessary in endpoint object exports.
+                publish_private_model(
+                    destination / "objects" / (digest(body) + ".json"),
+                    RootModel(body),
+                    maximum_bytes=16 * 1024**2,
+                )
+            # Independent settlement signers can verify preserved bytes before
+            # request closure. This adds no labels or signing authority.
+            publish_private_model(
+                destination / "model-reward-preparation" / cohort / (submission + ".json"),
+                request,
+                maximum_bytes=16 * 1024**2,
+            )
+            publish_private_model(
+                destination / "model-reward-acceptances" / cohort / (submission + ".json"),
+                publication.certificate,
+                maximum_bytes=256 * 1024,
+            )
         return publication

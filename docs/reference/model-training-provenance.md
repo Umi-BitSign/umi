@@ -5,10 +5,11 @@
 From C7 onward, a model trained with permitted NonCommercial data or an
 inherited NC checkpoint uses the authenticated NC model route. Its license is
 `CC-BY-NC-SA-4.0`, and fresh model-bound consent accepts the
-[NC supplement](../MODEL_CONTRIBUTION_TERMS_NC_V1.md). A permissive-only model
+[selected NC supplement](../MODEL_CONTRIBUTION_TERMS_NC_V2.md). A permissive-only model
 keeps its original terms and reader. See the
 [training-permission decisions](../contributors/models.md#training-data-and-research-model-licensing)
-before spending compute; an NC label does not clear a bespoke access contract.
+before spending compute; an NC label alone does not clear a bespoke access
+contract. Earlier signed version-1 adoptions retain their original terms.
 
 The NC bundle includes these exact paths and manifest roles:
 
@@ -78,7 +79,9 @@ Declare every training, validation and test source and inherited checkpoint.
 `inherited_checkpoint`. Only training and inherited-checkpoint use select the
 NC model class; a validation/test declaration does not itself authorize source
 use for evaluation. Acquisition and destruction dates use `YYYY-MM-DD`.
-Required destruction must have an attested date no earlier than acquisition.
+Under the original contract, required destruction must have an attested date
+no earlier than acquisition. The version-2 ASL STEM Wiki decision follows the
+source's research-completion trigger as described below.
 
 The contract permits up to 512 sources, each with up to 512 archive references,
 subject to the artifact reader's tighter byte budget. Text fields are bounded;
@@ -95,15 +98,46 @@ a selected recorded approval.
 
 ## Review behavior and limits
 
-The rights contract has SHA-256
+The retained version-1 rights contract has SHA-256
 `daeaa1596ffc46890c9b896682484a86f079d907af4538a6f7768e5ffe4b39ab`.
-The NC supplement has SHA-256
+Its version-1 NC supplement has SHA-256
 `80c95e1e758c5668440f3799dff8f60b971f09d4b954d74df5aa5d6baadddd3b`.
 The authenticated adoption binds both; a locally edited JSON contract grants
-no rights. The current contract contains no selected bespoke permission.
-Providing an arbitrary permission-record hash does not clear Microsoft or
-other bespoke conditions. A new approved permission needs its authenticated
-contract revision before submission.
+no rights. This original pair does not authorize ASL STEM Wiki training and is
+preserved unchanged for existing artifacts and replay.
+
+The [version-2 rights contract](../../src/umi/competition_model_training_rights_v2.json)
+and [version-2 NC supplement](../MODEL_CONTRIBUTION_TERMS_NC_V2.md) add the
+November 2 legal/operator approval for ASL STEM Wiki. Use the supported updated
+model client and the published authenticated version-2 metadata, then sign fresh
+consent for the exact model and terms. Publishing this policy or installing a
+client alone does not activate that route. Existing version-1 submissions remain
+valid under their own selected terms. Arbitrary permission-record hashes do not
+clear bespoke conditions.
+
+For an ASL STEM Wiki source declaration, use these values together with the
+actual release, acquisition date, download route and archive digests:
+
+| Field | Required declaration |
+| --- | --- |
+| `canonical_url` | `https://www.microsoft.com/en-us/research/project/asl-stem-wiki/` (the trailing slash is optional). |
+| `license_id` | `LicenseRef-Microsoft-Research`. |
+| `accepted_access_terms` | Include `https://www.microsoft.com/en-us/research/project/asl-stem-wiki/dataset-license/` and disclose any other accepted terms. |
+| `additional_dataset_contract` | `true`. |
+| `permission_record_sha256` | `null`; the selected contract supplies this source-specific approval. Do not invent a Microsoft permission record. |
+| `destruction_required` | `true`, acknowledging the source's destruction obligation. |
+| `research_complete` | `false` while research continues; `true` when it is complete. Model submission does not itself establish completion. |
+| `destroyed_on` | May be `null` while research is ongoing. When research completes, destroy the required material immediately and attest to the actual date, no earlier than acquisition. |
+
+Training with this source selects `CC-BY-NC-SA-4.0` for the model. Attribute
+Microsoft and ASL STEM Wiki in `NOTICE`, retain applicable Wikipedia text-layer
+notices, and reproduce the request against technology purporting to replace
+interpreters. Retain noncommercial research use, signer-consent, confidentiality,
+no-redistribution and destruction obligations. The bundle must contain no source
+data, modified data, clips, landmarks, captions or sentence lists. The approval
+does not extend to other Microsoft datasets or materially different access terms.
+The completion and deletion fields are contributor attestations; artifact review
+does not claim independent proof that research ended or files were deleted.
 
 Artifact review rejects unsupported training license classes, missing required
 records, missing source attribution/responsible-use requests, and an NC route

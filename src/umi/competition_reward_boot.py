@@ -188,6 +188,8 @@ class StandingRewardBootConfig(StrictProtocolModel):
             model_delivery_adoptions=self.model_delivery_adoptions,
         )
         direct = self.direct_model_review
+        if direct is not None:
+            direct.policies_for(self.series, self.policy)
         if (
             self.legacy_model_storage
             and direct is not None
@@ -475,6 +477,7 @@ async def _run_owned_standing_inputs(host, config, stop, *, runtime=None, credit
             config.policy,
             None,
             verification_root=root / "direct-model-byte-verification",
+            series=config.series,
         )
     )
     model_artifacts = (

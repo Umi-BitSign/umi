@@ -201,6 +201,8 @@ class RewardCoordinatorConfig(StrictProtocolModel):
                     *(Path(source.directory) for source in self.legacy_model_storage),
                 )
             )
+        if self.direct_model_review is not None:
+            self.direct_model_review.policies_for(self.series, self.policy)
         direct_selected = requires_direct_model_review(
             self.series, self.policy, self.model_delivery_adoptions
         )
@@ -423,6 +425,7 @@ async def run_reward_coordinator(
                 config.policy,
                 None,
                 verification_root=root / "direct-model-byte-verification",
+                series=config.series,
             )
         )
         model_artifacts = (

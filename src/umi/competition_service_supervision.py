@@ -30,14 +30,31 @@ async def drain_server_requests(server):
     await await_owned_task(asyncio.create_task(drain()))
 
 
-async def run_supervised_server(server, providers, *, liveness_tasks=lambda: (), poll_seconds=1.0):
+async def run_supervised_server(
+    server,
+    providers,
+    *,
+    liveness_tasks=lambda: (),
+    poll_seconds=1.0,
+    begin_shutdown=lambda: None,
+):
     serving = asyncio.create_task(server.serve())
     failed = False
+    shutdown_started = False
+
+    def close_admission():
+        nonlocal shutdown_started
+        if not shutdown_started:
+            shutdown_started = True
+            begin_shutdown()
+
     try:
         # Emit the original failure before shutdown can wait on owned durable
         # cleanup. Wrapping the entire function would hide it until drain ends.
         with progress_phase("host_service"):
             while not serving.done():
+                if server.should_exit:
+                    close_admission()
                 if server.started and not server.should_exit:
                     for provider in providers:
                         provider.ensure_observer_running()
@@ -54,6 +71,7 @@ async def run_supervised_server(server, providers, *, liveness_tasks=lambda: (),
         raise
     finally:
         server.should_exit = True
+        close_admission()
         try:
             await asyncio.wait_for(asyncio.shield(serving), timeout=_SERVER_SHUTDOWN_SECONDS)
         except asyncio.TimeoutError:
@@ -77,10 +95,16 @@ def serve_with_finality_supervision(app, *, liveness_tasks=lambda: (), **options
     # Request draining is bounded; lifespan shutdown still closes the providers
     # and retains their journals. The external service manager owns restart.
     config = uvicorn.Config(app, timeout_graceful_shutdown=_REQUEST_DRAIN_SECONDS, **options)
+
+    def begin_shutdown():
+        for close in getattr(app.state, "workload_http_shutdown", ()):
+            close()
+
     asyncio.run(
         run_supervised_server(
             uvicorn.Server(config),
             app.state.finality_providers,
             liveness_tasks=liveness_tasks,
+            begin_shutdown=begin_shutdown,
         )
     )
