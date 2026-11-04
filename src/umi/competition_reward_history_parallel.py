@@ -268,12 +268,11 @@ async def _run(reader, provider, last, stop):
                 if completed is None and fields is not None:
                     entries.append((reader._next, fields, retained))
                 if not entries:
-                    # Online capture still owns native verification. Reuse its
-                    # bounded pipeline instead of serializing capture, source
-                    # persistence and export for every missing frame. A one-frame
-                    # profile must not admit lookahead.
+                    # Online capture retains serialized native verification, but
+                    # uses every admitted frame for overlapping source persistence
+                    # and export. A one-frame profile still forbids lookahead.
                     await reader._advance_capture_locked(
-                        provider, window_last, prefetch=count >= 2, stop=stop
+                        provider, window_last, maximum_in_flight=count, stop=stop
                     )
                     continue
                 if pool is None:

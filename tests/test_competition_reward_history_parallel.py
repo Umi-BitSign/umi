@@ -470,6 +470,89 @@ async def test_one_frame_byte_window_does_not_prefetch_fresh_capture(history_cas
     assert h.body_requests == requested
 
 
+@pytest.mark.parametrize("publication", ["save", "export"])
+@pytest.mark.parametrize("finish", ["success", "failure", "cancel"])
+async def test_fresh_capture_uses_full_window_and_retains_independent_deliveries(
+    history_case, monkeypatch, tmp_path, publication, finish
+):
+    h = history_case
+    first = h.reader.first_block
+    h.reader.verification_profile = profile(
+        workers=4, maximum_in_flight=4, maximum_in_flight_bytes=4 * workers.MAX_FRAME_BYTES
+    )
+    h.reader.export_archive = RewardProofArchive(tmp_path / "fresh-window-export")
+    entered, delivered = asyncio.Event(), asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    requested, exported = [], []
+    prepare, save, export = h.reader._prepare, h.reader._save, h.reader._export
+    native_active = 0
+    failure = OSError("first frame publication failed")
+
+    async def preparing(provider, height):
+        nonlocal native_active
+        native_active += 1
+        assert native_active == 1, "fresh native verification must remain serialized"
+        requested.append(height)
+        try:
+            return await prepare(provider, height)
+        finally:
+            native_active -= 1
+
+    def publishing(method, observation, *args):
+        height = observation.slot.snapshot.block_number
+        operation = save if method == "save" else export
+        if method == publication and height == first:
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(10), "admitted publication was abandoned"
+        result = operation(observation, *args)
+        if method == publication and height == first and finish == "failure":
+            raise failure  # Also cover a committed write with a lost acknowledgement.
+        if method == "export" and height != first:
+            exported.append(height)
+            if len(exported) == 3:
+                loop.call_soon_threadsafe(delivered.set)
+        return result
+
+    monkeypatch.setattr(h.reader, "_prepare", preparing)
+    monkeypatch.setattr(h.reader, "_save", lambda item: publishing("save", item))
+    monkeypatch.setattr(h.reader, "_export", lambda *args: publishing("export", *args))
+    task = asyncio.create_task(h.reader.advance(h.item.provider, through_block=h.end))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await asyncio.wait_for(delivered.wait(), 5)
+        assert requested == list(range(first, first + 4))
+        assert sorted(exported) == list(range(first + 1, first + 4))
+        assert h.reader._next == first and h.reader._tip is None
+        # Three later blocks deliver while the first frame is still blocked.
+        # No fifth frame may enter this four-frame admission window.
+        assert all(h.reader.checkpoints.load(height) is not None for height in exported)
+        if finish == "cancel":
+            task.cancel()
+            for _ in range(3):
+                await asyncio.sleep(0)
+                task.cancel()
+            assert not task.done() and h.reader._lock.locked()
+    finally:
+        release.set()
+    if finish == "success":
+        assert (await task).history is not None
+        assert requested == list(range(first, h.end + 1))
+    else:
+        with pytest.raises(asyncio.CancelledError if finish == "cancel" else OSError):
+            await task
+        assert requested == list(range(first, first + 4))
+        assert h.reader._next == first
+        assert all(h.reader.checkpoints.load(height) is not None for height in requested)
+        assert not h.reader._lock.locked() and not h.item.provider._lock.locked()
+        # Restart restores every independently completed native result. Neither
+        # a failed first export nor cancellation replays successful proof work.
+        h.offline_through = first + 3
+        h.reader = await h.restart()
+        assert (await h.reader.advance(h.item.provider, through_block=h.end)).history is not None
+        assert all(h.body_requests.count(height) == 1 for height in requested)
+
+
 async def test_parallel_windows_refresh_once_each_and_restart_checks_fresh_tip(
     parallel_case, monkeypatch
 ):
