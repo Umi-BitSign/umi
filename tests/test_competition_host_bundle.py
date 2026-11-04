@@ -177,7 +177,7 @@ def test_stage_slot_bound_rejects_before_new_directory(case):
     for index in range(bundle.MAX_HOST_STAGE_SLOTS):
         (case.root / f"retained-{index}").mkdir(mode=0o700)
     with pytest.raises(ValueError, match="slots exhausted"):
-        _stage(case)
+        _stage(case, maximum_host_stage_slots=bundle.MAX_HOST_STAGE_SLOTS)
     assert len(list(case.root.iterdir())) == bundle.MAX_HOST_STAGE_SLOTS
 
 
@@ -257,26 +257,28 @@ def test_input_metadata_rejects_mutable_nonroot_or_special_file(field, value):
         bundle._validate_input_info(SimpleNamespace(**fields), 100)
 
 
-def test_explicit_stage_capacity_preserves_retained_hosts_and_reuses_target(case):
+def test_default_capacity_preserves_retained_hosts_beyond_legacy_count(case, monkeypatch):
     retained = []
     for index in range(bundle.MAX_HOST_STAGE_SLOTS + 1):
         path = case.root / f"retained-{index}"
         path.mkdir(mode=0o700)
         (path / "recovery-binding").write_bytes(b"retain original binding")
         retained.append((path, path.stat().st_ino))
-    with pytest.raises(ValueError, match="slots exhausted"):
-        _stage(case)
-    staged = _stage(case, maximum_host_stage_slots=64)
+    staged = _stage(case)
     staged.recheck()
-    # Reusing the exact installed release does not allocate another slot, even
-    # if a later caller uses the historical smaller default.
-    assert _stage(case).path.stat().st_ino == staged.path.stat().st_ino
+    # Existing exact targets allocate nothing, even after space is exhausted or
+    # when an older caller retains the historical smaller count ceiling.
+    monkeypatch.setattr(os, "fstatvfs", lambda fd: pytest.fail("capacity checked for reuse"))
+    assert (
+        _stage(case, maximum_host_stage_slots=bundle.MAX_HOST_STAGE_SLOTS).path.stat().st_ino
+        == staged.path.stat().st_ino
+    )
     for path, inode in retained:
         assert path.stat().st_ino == inode
         assert (path / "recovery-binding").read_bytes() == b"retain original binding"
 
 
-@pytest.mark.parametrize("maximum", [0, -1, True, False, 1.5, "64", None])
+@pytest.mark.parametrize("maximum", [0, -1, True, False, 1.5, "64"])
 def test_invalid_stage_capacity_refuses_before_inputs_or_stage(case, monkeypatch, maximum):
     monkeypatch.setattr(bundle, "_input", lambda *a: pytest.fail("opened bundle"))
     with pytest.raises(ValueError, match="positive integer"):
@@ -295,4 +297,44 @@ def test_explicit_stage_capacity_still_counts_interrupted_stages(case):
 def test_explicit_capacity_does_not_relax_bundle_authentication(case):
     with pytest.raises(ValueError):
         _stage(case, maximum_host_stage_slots=64, expected_manifest_sha256="0" * 64)
+    assert not list(case.root.iterdir())
+
+
+@pytest.mark.parametrize("shortage", ["bytes", "inodes", None])
+def test_filesystem_capacity_boundary_preserves_selected_reserves(case, monkeypatch, shortage):
+    fragment = 4096
+    manifest = case.signed.manifest
+    inodes = len(manifest.files) + len(bundle._directories(manifest))
+    allocation = (
+        sum(
+            ((record.size_bytes + fragment - 1) // fragment) * fragment for record in manifest.files
+        )
+        + inodes * fragment
+    )
+    byte_reserve, inode_reserve = fragment * 10, 20
+    filesystem = SimpleNamespace(
+        f_frsize=fragment,
+        f_bsize=fragment,
+        f_bavail=(allocation + byte_reserve) // fragment - (shortage == "bytes"),
+        f_favail=inodes + inode_reserve - (shortage == "inodes"),
+    )
+    monkeypatch.setattr(os, "fstatvfs", lambda fd: filesystem)
+    kwargs = dict(minimum_free_bytes=byte_reserve, minimum_free_inodes=inode_reserve)
+    if shortage is None:
+        _stage(case, **kwargs).recheck()
+        return
+    monkeypatch.setattr(bundle, "_input", lambda *a: pytest.fail("opened rejected bundle"))
+    with pytest.raises(
+        ValueError, match="disk capacity" if shortage == "bytes" else "inode capacity"
+    ):
+        _stage(case, **kwargs)
+    assert not list(case.root.iterdir())
+
+
+@pytest.mark.parametrize("field", ["minimum_free_bytes", "minimum_free_inodes"])
+@pytest.mark.parametrize("value", [-1, True, 1.5])
+def test_invalid_reserves_refuse_before_inputs_or_stage(case, monkeypatch, field, value):
+    monkeypatch.setattr(bundle, "_input", lambda *a: pytest.fail("opened bundle"))
+    with pytest.raises(ValueError, match="reserves must be nonnegative integers"):
+        _stage(case, **{field: value})
     assert not list(case.root.iterdir())

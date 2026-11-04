@@ -593,6 +593,21 @@ def test_cli_routes_initial_command_and_bounds_errors(monkeypatch, capsys):
     assert recovery.main([*args, "--maximum-host-stage-slots", "64"]) == 0
     capsys.readouterr()
     assert seen[-1]["maximum_host_stage_slots"] == 64
+    assert (
+        recovery.main(
+            [
+                *args,
+                "--minimum-host-stage-free-bytes",
+                "4096",
+                "--minimum-host-stage-free-inodes",
+                "20",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert seen[-1]["minimum_host_stage_free_bytes"] == 4096
+    assert seen[-1]["minimum_host_stage_free_inodes"] == 20
     assert recovery.main([*args, "--legacy-marker-consent", "/marker-consent"]) == 0
     capsys.readouterr()
     assert seen[-1]["legacy_marker_consent_path"] == Path("/marker-consent")
@@ -736,18 +751,30 @@ def test_nonempty_historical_context_preserves_signed_objects(tmp_path, monkeypa
     assert canonical_json_bytes(leases[0]) == canonical_json_bytes(lease)
 
 
-def test_upgrade_forwards_explicit_stage_capacity_before_stop(flow, monkeypatch):
+@pytest.mark.parametrize("maximum", [None, 64])
+def test_upgrade_forwards_explicit_stage_capacity_before_stop(flow, monkeypatch, maximum):
     original = upgrade.stage_successor_host_bundle
     seen = []
 
     def stage(*args, **kwargs):
         assert "stop" not in flow.events
-        seen.append(kwargs["maximum_host_stage_slots"])
+        seen.append(
+            (
+                kwargs["maximum_host_stage_slots"],
+                kwargs["minimum_free_bytes"],
+                kwargs["minimum_free_inodes"],
+            )
+        )
         return original(*args, **kwargs)
 
     monkeypatch.setattr(upgrade, "stage_successor_host_bundle", stage)
-    assert upgrade.upgrade_successor_service(**flow.args, maximum_host_stage_slots=64)
-    assert seen == [64]
+    assert upgrade.upgrade_successor_service(
+        **flow.args,
+        maximum_host_stage_slots=maximum,
+        minimum_host_stage_free_bytes=4096,
+        minimum_host_stage_free_inodes=20,
+    )
+    assert seen == [(maximum, 4096, 20)]
 
 
 def test_invalid_upgrade_stage_capacity_refuses_before_layout_or_stop(flow):

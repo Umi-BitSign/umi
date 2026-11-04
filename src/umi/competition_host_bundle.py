@@ -25,8 +25,8 @@ from .protocol import canonical_json_bytes
 from .validator_supervisor import ValidatorSupervisorConfig
 
 HOST_BUNDLE_MAGIC = b"UMI-SUCCESSOR-HOST-BUNDLE-V1\0"
-# Retain installed and rollback runtimes across several cohorts without pruning
-# stages that still have service or recovery consumers.
+# Kept for callers that explicitly select the historical retention ceiling.
+# Default admission uses filesystem capacity, not a lifetime release count.
 MAX_HOST_STAGE_SLOTS = 32
 _CHUNK_BYTES = 1024 * 1024
 
@@ -137,10 +137,53 @@ def _seal_directories(root: Path, directories: tuple[str, ...]) -> None:
             os.close(descriptor)
 
 
-def validate_host_stage_slots(maximum: int) -> None:
+def validate_host_stage_slots(maximum: int | None) -> None:
     """Validate explicit local retention capacity without removing prior releases."""
-    if type(maximum) is not int or maximum < 1:
+    if maximum is not None and (type(maximum) is not int or maximum < 1):
         raise HostUpgradeError("maximum host stage slots must be a positive integer")
+
+
+def validate_host_stage_reserves(minimum_free_bytes: int, minimum_free_inodes: int) -> None:
+    if any(
+        type(value) is not int or value < 0 for value in (minimum_free_bytes, minimum_free_inodes)
+    ):
+        raise HostUpgradeError("host stage reserves must be nonnegative integers")
+
+
+def _admit_filesystem_capacity(
+    parent: int,
+    manifest: artifacts.SuccessorHostArtifactManifest,
+    directories: tuple[str, ...],
+    *,
+    minimum_free_bytes: int,
+    minimum_free_inodes: int,
+) -> None:
+    filesystem = os.fstatvfs(parent)
+    fragment = filesystem.f_frsize or filesystem.f_bsize
+    if fragment <= 0 or filesystem.f_favail < 0:
+        raise HostUpgradeError("host stage filesystem does not report usable allocation capacity")
+    inodes = len(manifest.files) + len(directories)
+    # Round each file separately and leave one additional allocation unit per
+    # file/directory for directory entries and filesystem metadata. f_bavail
+    # preserves the filesystem's own reserved blocks even for this root caller.
+    allocation = (
+        sum(
+            ((record.size_bytes + fragment - 1) // fragment) * fragment for record in manifest.files
+        )
+        + inodes * fragment
+    )
+    available = filesystem.f_bavail * fragment
+    required = allocation + minimum_free_bytes
+    if available < required:
+        raise HostUpgradeError(
+            f"host stage disk capacity insufficient: available={available}, "
+            f"allocation={allocation}, reserve={minimum_free_bytes}"
+        )
+    if filesystem.f_favail < inodes + minimum_free_inodes:
+        raise HostUpgradeError(
+            f"host stage inode capacity insufficient: available={filesystem.f_favail}, "
+            f"allocation={inodes}, reserve={minimum_free_inodes}"
+        )
 
 
 def stage_successor_host_bundle(
@@ -149,11 +192,14 @@ def stage_successor_host_bundle(
     signed: artifacts.SignedSuccessorHostArtifact,
     config: ValidatorSupervisorConfig,
     expected_manifest_sha256: str,
-    maximum_host_stage_slots: int = MAX_HOST_STAGE_SLOTS,
+    maximum_host_stage_slots: int | None = None,
+    minimum_free_bytes: int = 0,
+    minimum_free_inodes: int = 0,
 ) -> artifacts.VerifiedHostTree:
     """Stage or verify one exact host revision; never execute or switch it."""
     _require_root_linux()
     validate_host_stage_slots(maximum_host_stage_slots)
+    validate_host_stage_reserves(minimum_free_bytes, minimum_free_inodes)
     signed = artifacts.parse_signed_host_artifact(canonical_json_bytes(signed))
     config = ValidatorSupervisorConfig.model_validate_json(canonical_json_bytes(config))
     artifacts.verify_host_artifact_authority(
@@ -192,13 +238,21 @@ def stage_successor_host_bundle(
                 expected_manifest_sha256=expected_manifest_sha256,
                 stage_root=target,
             )
-        with os.scandir(parent) as entries:
-            for count, _ in enumerate(entries, 1):
-                if count >= maximum_host_stage_slots:
-                    raise HostUpgradeError(
-                        "host stage slots exhausted; preserve retained stages and select "
-                        "an explicit larger maximum_host_stage_slots after capacity review"
-                    )
+        if maximum_host_stage_slots is not None:
+            with os.scandir(parent) as entries:
+                for count, _ in enumerate(entries, 1):
+                    if count >= maximum_host_stage_slots:
+                        raise HostUpgradeError(
+                            "host stage slots exhausted; preserve retained stages and select "
+                            "an explicit larger maximum_host_stage_slots after capacity review"
+                        )
+        _admit_filesystem_capacity(
+            parent,
+            signed.manifest,
+            directories,
+            minimum_free_bytes=minimum_free_bytes,
+            minimum_free_inodes=minimum_free_inodes,
+        )
         bundle, original = _input(
             bundle_path, len(HOST_BUNDLE_MAGIC) + signed.manifest.total_size_bytes
         )
