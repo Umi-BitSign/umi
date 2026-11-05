@@ -812,7 +812,7 @@ async def test_service_boot_preserves_successor_predecessor_owner(service_case, 
     async def collect(_hotkey):
         return SimpleNamespace(snapshot=SimpleNamespace(block_number=1000))
 
-    async def prepare(*_args):
+    async def prepare(*_args, coverage=None):
         return c.prepared
 
     async def run_coverage(self, stop, *, poll_seconds):
@@ -1003,7 +1003,7 @@ async def test_service_reports_failed_stage_and_recovers_without_reset(
             assert hotkey == c.series.control_hotkey
             return SimpleNamespace(snapshot=SimpleNamespace(block_number=1000))
 
-        async def prepare(*args):
+        async def prepare(*args, coverage=None):
             return c.prepared
 
         c.provider.collect_control = collect
@@ -1093,7 +1093,7 @@ async def test_service_boot_retries_before_handoff_and_keeps_replay_target(
         captures.append(1000 + len(captures))
         return SimpleNamespace(snapshot=SimpleNamespace(block_number=captures[-1]))
 
-    async def prepare(*args):
+    async def prepare(*args, coverage=None):
         assert c.current_runtime._standing_handoff_intent() is None
         assert not c.executors and "signer" not in c.events
         targets.append(args[-2])
@@ -1127,7 +1127,7 @@ async def test_service_stop_during_boot_preserves_old_handoff_state(service_case
     async def collect(hotkey):
         return SimpleNamespace(snapshot=SimpleNamespace(block_number=1000))
 
-    async def prepare(*args):
+    async def prepare(*args, coverage=None):
         c.stop.set()
         return c.prepared
 
@@ -1158,7 +1158,7 @@ async def test_slow_boot_continues_c4_and_feed_failure_does_not_block_c5(
     async def collect(hotkey):
         return SimpleNamespace(snapshot=SimpleNamespace(block_number=1000))
 
-    async def prepare(*args):
+    async def prepare(*args, coverage=None):
         await asyncio.wait_for(reconciled.wait(), timeout=2)
         assert c.current_runtime._standing_handoff_intent() is None
         assert "signer" not in c.events
