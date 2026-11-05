@@ -232,6 +232,7 @@ class CpuTimingSession:
         if self.measurement_semantics not in {
             "umi-exclusive-cold-model-cpu-timing/1",
             "umi-exclusive-cold-model-cpu-timing/2",
+            "umi-exclusive-cold-model-cpu-timing/3",
         }:
             _error("cpu_timing_measurement_semantics_mismatch")
         self._sampler = None
@@ -301,7 +302,7 @@ class CpuTimingSession:
                 proc_stat_path=proc_stat_path,
                 schedstat_path=(
                     schedstat_path
-                    if self.measurement_semantics == "umi-exclusive-cold-model-cpu-timing/2"
+                    if self.measurement_semantics != "umi-exclusive-cold-model-cpu-timing/1"
                     else None
                 ),
             )
@@ -438,6 +439,7 @@ class CpuTimingSession:
             limits=cpu_timing_limits_v1(),
             conditions=self._condition_evidence,
             bundle_cache=bundle_cache,
+            measurement_semantics=self.measurement_semantics,
         )
 
     def close(self):

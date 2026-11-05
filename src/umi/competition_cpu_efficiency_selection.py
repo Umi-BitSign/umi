@@ -6,6 +6,7 @@ from .competition_cpu_efficiency_adoption import MAX_CPU_ADOPTION_BYTES
 from .competition_cpu_efficiency_policy import (
     CURRENT_CPU_MEASUREMENT,
     LEGACY_CPU_MEASUREMENT,
+    SCHEDULER_CPU_MEASUREMENT,
     SignedCohortCpuEfficiencyAdoption,
     cpu_adoption_slot,
     verify_cpu_efficiency_adoption_selection,
@@ -22,7 +23,11 @@ def selected_cpu_efficiency_adoption(
         return None
     selected = inline
     if directory is not None:
-        for semantics in (CURRENT_CPU_MEASUREMENT, LEGACY_CPU_MEASUREMENT):
+        for semantics in (
+            CURRENT_CPU_MEASUREMENT,
+            SCHEDULER_CPU_MEASUREMENT,
+            LEGACY_CPU_MEASUREMENT,
+        ):
             path = Path(directory) / (cpu_adoption_slot(digest(authority), semantics) + ".json")
             if not path.exists() and not path.is_symlink():
                 continue

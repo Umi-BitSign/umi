@@ -206,9 +206,9 @@ def cpu_timing_limits_v1() -> CpuTimingLimits:
 
 
 class CpuTimingEvidence(StrictProtocolModel):
-    schema_: Literal["umi-cpu-timing-evidence/1", "umi-cpu-timing-evidence/2"] = Field(
-        alias="schema"
-    )
+    schema_: Literal[
+        "umi-cpu-timing-evidence/1", "umi-cpu-timing-evidence/2", "umi-cpu-timing-evidence/3"
+    ] = Field(alias="schema")
     contract_sha256: Hex32
     context: CpuTimingContext
     before: CpuSchedulerTimingSample | CpuTimingSample
@@ -228,9 +228,20 @@ class CpuTimingEvidence(StrictProtocolModel):
     def speed_elapsed_ms(self) -> int:
         return (self.finished_monotonic_us - self.model_started_monotonic_us + 999) // 1000
 
+    @property
+    def efficiency_cost_ms(self) -> int:
+        if self.schema_ != "umi-cpu-timing-evidence/3":
+            return self.speed_elapsed_ms
+        # Aggregate CPU time includes user/system work in every descendant.
+        # Express it in full-allocation milliseconds so the existing execution
+        # deadline remains a comparable conservative failed-case charge.
+        usage = _delta(self.after.cgroup_usage_usec, self.before.cgroup_usage_usec)
+        scale = len(self.context.cpu_ids) * 1000
+        return (usage + scale - 1) // scale
+
     @model_validator(mode="after")
     def preserved_context(self):
-        scheduler = self.schema_ == "umi-cpu-timing-evidence/2"
+        scheduler = self.schema_ in {"umi-cpu-timing-evidence/2", "umi-cpu-timing-evidence/3"}
         if any(
             isinstance(sample, CpuSchedulerTimingSample) != scheduler
             for sample in (self.before, self.after)
@@ -279,7 +290,7 @@ def timing_accounting(evidence: CpuTimingEvidence) -> dict[str, int]:
     busy = delta["busy"] * 1_000_000 // ticks
     total = delta["total"] * 1_000_000 // ticks
     steal = delta["steal"] * 1_000_000 // ticks
-    if evidence.schema_ == "umi-cpu-timing-evidence/2":
+    if evidence.schema_ in {"umi-cpu-timing-evidence/2", "umi-cpu-timing-evidence/3"}:
         busy = (
             sum(
                 _delta(right, left)
@@ -333,6 +344,7 @@ def validate_cpu_timing(
         expected_schema = {
             "umi-exclusive-cold-model-cpu-timing/1": "umi-cpu-timing-evidence/1",
             "umi-exclusive-cold-model-cpu-timing/2": "umi-cpu-timing-evidence/2",
+            "umi-exclusive-cold-model-cpu-timing/3": "umi-cpu-timing-evidence/3",
         }.get(measurement_semantics)
         if evidence.schema_ != expected_schema:
             _fail("cpu_timing_measurement_semantics_mismatch")
@@ -411,7 +423,11 @@ def comparable_cpu_timings(candidate, baseline):
             )
         except (AttributeError, ValueError) as error:
             raise CpuTimingInfrastructureError("cpu_timing_invalid_bundle_cache") from error
-    comparable_conditions(candidate.conditions, baseline.conditions)
+    comparable_conditions(
+        candidate.conditions,
+        baseline.conditions,
+        cpu_work_only=candidate.schema_ == "umi-cpu-timing-evidence/3",
+    )
 
 
 def validate_runtime_resources(context, *, cpus, memory_bytes):
@@ -437,11 +453,14 @@ def finish_cpu_timing(
     model_started_monotonic_us=None,
     conditions,
     bundle_cache=None,
+    measurement_semantics=None,
 ):
     try:
         value = CpuTimingEvidence(
             schema=(
-                "umi-cpu-timing-evidence/2"
+                "umi-cpu-timing-evidence/3"
+                if measurement_semantics == "umi-exclusive-cold-model-cpu-timing/3"
+                else "umi-cpu-timing-evidence/2"
                 if isinstance(before, CpuSchedulerTimingSample)
                 else "umi-cpu-timing-evidence/1"
             ),
@@ -463,7 +482,11 @@ def finish_cpu_timing(
     except ValueError as error:
         raise CpuTimingInfrastructureError("cpu_timing_invalid_observed_context") from error
     validate_cpu_timing(
-        value, contract_sha256=contract_sha256, profile_sha256=context.profile_sha256, limits=limits
+        value,
+        contract_sha256=contract_sha256,
+        profile_sha256=context.profile_sha256,
+        limits=limits,
+        measurement_semantics=measurement_semantics,
     )
     return value
 

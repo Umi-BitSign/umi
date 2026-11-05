@@ -81,9 +81,12 @@ def intake_readiness(
         if observation.block < state.observed_at_block:
             raise ValueError("intake finality predates its published history")
         _, pending = store.status(cohort)
+        window = intake.refresh_admission_window(history, store)
         if state.phase != "intake":
             reason = "phase_closed"
-        elif observation.block < state.not_before_block:
+        elif (
+            window is not None and not window["new_admissions_open"]
+        ) or observation.block < state.not_before_block:
             reason = "before_start"
         elif (pending is not None and pending.is_policy_adoption) or intake._seal(
             db, history, history_tip(history)

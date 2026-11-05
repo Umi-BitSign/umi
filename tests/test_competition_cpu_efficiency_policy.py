@@ -454,7 +454,11 @@ def test_default_proposal_uses_current_authority_scope_and_actual_runtime(
         reason=adoption.adoption.reason,
     )
     assert body == adoption.adoption.model_copy(
-        update={"measurement_semantics": "umi-exclusive-cold-model-cpu-timing/2"}
+        update={
+            "measurement_semantics": "umi-exclusive-cold-model-cpu-timing/3",
+            "reward_rule": "cold_cpu_relative_work/1",
+            "timing_rule": "cold_model_cgroup_cpu_to_validated_result/1",
+        }
     )
     assert canonical_json_bytes(authority) == original
     current = default_cpu_efficiency_proposal(
@@ -477,7 +481,7 @@ def test_default_proposal_uses_current_authority_scope_and_actual_runtime(
         sequence=8,
         prepared_at_block=current.issued_at_block,
     )
-    assert capability.measurement_semantics == "umi-exclusive-cold-model-cpu-timing/2"
+    assert capability.measurement_semantics == "umi-exclusive-cold-model-cpu-timing/3"
     assert _binding(capability) != _binding(
         replace(capability, measurement_semantics="umi-exclusive-cold-model-cpu-timing/1")
     )

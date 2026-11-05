@@ -105,10 +105,10 @@ def timed_execution(step, runtime, contract, elapsed_ms, version=1):
         finished_monotonic_us=before.finished_us + elapsed_ms * 1000,
         launch_gate_elapsed_us=1,
     )
-    if version == 2:
+    if version >= 2:
         timing = timing.model_copy(
             update={
-                "schema_": "umi-cpu-timing-evidence/2",
+                "schema_": f"umi-cpu-timing-evidence/{version}",
                 "before": CpuSchedulerTimingSample(
                     **timing.before.model_dump(),
                     scheduler_runtime_ns=(0, 0),
@@ -131,7 +131,7 @@ def timed_execution(step, runtime, contract, elapsed_ms, version=1):
     )
 
 
-@pytest.fixture(params=[1, 2])
+@pytest.fixture(params=[1, 2, 3])
 async def pipeline_case(receipt_scenario, tmp_path, runtime, monkeypatch, request):
     version = request.param
     native_setup = model_fixtures.setup_scenario
@@ -187,6 +187,12 @@ async def pipeline_case(receipt_scenario, tmp_path, runtime, monkeypatch, reques
                 issued_at_block=200,
                 reason="Prospective synthetic CPU timing integration fixture",
                 measurement_semantics=f"umi-exclusive-cold-model-cpu-timing/{version}",
+                reward_rule="cold_cpu_relative_work/1"
+                if version == 3
+                else "cold_cpu_relative_latency/1",
+                timing_rule="cold_model_cgroup_cpu_to_validated_result/1"
+                if version == 3
+                else "cold_model_exec_to_validated_result/1",
             )
             s["round_"] = s["round_"].model_copy(
                 update={

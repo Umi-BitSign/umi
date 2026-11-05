@@ -111,7 +111,11 @@ async def _authorize_direct_model_delivery(intake, request, capture):
     """Reject closed new reservations before collecting registration evidence."""
     status = intake.admission_status(request.consent.consent.cohort_sha256)
     if status is not None and not status["new_admissions_open"]:
-        raise CohortAdmissionClosed("new cohort admissions are closed by the operator deadline")
+        retained = await run_owned_thread(intake.has_admission_permit, request)
+        if not retained:
+            raise CohortAdmissionClosed(
+                "new cohort admissions are outside the active intake window"
+            )
     observed = await capture()
     await run_owned_thread(
         partial(

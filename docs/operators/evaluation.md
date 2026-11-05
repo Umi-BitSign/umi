@@ -1144,3 +1144,29 @@ The existing Darwin finality-only artifact does not include a storage-proof
 verifier. Historical admission therefore needs separately qualified artifacts
 for the selected host target before this configuration can be deployed there.
 A unit-test pass alone does not qualify those artifacts or the running miner.
+
+### Sequential model intake
+
+Set `recoverable_intake.sequential_intake_from_sequence` to `8` in the selected
+intake configuration. Keep the predecessor and successors in its supported
+cohort bindings. The native admission owner opens each successor only after the
+predecessor's authenticated request phase, using retained state without RPC from
+public progress polling. Existing exact admission permits and participation
+records survive activation and restart. Deadline closure remains independent.
+Keep this setting when extending the configured cohort series; no per-cohort
+timer or manual reopening is required. Older configurations omit the field and
+retain their historical behavior until the supported configuration handoff.
+
+### CPU-work efficiency contract
+
+New CPU-efficiency proposals use measurement semantics
+`umi-exclusive-cold-model-cpu-timing/3`. They count the isolated model process
+tree's user and system CPU consumption. The fixed allocation converts this to
+full-core milliseconds for the matched-case calculation; operational elapsed
+deadlines still apply. Compare the fixed probes' aggregate thread CPU work with
+the unchanged 10% tolerance. Retain probe wall times for diagnostics, but do not
+use them to gate CPU-work comparability. All resource, cache, accounting, external
+contention and runtime identity checks remain required. A v3 contract needs
+its own signatures and host qualification; v1/v2 evidence keeps its original
+semantics and cannot be relabeled. Deliver v3 to every execution and replay
+consumer before selecting it. A signed contract does not start challenges.

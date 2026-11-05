@@ -43,8 +43,9 @@ from .test_competition_cpu_efficiency_policy import (
 )
 
 
-def test_v2_selection_keeps_v1_bytes_and_rejects_bad_successor(
-    scenario, policy, adoption, runtime_adoption, tmp_path
+@pytest.mark.parametrize("version", [2, 3])
+def test_versioned_selection_keeps_v1_bytes_and_rejects_bad_successor(
+    scenario, policy, adoption, runtime_adoption, tmp_path, version
 ):
     from umi.competition_cpu_efficiency_policy import (
         SignedCohortCpuEfficiencyAdoption,
@@ -58,7 +59,15 @@ def test_v2_selection_keeps_v1_bytes_and_rejects_bad_successor(
     publish_private_model(legacy, adoption)
     original = legacy.read_bytes()
     body = adoption.adoption.model_copy(
-        update={"measurement_semantics": "umi-exclusive-cold-model-cpu-timing/2"}
+        update={
+            "measurement_semantics": f"umi-exclusive-cold-model-cpu-timing/{version}",
+            "reward_rule": "cold_cpu_relative_work/1"
+            if version == 3
+            else "cold_cpu_relative_latency/1",
+            "timing_rule": "cold_model_cgroup_cpu_to_validated_result/1"
+            if version == 3
+            else "cold_model_exec_to_validated_result/1",
+        }
     )
     successor = SignedCohortCpuEfficiencyAdoption(adoption=body, signatures=signatures(body))
     path = directory / (

@@ -149,12 +149,15 @@ def selected_host(tmp_path):
     os.close(descriptor)
 
 
-def test_v2_session_requires_scheduler_counters_and_a_distinct_profile(selected_host):
+@pytest.mark.parametrize("version", [2, 3])
+def test_versioned_session_requires_scheduler_counters_and_a_distinct_profile(
+    selected_host, version
+):
     from umi.competition_cpu_timing import CpuSchedulerTimingSample
 
     fixture = selected_host
     original = host.measurement_profile_sha256(fixture.profile, fixture.runtime)
-    fixture.authorization.measurement_semantics = "umi-exclusive-cold-model-cpu-timing/2"
+    fixture.authorization.measurement_semantics = f"umi-exclusive-cold-model-cpu-timing/{version}"
     (fixture.proc / "schedstat").write_text(
         "version 15\ntimestamp 1\ncpu0 0 0 0 0 0 0 1234567 0 1\ncpu1 0 0 0 0 0 0 2345678 0 1\n"
     )
