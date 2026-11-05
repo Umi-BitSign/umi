@@ -21,6 +21,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
+from .competition_actor_credentials import selected_process_credentials
 from .competition_cohort_intake import CohortIntakeBinding
 from .competition_cohort_model_batch import (
     SignedModelBatchCertificationAdoption,
@@ -362,10 +363,19 @@ def actor_publication(target, request, signed=None, *, check_only=False, _action
         "check_only": check_only,
     }
     command = [sys.executable, "-I", "-B", "-c", code]
-    if pwd.getpwuid(os.getuid()).pw_name != target.service_account:
+    credentials = {}
+    if os.geteuid() == 0:
+        selected = check_target_process(target)
+        credentials = selected_process_credentials(
+            selected["pid"], pwd.getpwnam(target.service_account).pw_uid
+        )
+        if check_target_process(target) != selected:
+            raise ModelBatchAdoptionRefused("selected actor changed during credential capture")
+    elif pwd.getpwuid(os.getuid()).pw_name != target.service_account:
         command = ["sudo", "-n", "-u", target.service_account, "--", *command]
     result = subprocess.run(
-        command, input=canonical_json_bytes(payload), capture_output=True, timeout=30
+        command, input=canonical_json_bytes(payload), capture_output=True, timeout=30,
+        **credentials,
     )
     if len(result.stdout) > 16384:
         raise ModelBatchAdoptionRefused("batch adoption actor response exceeds its bound")

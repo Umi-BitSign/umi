@@ -22,6 +22,7 @@
     "canonical_stream.py": "b3185e8a6b66e6982b850ef25f11c05050e0f6413faa1b45c07726f5cac7619e",
     "chain.py": "ea37d85c2a2d7713ccd6e1e9861855584d8d417bbb47681a9084ea9a474524db",
     "chain_evidence.py": "4a72f1316a718dada75e98e3998c2a8f886a525ced042a08a9da11985ce7540c",
+    "competition_actor_credentials.py": "ea45df0059b85b1f42fd0db0c9456de6f1df4e4db31c1817fa5f461582b2b90c",
     "competition_adapter_history.py": "27459d7af2a498c2e2995c19d3f101339d35bb50c25c98fe423ce64bd7a5e9a3",
     "competition_aggregate_replica_binding.py": "f20434dcad6a04a3ea3f3be72366e3e8ccbc1c82511f4792f2b2cfecf511fe15",
     "competition_api.py": "afe0df50b234efb8652b05ed46d44d8af82ef9955e5bdd31fb17d7d551bfc81f",
@@ -128,7 +129,7 @@
     "competition_cohort_model_batch.py": "286387095a8eaa0d45f34cae3c824add3a5303ced2d5c53e0397815c7eeeeba5",
     "competition_cohort_model_batch_adoption.py": "0c0f9dccaa5be5a5961adc8ad217544b6ebbea66ddb6f0b462341d828c0c3f34",
     "competition_cohort_model_batch_adoption_cli.py": "07970e6012cc3137f8d668eca5ee947b2e45a0710708b660d69a47d3a8f3bf17",
-    "competition_cohort_model_batch_adoption_operator.py": "e313be5131020c5e5a2c37d6d07c18fbf52e11fd97f1fe5b24198b94a46dd271",
+    "competition_cohort_model_batch_adoption_operator.py": "34dc79b41d19a254df30c834bd1d99d6df0edb99bf573374075a561e4eb5f048",
     "competition_cohort_model_batch_adoption_series.py": "02c96063574e27b41c69b848bdc1947e7f7d88744fbc37b61464e156fdeeed92",
     "competition_cohort_model_batch_review.py": "a3e0c27750e7c7c0dd998936b85257c5a44542f8f50afe948fc45b01190c8498",
     "competition_cohort_model_batch_store.py": "ee4c027274cc6c93ec9c6d7cbf6082ea1af4de7000af560694aae5b073fcb235",
@@ -658,6 +659,7 @@
     "historical_header_recovery.py": "f176f666913b88137cb1e15a6efb957e93774c2392e8267bfad40a9291bd309a",
     "host_cpu_cgroupfs.py": "c30d847729d3b6bf03786318faab6667bf7cbda1c58d1a81ab86b74027fef437",
     "host_cpu_conditions.py": "5848126bd6f0f49208a49b5fb8584eb16c6e6ff5e1925d25a64efdc8548c5d72",
+    "host_cpu_probe.py": "9de38b1d45875cd4217324c20d817097ad1bcf6a56290288a3ee4a7333314891",
     "host_cpu_timing.py": "78e3ec6d11b60bde18746e9c997bf5f0fe3c7f5d6c75258fc45d3df879768bd4",
     "host_execution_memory.py": "1afdfd043bccda78eae33008f9392b3d741ed26bf67e0c91ea9e2aa84defad44",
     "host_memory_admission.py": "206a24c3642af11ab1a6af824f3ef18e18c54a68a63b2c9a129cdea90b952b1f",
@@ -753,8 +755,7 @@
     "validator_transcript_effects.py": "e7e8ec2cd72b01d5decc8173aa9b6284c0f0fb1be0ba35f707b8f46b10390e47",
     "video.py": "dba863c934267fe565bea65914644da8cc1d43f6b661c494521c80a7504ebf4b",
     "weight_storage.py": "5959225e2c57c7895b7762a86df717d09eea4e9f07cd6d56978767a6d22d15a8",
-    "window.py": "b5e7b682e5a4bf3fafc5115aa3d1375fa2b2e981b5e028a2ae1be27d55eb22c6",
-    "host_cpu_probe.py": "9de38b1d45875cd4217324c20d817097ad1bcf6a56290288a3ee4a7333314891"
+    "window.py": "b5e7b682e5a4bf3fafc5115aa3d1375fa2b2e981b5e028a2ae1be27d55eb22c6"
   },
   "external_distributions": {
     "annotated-doc": [

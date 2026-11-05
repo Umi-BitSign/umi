@@ -1161,6 +1161,15 @@ retain their historical behavior until the supported configuration handoff.
 
 ### CPU-work efficiency contract
 
+Root-run adoption publishers inherit the selected actor's actual Unix UID,
+primary group and supplementary groups. This includes groups assigned only by
+systemd. Publication checks the running service/configuration before delegation
+and again inside the actor; a changed process requires an exact retry. The
+publisher does not change account memberships or directory permissions. Deploy
+the updated publisher through the supported source-maintenance path before
+publishing to actors whose configuration requires a service-only group. Existing
+signed requests, contracts and completed host measurements remain reusable.
+
 New CPU-efficiency proposals use measurement semantics
 `umi-exclusive-cold-model-cpu-timing/3`. They count the isolated model process
 tree's user and system CPU consumption. The fixed allocation converts this to
