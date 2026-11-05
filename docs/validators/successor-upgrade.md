@@ -160,6 +160,12 @@ selection and restoration dependencies until every reader using them has moved.
 
 ### CPU-efficiency readers
 
+Scheduler-based timing requires readers for `umi-cpu-timing-evidence/2` and the
+signed `umi-exclusive-cold-model-cpu-timing/2` measurement semantics in every
+execution, certification and reward-replay consumer. Upgrade those readers
+before selecting the new contract and qualifying its host profile. Preserve v1
+adoptions and evidence unchanged; their historical validation remains supported.
+
 CPU-efficiency adoption from cohort sequence 8 is a prospective reader-first
 transition. Preserve historical signed inputs, timing evidence and reward behavior.
 Do not attach the contract to an already prepared round or infer timing from historical

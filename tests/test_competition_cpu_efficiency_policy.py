@@ -453,7 +453,9 @@ def test_default_proposal_uses_current_authority_scope_and_actual_runtime(
         issued_at_block=adoption.adoption.issued_at_block,
         reason=adoption.adoption.reason,
     )
-    assert body == adoption.adoption
+    assert body == adoption.adoption.model_copy(
+        update={"measurement_semantics": "umi-exclusive-cold-model-cpu-timing/2"}
+    )
     assert canonical_json_bytes(authority) == original
     current = default_cpu_efficiency_proposal(
         policy=policy,
@@ -466,6 +468,18 @@ def test_default_proposal_uses_current_authority_scope_and_actual_runtime(
     signed = SignedCohortCpuEfficiencyAdoption(adoption=current, signatures=signatures(current))
     verify_cpu_efficiency_adoption_selection(
         signed, policy=policy, authority=authority, runtime_sha256=current.runtime_sha256
+    )
+    from umi.competition_cpu_efficiency_policy import _authorized, _binding
+
+    capability = _authorized(
+        current,
+        cohort_sha256=current.cohort_sha256s[0],
+        sequence=8,
+        prepared_at_block=current.issued_at_block,
+    )
+    assert capability.measurement_semantics == "umi-exclusive-cold-model-cpu-timing/2"
+    assert _binding(capability) != _binding(
+        replace(capability, measurement_semantics="umi-exclusive-cold-model-cpu-timing/1")
     )
     with pytest.raises(ValueError, match="issuance window"):
         default_cpu_efficiency_proposal(

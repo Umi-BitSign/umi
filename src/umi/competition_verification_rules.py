@@ -20,6 +20,7 @@ VERIFICATION_SEMANTICS = "umi-native-request-verification/1"
 # remains true for unchanged /1 bytes; never invalidate all completed work just
 # because a new, previously unaccepted evidence format becomes readable.
 VERIFICATION_EXTENSIONS = {
+    "cpu_scheduler_timing_v2": "umi-exclusive-cold-model-cpu-timing/2",
     "archived_execution_shared_incumbent_v2": "umi-native-shared-incumbent/2",
     "shared_incumbent_source_terminal_v2": "umi-native-shared-incumbent/2",
     "shared_incumbent_source_participant_v2": "umi-native-shared-incumbent/2",

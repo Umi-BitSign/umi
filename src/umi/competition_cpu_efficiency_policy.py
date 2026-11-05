@@ -44,9 +44,9 @@ class CohortCpuEfficiencyAdoption(StrictProtocolModel):
     multiplier_precision_ppm: Literal[1000000] = 1000000
     multiplier_rounding_rule: Literal["floor_integer_tenth_root/1"] = "floor_integer_tenth_root/1"
     elapsed_floor_ms: Literal[1] = 1
-    measurement_semantics: Literal["umi-exclusive-cold-model-cpu-timing/1"] = (
-        "umi-exclusive-cold-model-cpu-timing/1"
-    )
+    measurement_semantics: Literal[
+        "umi-exclusive-cold-model-cpu-timing/1", "umi-exclusive-cold-model-cpu-timing/2"
+    ] = "umi-exclusive-cold-model-cpu-timing/1"
     bundle_cache_rule: Literal["verified_bundle_pagecache_eviction/1"] = (
         "verified_bundle_pagecache_eviction/1"
     )
@@ -116,6 +116,7 @@ def default_cpu_efficiency_proposal(
         runtime_sha256=runtime_sha256,
         issued_at_block=issued,
         reason=reason,
+        measurement_semantics="umi-exclusive-cold-model-cpu-timing/2",
     )
 
 
@@ -150,6 +151,7 @@ class AuthorizedCpuEfficiency:
     adoption_sha256: str
     _issuer: object = field(default=None, repr=False, compare=False)
     _binding: str = field(default="", repr=False, compare=False)
+    measurement_semantics: str = "umi-exclusive-cold-model-cpu-timing/1"
 
 
 def _binding(value):
@@ -162,6 +164,7 @@ def _binding(value):
             value.runtime_sha256,
             value.prepared_at_block,
             value.adoption_sha256,
+            value.measurement_semantics,
         ]
     )
 
@@ -176,6 +179,7 @@ def _authorized(body, *, cohort_sha256, sequence, prepared_at_block):
         prepared_at_block,
         digest(body),
         _ISSUER,
+        measurement_semantics=body.measurement_semantics,
     )
     object.__setattr__(value, "_binding", _binding(value))
     return value

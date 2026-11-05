@@ -2523,6 +2523,22 @@ noise limits are 100 basis points external CPU activity, 50 basis points steal,
 disagreement. Infrastructure/noise invalidations are held for explicit retry or
 repair; they are not scored as a model failure or silently assigned neutral speed.
 
+New contracts select `umi-exclusive-cold-model-cpu-timing/2`. This records
+per-CPU scheduler runtime from `/proc/schedstat` alongside the existing cgroup
+usage and `/proc/stat` steal counters. Tick-based user/system counters can
+undercount execution on Linux; they are retained as diagnostics, not used to
+reconcile scheduler runtime. The clock check compares monotonic elapsed time
+with `CLOCK_MONOTONIC_RAW` over the same bounded snapshots. The external-busy,
+steal, clock-disagreement and probe tolerances are unchanged. Counter resets,
+missing scheduler counters, impossible CPU usage and incompatible evidence
+versions remain infrastructure errors.
+
+The selected signed contract controls this version. Install compatible evaluator,
+certification and replay readers before selecting a v2 contract, then qualify a
+new host profile under that contract. Do not rewrite an existing signed adoption
+or completed measurement. Retained v1 evidence keeps its original tick accounting
+and canonical bytes; candidate/reference comparisons cannot mix versions.
+
 Capacity checks include the complete timing record: both CPU samples, repeated
 contexts, eight-CPU probes, pressure observations and the bundle-cache receipt.
 The cohort journal reserves 48 KiB separately for the pending result and finished

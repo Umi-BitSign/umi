@@ -142,10 +142,33 @@ def selected_host(tmp_path):
             cpu_root=cpus,
             cpuinfo_path=proc / "cpuinfo",
             proc_stat_path=proc / "stat",
+            schedstat_path=proc / "schedstat",
         )
 
     yield SimpleNamespace(**locals())
     os.close(descriptor)
+
+
+def test_v2_session_requires_scheduler_counters_and_a_distinct_profile(selected_host):
+    from umi.competition_cpu_timing import CpuSchedulerTimingSample
+
+    fixture = selected_host
+    original = host.measurement_profile_sha256(fixture.profile, fixture.runtime)
+    fixture.authorization.measurement_semantics = "umi-exclusive-cold-model-cpu-timing/2"
+    (fixture.proc / "schedstat").write_text(
+        "version 15\ntimestamp 1\ncpu0 0 0 0 0 0 0 1234567 0 1\ncpu1 0 0 0 0 0 0 2345678 0 1\n"
+    )
+    session = fixture.start()
+    try:
+        observed = session.sample()
+        assert isinstance(observed, CpuSchedulerTimingSample)
+        assert observed.scheduler_runtime_ns == (1234567, 2345678)
+        assert observed.context.profile_sha256 != original
+        (fixture.proc / "schedstat").unlink()
+        with pytest.raises(host.CpuTimingInfrastructureError, match="kernel_sample_unavailable"):
+            session.sample()
+    finally:
+        session.close()
 
 
 def test_session_uses_existing_owned_slot_without_allocating_another(selected_host):

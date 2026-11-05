@@ -37,7 +37,7 @@ from umi.competition_cpu_efficiency_policy import (
     CohortCpuEfficiencyAdoption,
     SignedCohortCpuEfficiencyAdoption,
 )
-from umi.competition_cpu_timing import CpuTimingEvidence
+from umi.competition_cpu_timing import CpuSchedulerTimingSample, CpuTimingEvidence
 from umi.competition_geometric_rewards import cohort_reward_parameters
 from umi.competition_reward_adoption import (
     RewardAdoptionSelection,
@@ -81,7 +81,7 @@ class PipelinePackage(BaseModel):
     benchmark: CohortQualityManifest
 
 
-def timed_execution(step, runtime, contract, elapsed_ms):
+def timed_execution(step, runtime, contract, elapsed_ms, version=1):
     ctx = context(memory_max_bytes=runtime.memory_bytes)
     before = sample(ctx)
     timing = CpuTimingEvidence(
@@ -105,6 +105,22 @@ def timed_execution(step, runtime, contract, elapsed_ms):
         finished_monotonic_us=before.finished_us + elapsed_ms * 1000,
         launch_gate_elapsed_us=1,
     )
+    if version == 2:
+        timing = timing.model_copy(
+            update={
+                "schema_": "umi-cpu-timing-evidence/2",
+                "before": CpuSchedulerTimingSample(
+                    **timing.before.model_dump(),
+                    scheduler_runtime_ns=(0, 0),
+                    raw_monotonic_us=before.finished_us,
+                ),
+                "after": CpuSchedulerTimingSample(
+                    **timing.after.model_dump(),
+                    scheduler_runtime_ns=(elapsed_ms * 500_000, elapsed_ms * 500_000),
+                    raw_monotonic_us=before.finished_us + elapsed_ms * 1000,
+                ),
+            }
+        )
     return step.execution.model_copy(
         update={
             "schema_": "umi-offline-case-execution/2",
@@ -115,8 +131,9 @@ def timed_execution(step, runtime, contract, elapsed_ms):
     )
 
 
-@pytest.fixture
-async def pipeline_case(receipt_scenario, tmp_path, runtime, monkeypatch):
+@pytest.fixture(params=[1, 2])
+async def pipeline_case(receipt_scenario, tmp_path, runtime, monkeypatch, request):
+    version = request.param
     native_setup = model_fixtures.setup_scenario
     native_closure = model_fixtures.closure_fixture
     timed = receipt_scenario["history"].plan.sequence >= 8
@@ -169,6 +186,7 @@ async def pipeline_case(receipt_scenario, tmp_path, runtime, monkeypatch):
                 runtime_sha256=digest(runtime),
                 issued_at_block=200,
                 reason="Prospective synthetic CPU timing integration fixture",
+                measurement_semantics=f"umi-exclusive-cold-model-cpu-timing/{version}",
             )
             s["round_"] = s["round_"].model_copy(
                 update={
@@ -216,6 +234,7 @@ async def pipeline_case(receipt_scenario, tmp_path, runtime, monkeypatch):
                                     runtime,
                                     digest(artifact.job.round.cpu_efficiency_adoption.adoption),
                                     duration,
+                                    version,
                                 )
                             }
                         )

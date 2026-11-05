@@ -176,6 +176,24 @@ class CpuTimingLimits(StrictProtocolModel):
     maximum_clock_disagreement_bps: Annotated[int, Field(ge=0, le=10_000, strict=True)]
 
 
+class CpuSchedulerTimingSample(CpuTimingSample):
+    """High-resolution per-CPU scheduler runtime and an independent raw clock.
+
+    /proc/stat's user/system ticks can lose time even on a healthy Linux host.
+    Keep them for diagnostics and steal accounting, but compare cgroup execution
+    against the scheduler's execution clock, not tick-based user/system time.
+    """
+
+    scheduler_runtime_ns: Annotated[tuple[Counter, ...], Field(min_length=1, max_length=8)]
+    raw_monotonic_us: Positive
+
+    @model_validator(mode="after")
+    def scheduler_shape(self):
+        if len(self.scheduler_runtime_ns) != len(self.context.cpu_ids):
+            raise ValueError("scheduler counters differ from the selected CPU set")
+        return self
+
+
 def cpu_timing_limits_v1() -> CpuTimingLimits:
     """Normative limits for isolated cold-model CPU timing."""
     return CpuTimingLimits(
@@ -188,11 +206,13 @@ def cpu_timing_limits_v1() -> CpuTimingLimits:
 
 
 class CpuTimingEvidence(StrictProtocolModel):
-    schema_: Literal["umi-cpu-timing-evidence/1"] = Field(alias="schema")
+    schema_: Literal["umi-cpu-timing-evidence/1", "umi-cpu-timing-evidence/2"] = Field(
+        alias="schema"
+    )
     contract_sha256: Hex32
     context: CpuTimingContext
-    before: CpuTimingSample
-    after: CpuTimingSample
+    before: CpuSchedulerTimingSample | CpuTimingSample
+    after: CpuSchedulerTimingSample | CpuTimingSample
     started_monotonic_us: Positive
     model_started_monotonic_us: Positive
     finished_monotonic_us: Positive
@@ -210,6 +230,12 @@ class CpuTimingEvidence(StrictProtocolModel):
 
     @model_validator(mode="after")
     def preserved_context(self):
+        scheduler = self.schema_ == "umi-cpu-timing-evidence/2"
+        if any(
+            isinstance(sample, CpuSchedulerTimingSample) != scheduler
+            for sample in (self.before, self.after)
+        ):
+            raise ValueError("timing evidence version differs from its counter schema")
         if self.before.context != self.context or self.after.context != self.context:
             raise ValueError("CPU timing context changed during execution")
         if not (
@@ -253,6 +279,19 @@ def timing_accounting(evidence: CpuTimingEvidence) -> dict[str, int]:
     busy = delta["busy"] * 1_000_000 // ticks
     total = delta["total"] * 1_000_000 // ticks
     steal = delta["steal"] * 1_000_000 // ticks
+    if evidence.schema_ == "umi-cpu-timing-evidence/2":
+        busy = (
+            sum(
+                _delta(right, left)
+                for left, right in zip(
+                    before.scheduler_runtime_ns, after.scheduler_runtime_ns, strict=True
+                )
+            )
+            // 1000
+        )
+        total = cpus * _delta(after.raw_monotonic_us, before.raw_monotonic_us)
+        if busy > total + tolerance:
+            _fail("cpu_timing_scheduler_capacity_mismatch")
     if usage > busy + tolerance:
         _fail("cpu_timing_cpu_accounting_mismatch")
     if total == 0:
@@ -270,7 +309,9 @@ def timing_accounting(evidence: CpuTimingEvidence) -> dict[str, int]:
     )
 
 
-def validate_cpu_timing(evidence, *, contract_sha256, profile_sha256, limits):
+def validate_cpu_timing(
+    evidence, *, contract_sha256, profile_sha256, limits, measurement_semantics=None
+):
     """Validate trusted policy bindings and reject contaminated observations.
 
     Own quota throttling/thread contention remains measured model cost. It is
@@ -288,6 +329,13 @@ def validate_cpu_timing(evidence, *, contract_sha256, profile_sha256, limits):
         or evidence.context.profile_sha256 != profile_sha256
     ):
         _fail("cpu_timing_contract_or_profile_mismatch")
+    if measurement_semantics is not None:
+        expected_schema = {
+            "umi-exclusive-cold-model-cpu-timing/1": "umi-cpu-timing-evidence/1",
+            "umi-exclusive-cold-model-cpu-timing/2": "umi-cpu-timing-evidence/2",
+        }.get(measurement_semantics)
+        if evidence.schema_ != expected_schema:
+            _fail("cpu_timing_measurement_semantics_mismatch")
     if evidence.before.populated or evidence.after.populated:
         _fail("cpu_timing_parent_not_empty_at_boundary")
     if evidence.launch_gate_elapsed_us > 5_000_000:
@@ -348,6 +396,7 @@ def comparable_cpu_timings(candidate, baseline):
     )
     if (
         candidate.contract_sha256 != baseline.contract_sha256
+        or candidate.schema_ != baseline.schema_
         or any(getattr(left, key) != getattr(right, key) for key in fields)
         or len(left.cpu_ids) != len(right.cpu_ids)
     ):
@@ -391,7 +440,11 @@ def finish_cpu_timing(
 ):
     try:
         value = CpuTimingEvidence(
-            schema="umi-cpu-timing-evidence/1",
+            schema=(
+                "umi-cpu-timing-evidence/2"
+                if isinstance(before, CpuSchedulerTimingSample)
+                else "umi-cpu-timing-evidence/1"
+            ),
             contract_sha256=contract_sha256,
             context=context,
             before=before,
@@ -445,6 +498,32 @@ def parse_proc_stat(raw: str, cpu_ids) -> tuple[CpuTicks, ...]:
         )
     if set(rows) != set(selected):
         _fail("cpu_timing_missing_cpu_counters")
+    return tuple(rows[cpu] for cpu in selected)
+
+
+def parse_schedstat(raw: str, cpu_ids) -> tuple[int, ...]:
+    """Linux schedstat versions 15-17 retain CPU runtime in field seven (ns)."""
+    selected = _cpu_ids(cpu_ids)
+    lines = raw.splitlines()
+    if not lines or lines[0].split() not in (
+        ["version", "15"],
+        ["version", "16"],
+        ["version", "17"],
+    ):
+        _fail("cpu_timing_unsupported_schedstat")
+    rows = {}
+    for line in lines[1:]:
+        fields = line.split()
+        if not fields or not fields[0].startswith("cpu") or not fields[0][3:].isdecimal():
+            continue
+        cpu = int(fields[0][3:])
+        if cpu not in selected:
+            continue
+        if cpu in rows or len(fields) != 10 or any(not v.isdecimal() for v in fields[1:]):
+            _fail("cpu_timing_invalid_schedstat")
+        rows[cpu] = int(fields[7])
+    if set(rows) != set(selected):
+        _fail("cpu_timing_missing_scheduler_counters")
     return tuple(rows[cpu] for cpu in selected)
 
 
@@ -529,12 +608,18 @@ class CpuTimingSampler:
         *,
         cgroup_root=Path("/sys/fs/cgroup"),
         proc_stat_path=Path("/proc/stat"),
+        schedstat_path=None,
+        raw_clock=None,
         cpuinfo_path=Path("/proc/cpuinfo"),
         clock=None,
         owned_parent=None,
     ):
         self.context, self.path = context, Path(cgroup_path)
         self.proc_stat_path = Path(proc_stat_path)
+        self.schedstat_path = Path(schedstat_path) if schedstat_path is not None else None
+        self.raw_clock = raw_clock or (
+            lambda: time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW) // 1000
+        )
         self.cpuinfo_path = Path(cpuinfo_path)
         self.clock = clock or (lambda: time.monotonic_ns() // 1000)
         self.root = root = Path(cgroup_root)
@@ -684,12 +769,23 @@ class CpuTimingSampler:
             ticks = parse_proc_stat(
                 _small_read(self.proc_stat_path, 2 * 1024**2), self.context.cpu_ids
             )
+            extra = {}
+            sample_type = CpuTimingSample
+            if self.schedstat_path is not None:
+                extra = dict(
+                    scheduler_runtime_ns=parse_schedstat(
+                        _small_read(self.schedstat_path, 2 * 1024**2), self.context.cpu_ids
+                    ),
+                    raw_monotonic_us=self.raw_clock(),
+                )
+                sample_type = CpuSchedulerTimingSample
             cpu = _key_values(self._read("cpu.stat"))
             events = _key_values(self._read("cgroup.events"))
             if events["populated"] not in {0, 1}:
                 _fail("cpu_timing_invalid_cgroup_population")
             self._check_context()
-            return CpuTimingSample(
+            return sample_type(
+                **extra,
                 started_us=started,
                 finished_us=self.clock(),
                 context=self.context,
