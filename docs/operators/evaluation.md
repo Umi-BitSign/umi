@@ -1148,7 +1148,9 @@ A unit-test pass alone does not qualify those artifacts or the running miner.
 ### Sequential model intake
 
 Set `recoverable_intake.sequential_intake_from_sequence` to `8` in the selected
-intake configuration. Keep the predecessor and successors in its supported
+intake configuration and its matching
+`recoverable_service.lifecycle.sources.intake` copy. The source/configuration
+handoff updates both and checks their equality before cutover. Keep the predecessor and successors in its supported
 cohort bindings. The native admission owner opens each successor only after the
 predecessor's authenticated request phase, using retained state without RPC from
 public progress polling. Existing exact admission permits and participation
