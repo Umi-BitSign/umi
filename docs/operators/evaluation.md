@@ -675,6 +675,15 @@ history and checks its genesis in one read-only snapshot. It does not replay the
 same history again just to export it; signature, fork and pending-decision checks
 still run before returning that history.
 
+Public cohort-history requests enter the bounded control FIFO so readiness
+polling cannot fill their waiting queue. They retain the same request-slot and
+input-byte limits; an upload already waiting keeps its place. The control burst
+limit continues to serve ordinary reads. Identical unauthenticated history reads
+share only their in-flight response, with a fresh snapshot on the next request.
+Nonce-bearing authority/readiness requests and differing response inputs remain
+separate. Deploy this HTTP scheduler change through the supported intake source
+update; miners and validators keep using the existing history endpoint.
+
 After its first full replay, a prepared round is reused independently for each
 cohort within a bounded process-local cache. Reads use a consistent read-only
 intake snapshot and do not acquire the admission writer's gate. Each read still
