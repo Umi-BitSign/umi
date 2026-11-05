@@ -176,7 +176,7 @@ class NativeAdmissionProbe:
         self._watch_sync(StandingRewardOffers, "__call__", "reward_offer")
         self._watch_sync(reward_module.StandingRewardCoordinator, "_readback", "reward_readback")
         self._watch_sync(StandingControlPublisher, "_delivered", "reward_delivered")
-        self._watch_sync(StandingRewardPreparation, "_prepare_initial", "validator_prepare")
+        self._watch_sync(StandingRewardPreparation, "_prepare_allocation", "validator_prepare")
         service = settlement_module.CohortSettlementService
         original_init, original_load = service.__init__, service._load_active_inputs
 
