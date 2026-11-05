@@ -355,8 +355,10 @@ async def run_probe(session, invocation, boundary):
             sys.executable,
             "-I",
             "-B",
-            "-m",
-            "umi.host_cpu_probe",
+            # Source maintenance can select a newer application while retaining
+            # the installed interpreter. -m would load its old bundled helper.
+            # The sibling helper belongs to the same qualified source manifest.
+            str(Path(__file__).resolve().with_name("host_cpu_probe.py")),
             "--cgroup",
             str(path),
             "--cpus",

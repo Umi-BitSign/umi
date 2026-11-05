@@ -209,6 +209,9 @@ receipts cannot qualify the new host. Keep all original receipts. Historical
 v1/v2 execution and profile digests retain their thread-based probe, and replay
 preserves the measurements recorded in existing evidence. Deploy the probe and
 profile reader together before qualifying or selecting the new v3 host.
+The evaluator launches the probe file from its selected source tree with the
+installed interpreter and `-I -B`. Resolving the helper with `python -m` can load
+an older bundled copy after a supported source-only maintenance update.
 
 The corrected timing host additionally qualifies explicit core-class equivalence
 and shared-ancestor CPU budgets. Select the matching restorer and evaluator

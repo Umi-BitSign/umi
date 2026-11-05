@@ -96,7 +96,8 @@ async def test_probe_timeout_kills_and_reaps_only_owned_helper(monkeypatch, vers
     process.wait, process.kill = wait, kill
 
     async def spawn(*args, **kwargs):
-        assert args[1:5] == ("-I", "-B", "-m", "umi.host_cpu_probe")
+        assert args[1:3] == ("-I", "-B")
+        assert args[3] == str(Path(host.__file__).resolve().with_name("host_cpu_probe.py"))
         assert "--cgroup" in args
         assert ("--executor" in args) == (version == 3)
         if version == 3:
