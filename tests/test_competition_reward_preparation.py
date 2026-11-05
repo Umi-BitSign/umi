@@ -533,7 +533,7 @@ async def test_historical_preparation_rechecks_manifest_and_package_identity(
 ):
     p, _, _, args = historical_preparation_case
     await p.preparation.prepare_historical(p.package, **args)
-    with pytest.raises(ValueError, match="differs from current standing activation"):
+    with pytest.raises(ValueError, match="retained preparation changes the selected package"):
         await p.preparation.prepare_historical(
             p.package.model_copy(update={"policy_sha256": "ee" * 32}), **args
         )
@@ -732,7 +732,7 @@ async def test_failed_replay_retries_and_independent_bindings_are_enforced(
         )
         with pytest.raises(ValueError, match="manifest differs"):
             StandingRewardPreparation(p.reader, p.store, changed, maximum_promotion_bytes=1_000_000)
-    with pytest.raises(ValueError, match="differs from current standing activation"):
+    with pytest.raises(ValueError, match="retained preparation changes the selected package"):
         await p.preparation.prepare(
             p.package.model_copy(update={"policy_sha256": "ff" * 32}),
             **replay_args(await p.observations()),
@@ -6239,6 +6239,17 @@ async def test_remote_coverage_reuses_native_facts_after_eviction_restart_and_re
     qualifications.root.rename(qualifications.root.with_name("prior-transport-fixture"))
     qualifications.marker.rename(qualifications.marker.with_suffix(".fixture"))
     owner._transport_qualifications = None
+
+    # Native preparation checkpoints were added after the transport domain.
+    # This older installation cannot also retain a newer checkpoint bound to
+    # the removed transport owner. Keep both fixture journals as evidence;
+    # the original coverage endpoints and proof completions stay selected.
+    preparation_checkpoints = owner.preparation_reuse.store
+    preparation_checkpoints.root.rename(
+        preparation_checkpoints.root.with_name("prior-preparation-fixture")
+    )
+    preparation_checkpoints.marker.rename(preparation_checkpoints.marker.with_suffix(".fixture"))
+    owner._preparation_reuse = None
 
     def original_package_metadata():
         loads.append(True)
