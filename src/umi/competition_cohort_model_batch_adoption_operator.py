@@ -282,11 +282,14 @@ def publish_for_actor(target, request, signed=None, *, check_only=False, _cpu_ef
     adoption = request.adoption
     if _cpu_efficiency:
         from .competition_cpu_efficiency_adoption import CpuEfficiencyReviewRequest
-        from .competition_cpu_efficiency_policy import SignedCohortCpuEfficiencyAdoption
+        from .competition_cpu_efficiency_policy import (
+            SignedCohortCpuEfficiencyAdoption,
+            cpu_adoption_slot,
+        )
 
         request_type, signed_type = CpuEfficiencyReviewRequest, SignedCohortCpuEfficiencyAdoption
         slot, cohort, maximum_bytes = (
-            adoption.authority_sha256,
+            cpu_adoption_slot(adoption.authority_sha256, adoption.measurement_semantics),
             request.anchor_cohort_sha256,
             256 * 1024,
         )

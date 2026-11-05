@@ -212,7 +212,7 @@ host's supported signed maintenance/source selection and any explicit overlay
 authority. That same selected-config update must carry the private
 `cpu_efficiency_adoptions_directory` for owner/preparation and model reviewers.
 The existing adoption series timer then signs and delivers one retained CPU
-contract per authority through the authenticated model-review peers. Verify the
+contract per authority and measurement version through the authenticated model-review peers. Verify the
 exact reviewer selections before the owner selection; dynamic delivery changes
 only first new preparation from sequence 8, never a retained round. The standalone
 model client has no background source updater; when a
@@ -223,6 +223,13 @@ selected host/overlay, published release selection and retained restart behavior
 before claiming rollout. Keep challenge start held until its operator approval
 names the exact prepared contract. No source merge or automatic image poll by
 itself grants that approval.
+
+For timing v2, update all signing and execution readers before delivery. V2
+uses separate candidate files and reviewer vote keys bound to the authority
+and measurement protocol, plus `cpu-efficiency-v2/<authority>/` operator state.
+Retain v1 files and journals unchanged. New work prefers the verified v2
+selection; retained rounds continue to replay their original contract. The
+selection and storage rules are documented in the settlement guide.
 
 ### Automatic translation reference releases
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import lru_cache
+from hashlib import sha256
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
@@ -19,6 +21,25 @@ from .open_competition import CompetitionPolicy, Signature, digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 _ISSUER = object()
+CURRENT_CPU_MEASUREMENT = "umi-exclusive-cold-model-cpu-timing/2"
+LEGACY_CPU_MEASUREMENT = "umi-exclusive-cold-model-cpu-timing/1"
+
+
+def cpu_adoption_slot(authority_sha256, measurement_semantics):
+    """Separate prospective measurement upgrades from immutable original votes."""
+    if measurement_semantics == LEGACY_CPU_MEASUREMENT:
+        return authority_sha256
+    if measurement_semantics != CURRENT_CPU_MEASUREMENT:
+        raise ValueError("unsupported CPU measurement selection")
+    return sha256((authority_sha256 + "\n" + measurement_semantics).encode()).hexdigest()
+
+
+def cpu_operator_state(root, authority_sha256, measurement_semantics=CURRENT_CPU_MEASUREMENT):
+    cpu_adoption_slot(authority_sha256, measurement_semantics)
+    namespace = (
+        "cpu-efficiency" if measurement_semantics == LEGACY_CPU_MEASUREMENT else "cpu-efficiency-v2"
+    )
+    return Path(root) / namespace / authority_sha256
 
 
 class CohortCpuEfficiencyAdoption(StrictProtocolModel):
@@ -92,7 +113,13 @@ class SignedCohortCpuEfficiencyAdoption(StrictProtocolModel):
 
 
 def default_cpu_efficiency_proposal(
-    *, policy, authority, runtime_sha256, reason, issued_at_block=None
+    *,
+    policy,
+    authority,
+    runtime_sha256,
+    reason,
+    issued_at_block=None,
+    measurement_semantics=CURRENT_CPU_MEASUREMENT,
 ):
     """Prepare the CPU contract in a new authority's existing quorum batch.
 
@@ -116,7 +143,7 @@ def default_cpu_efficiency_proposal(
         runtime_sha256=runtime_sha256,
         issued_at_block=issued,
         reason=reason,
-        measurement_semantics="umi-exclusive-cold-model-cpu-timing/2",
+        measurement_semantics=measurement_semantics,
     )
 
 

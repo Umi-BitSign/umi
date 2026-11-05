@@ -43,6 +43,47 @@ from .test_competition_cpu_efficiency_policy import (
 )
 
 
+def test_v2_selection_keeps_v1_bytes_and_rejects_bad_successor(
+    scenario, policy, adoption, runtime_adoption, tmp_path
+):
+    from umi.competition_cpu_efficiency_policy import (
+        SignedCohortCpuEfficiencyAdoption,
+        cpu_adoption_slot,
+    )
+
+    from .test_competition_cpu_efficiency_policy import signatures
+
+    directory = tmp_path / "versioned-selection"
+    legacy = directory / (adoption.adoption.authority_sha256 + ".json")
+    publish_private_model(legacy, adoption)
+    original = legacy.read_bytes()
+    body = adoption.adoption.model_copy(
+        update={"measurement_semantics": "umi-exclusive-cold-model-cpu-timing/2"}
+    )
+    successor = SignedCohortCpuEfficiencyAdoption(adoption=body, signatures=signatures(body))
+    path = directory / (
+        cpu_adoption_slot(body.authority_sha256, body.measurement_semantics) + ".json"
+    )
+    publish_private_model(path, successor)
+    args = dict(
+        directory=str(directory),
+        inline=None,
+        policy=policy,
+        authority=scenario["history"].authority.authority,
+        plan=scenario["history"].plan,
+        runtime_adoption=runtime_adoption,
+    )
+    assert selected_cpu_efficiency_adoption(**args) == successor
+    assert legacy.read_bytes() == original
+    path.write_bytes(canonical_json_bytes(adoption))
+    with pytest.raises(ValueError, match="measurement slot"):
+        selected_cpu_efficiency_adoption(**args)
+    # A corrupt selected successor must not silently fall back to the old rule.
+    path.write_bytes(b"broken")
+    with pytest.raises(ValueError):
+        selected_cpu_efficiency_adoption(**args)
+
+
 def test_first_preparation_consumes_delivered_contract_without_restart(
     preparation, adoption, runtime_adoption, tmp_path
 ):

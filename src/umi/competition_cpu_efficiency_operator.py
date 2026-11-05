@@ -29,6 +29,7 @@ from .competition_cpu_efficiency_adoption import (
 )
 from .competition_cpu_efficiency_policy import (
     SignedCohortCpuEfficiencyAdoption,
+    cpu_operator_state,
     default_cpu_efficiency_proposal,
     verify_cpu_efficiency_adoption_selection,
 )
@@ -229,7 +230,7 @@ async def run_cpu_efficiency_series(
     select=None,
     publish=cpu_actor_publication,
 ):
-    """One contract per selected authority, in the existing recurring series pass."""
+    """One contract per authority and measurement version in the recurring pass."""
     if config.cpu_efficiency_operator_request_reference is None:
         return {"status": "not_selected", "completed": 0, "total": 0}
     if select is None:
@@ -269,7 +270,7 @@ async def run_cpu_efficiency_series(
                 progress.advance()
                 return {"status": "outside_scope", "completed": 0, "total": 0}
             authority = digest(owner.authority)
-            state = Path(config.state_directory) / "cpu-efficiency" / authority
+            state = cpu_operator_state(config.state_directory, authority)
             complete = await run_owned_thread(
                 _completed_cpu_job, state, config, policy, selected, publish
             )

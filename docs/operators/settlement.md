@@ -2475,7 +2475,7 @@ current intake snapshot as `cpu_efficiency_anchor_history_file`; an already
 closed earlier cohort does not prevent a later open cohort from anchoring the
 same authority. Retained jobs reuse their original snapshot without another
 owner request. Its normal `run-series` pass prepares one CPU contract
-per recovery authority, not one per model or cohort, and uses the owner's actual
+per recovery authority and measurement version, not one per model or cohort, and uses the owner's actual
 original or separately authorized CPU runtime. Future authority generations
 receive the same default automatically from sequence 8. This CPU runtime
 identity is unrelated to the chain's routinely changing runtime/spec version.
@@ -2486,7 +2486,7 @@ existing model-review peers. Each checks its independently selected candidate,
 current intake authority and signed runtime, then retains the original decision
 and vote. Completed votes do not reread history, approval files or chain state.
 The operator retains its exact plan, history, votes and envelope under
-`<state_directory>/cpu-efficiency/<authority>/`, publishes all reviewer
+`<state_directory>/cpu-efficiency-v2/<authority>/`, publishes all reviewer
 selections before the owner, and checks readback. Unchanged completed authority
 jobs are reused after supported source/config upgrades. Lost original records
 require explicit repair; a missing consumer selection is a counted restoration
@@ -2504,14 +2504,24 @@ role, service unit/account and actual selected config path/hash. This reuses
 the normal actor publication and quorum workflow; the command opens no wallet.
 
 First new timed preparation and operator start read the same signed
-`<cpu_efficiency_adoptions_directory>/<authority>.json`. The contract is
+`<cpu_efficiency_adoptions_directory>/<slot>.json`. For v2, `slot` is the
+SHA-256 of the UTF-8 authority digest, a newline, and
+`umi-exclusive-cold-model-cpu-timing/2`. The contract is
 retained in the resulting round. Existing rounds never reread this selection or
 change their bytes, and installing the standing timer does not authorize intake
 closure or challenge start. Keep the signed selection and original operator
 state on durable storage, outside disposable qualification scratch.
 
+V1 contracts retain their original `<authority>.json` selection, journal keys
+and `cpu-efficiency/<authority>/` operator state. V2 candidates, votes and
+operator state are separate; never overwrite the original signatures. Deploy
+the versioned readers to every signing and execution consumer before signing
+v2. New rounds prefer a delivered v2 selection and verify its quorum, authority
+and runtime. A corrupt v2 selection fails explicitly rather than falling back
+to v1. Existing rounds continue using their retained contract and evidence.
+
 The fixed timing rule is `cold_model_exec_to_validated_result/1`, with semantics
-`umi-exclusive-cold-model-cpu-timing/1`. A trusted host gate records the boundary
+`umi-exclusive-cold-model-cpu-timing/2` for new proposals. A trusted host gate records the boundary
 before any model code runs. The speed interval includes fresh model/Python
 startup, loading, preprocessing, inference and postprocessing through validated
 output. Payload restoration, queueing, container provisioning and host gate
