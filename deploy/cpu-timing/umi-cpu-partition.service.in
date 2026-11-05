@@ -6,8 +6,8 @@ Before=umi-c5-primary-reviewer-uid54.service umi-c5-optional-reviewer-uid0.servi
 RefuseManualStop=yes
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=notify
+NotifyAccess=main
 Slice=umiexecution.slice
 Delegate=cpu cpuset memory io pids
 DelegateSubgroup=setup
@@ -15,7 +15,7 @@ AllowedCPUs=@ALL_CPUS@
 AllowedMemoryNodes=@NUMA_NODES@
 # Do not set a small MemoryMax on this service: its descendants are the models.
 # The restorer limits its own setup leaf, independently of descendant envelopes.
-ExecStart=@SIGNED_PYTHON@ -I -B -m umi.host_cpu_partition --config @ROOT_OWNED_PLAN@
+ExecStart=@SIGNED_PYTHON@ -I -B -m umi.host_cpu_partition --config @ROOT_OWNED_PLAN@ --resident
 TimeoutStartSec=30
 KillMode=process
 UMask=0077

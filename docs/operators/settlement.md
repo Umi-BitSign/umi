@@ -2634,6 +2634,21 @@ and its `libpod-<CID>` payload. Do not set a 64 MiB service-wide MemoryMax on th
 partition service: its model descendants share that service. Limit only the
 setup leaf and restorer process.
 
+Run the restorer with `--resident` under `Type=notify`. It sends readiness after
+restoring the full slot map, releases admission locks, then sleeps in the setup
+leaf so systemd retains the delegated cgroup between model invocations. An
+`active (exited)` oneshot is insufficient: systemd can remove its empty cgroup
+even with `RemainAfterExit=yes`. Check the live resident PID and kernel partition,
+as well as the completion receipt. The receipt's total is the actual active-slot
+count, not a fixed lane count.
+
+For an installed oneshot, drain all consumers of its admission slots, including
+settlement verification, before replacing the service with the notify template.
+Keep the original memory policy and signed cohort state. Resume the services
+after qualification; the migration controller must arrange their restart on
+failure as well. This migration remains necessary for installations still using
+the oneshot template.
+
 Grant the shared `umi-cpu-execution` migration group access only to the dedicated
 `umiexecution.slice/cgroup.procs`. Never widen migration permissions on the root
 or `user.slice`. Both existing reviewer units receive that supplementary group
