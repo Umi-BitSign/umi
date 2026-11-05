@@ -374,7 +374,10 @@ def actor_publication(target, request, signed=None, *, check_only=False, _action
     elif pwd.getpwuid(os.getuid()).pw_name != target.service_account:
         command = ["sudo", "-n", "-u", target.service_account, "--", *command]
     result = subprocess.run(
-        command, input=canonical_json_bytes(payload), capture_output=True, timeout=30,
+        command,
+        input=canonical_json_bytes(payload),
+        capture_output=True,
+        timeout=30,
         **credentials,
     )
     if len(result.stdout) > 16384:
