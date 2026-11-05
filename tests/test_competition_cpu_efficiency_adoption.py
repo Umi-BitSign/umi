@@ -143,31 +143,46 @@ async def test_completed_cpu_vote_reuses_original_without_candidate_history_or_r
     assert len(c.state.votes) == 1
 
 
-async def test_v2_signing_preserves_v1_candidate_vote_and_offline_replay(cpu_review):
+@pytest.mark.parametrize("version", [2, 3])
+async def test_successor_signing_preserves_v1_candidate_vote_and_offline_replay(
+    cpu_review, version
+):
     from umi.protocol import canonical_json_bytes
 
     c = cpu_review
     reviewer = c.create("Charlie")
     directory = Path(reviewer.config.cpu_efficiency_adoptions_directory)
     legacy_body = c.request.adoption.model_copy(
-        update={"measurement_semantics": "umi-exclusive-cold-model-cpu-timing/1"}
+        update={
+            "measurement_semantics": "umi-exclusive-cold-model-cpu-timing/1",
+            "reward_rule": "cold_cpu_relative_latency/1",
+            "timing_rule": "cold_model_exec_to_validated_result/1",
+        }
     )
+    current_body = (
+        c.request.adoption
+        if version == 3
+        else legacy_body.model_copy(
+            update={"measurement_semantics": "umi-exclusive-cold-model-cpu-timing/2"}
+        )
+    )
+    current_request = c.request.model_copy(update={"adoption": current_body})
     legacy_request = c.request.model_copy(update={"adoption": legacy_body})
     legacy_path = directory / (legacy_body.authority_sha256 + ".candidate.json")
     publish_private_model(legacy_path, legacy_request)
     original = legacy_path.read_bytes()
     legacy_vote = await attest_cpu_efficiency(reviewer, legacy_request)
     current_slot = cpu_adoption_slot(
-        c.request.adoption.authority_sha256, c.request.adoption.measurement_semantics
+        current_body.authority_sha256, current_body.measurement_semantics
     )
-    publish_private_model(directory / (current_slot + ".candidate.json"), c.request)
-    current_vote = await attest_cpu_efficiency(reviewer, c.request)
+    publish_private_model(directory / (current_slot + ".candidate.json"), current_request)
+    current_vote = await attest_cpu_efficiency(reviewer, current_request)
     assert legacy_path.read_bytes() == original == canonical_json_bytes(legacy_request)
     assert current_vote.adoption != legacy_vote.adoption
     restarted = c.create("Charlie")
     c.state.online = False
     assert await attest_cpu_efficiency(restarted, legacy_request) == legacy_vote
-    assert await attest_cpu_efficiency(restarted, c.request) == current_vote
+    assert await attest_cpu_efficiency(restarted, current_request) == current_vote
     assert len(c.state.votes) == 2
 
 
@@ -488,7 +503,7 @@ async def test_cpu_series_once_per_authority_reuses_and_repairs_without_source_h
     assert first["authority_sha256"] == digest(o.c.authority)
     assert legacy_plan.read_bytes() == original
     assert (
-        tmp_path / "series" / "cpu-efficiency-v2" / digest(o.c.authority) / "completion.json"
+        tmp_path / "series" / "cpu-efficiency-v3" / digest(o.c.authority) / "completion.json"
     ).is_file()
     assert (await run())["status"] == "reused"
     assert len(o.c.state.votes) == 2

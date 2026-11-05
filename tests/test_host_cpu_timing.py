@@ -293,6 +293,27 @@ def test_measurement_profile_excludes_installation_paths_and_qualification_recei
     assert host.measurement_profile_sha256(changed, fixture.runtime) != original
 
 
+def test_cpu_work_profile_binds_independent_probe_executor(selected_host, monkeypatch):
+    captured = []
+    original = host.canonical_json_bytes
+
+    def capture(value):
+        captured.append(value)
+        return original(value)
+
+    monkeypatch.setattr(host, "canonical_json_bytes", capture)
+    fixture = selected_host
+    for version in (1, 2, 3):
+        host.measurement_profile_sha256(
+            fixture.profile,
+            fixture.runtime,
+            measurement_semantics=f"umi-exclusive-cold-model-cpu-timing/{version}",
+        )
+    assert "probe_executor" not in captured[0]
+    assert "probe_executor" not in captured[1]
+    assert captured[2]["probe_executor"] == "independent_processes_parent_bound/1"
+
+
 @pytest.mark.parametrize(
     "change,reason",
     [

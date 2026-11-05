@@ -140,6 +140,11 @@ def measurement_profile_sha256(
                 "bundle_cache_rule": "verified_bundle_pagecache_eviction/1",
                 "topology_sha256": profile.topology_sha256,
                 "probe_rule": PROBE_RULE,
+                **(
+                    {"probe_executor": "independent_processes_parent_bound/1"}
+                    if measurement_semantics == "umi-exclusive-cold-model-cpu-timing/3"
+                    else {}
+                ),
                 "pressure_rule": PRESSURE_RULE,
                 "condition_limits": CpuConditionLimits().model_dump(mode="json"),
                 "host_identity_sha256": profile.host_identity_sha256,

@@ -344,6 +344,12 @@ async def run_probe(session, invocation, boundary):
     path = Path(session.parent.path) / "probe"
     check_probe_leaf(path, session.slot.cpu_ids)
     process = None
+    executor = (
+        ["--executor", "processes"]
+        if getattr(session, "measurement_semantics", None)
+        == "umi-exclusive-cold-model-cpu-timing/3"
+        else []
+    )
     try:
         process = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -361,6 +367,7 @@ async def run_probe(session, invocation, boundary):
             invocation,
             "--boundary",
             boundary,
+            *executor,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,

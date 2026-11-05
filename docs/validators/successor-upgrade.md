@@ -200,6 +200,16 @@ Qualify actual rootless migration, bounded probe cancellation, cache ownership,
 restart cleanup and the intended concurrent lane/load profile before selection.
 Restoration completion alone records neither qualification nor contract selection.
 
+CPU-work timing v3 runs the fixed calibration workload in separate processes,
+so Python interpreter-lock contention does not dominate the calibration. Each
+worker still performs the same fixed hashes and reports its main-thread CPU
+time. Workers share the allocated CPU set and die with their probe parent.
+The measurement-profile digest binds this executor; earlier v3 calibration
+receipts cannot qualify the new host. Keep all original receipts. Historical
+v1/v2 execution and profile digests retain their thread-based probe, and replay
+preserves the measurements recorded in existing evidence. Deploy the probe and
+profile reader together before qualifying or selecting the new v3 host.
+
 The corrected timing host additionally qualifies explicit core-class equivalence
 and shared-ancestor CPU budgets. Select the matching restorer and evaluator
 together, then qualify the new topology and measurement-profile identities.

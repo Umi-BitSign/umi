@@ -76,7 +76,8 @@ async def test_observer_detects_stall_even_before_first_tick(monkeypatch):
     assert monitor.task.cancelled()
 
 
-async def test_probe_timeout_kills_and_reaps_only_owned_helper(monkeypatch):
+@pytest.mark.parametrize("version", [1, 2, 3])
+async def test_probe_timeout_kills_and_reaps_only_owned_helper(monkeypatch, version):
     trace = []
     process = SimpleNamespace(returncode=None)
 
@@ -97,6 +98,9 @@ async def test_probe_timeout_kills_and_reaps_only_owned_helper(monkeypatch):
     async def spawn(*args, **kwargs):
         assert args[1:5] == ("-I", "-B", "-m", "umi.host_cpu_probe")
         assert "--cgroup" in args
+        assert ("--executor" in args) == (version == 3)
+        if version == 3:
+            assert args[args.index("--executor") + 1] == "processes"
         trace.append("spawn")
         return process
 
@@ -109,6 +113,7 @@ async def test_probe_timeout_kills_and_reaps_only_owned_helper(monkeypatch):
     monkeypatch.setattr(host.asyncio, "create_subprocess_exec", spawn)
     monkeypatch.setattr(host.asyncio, "wait_for", expire)
     session = SimpleNamespace(
+        measurement_semantics=f"umi-exclusive-cold-model-cpu-timing/{version}",
         parent=SimpleNamespace(path="/sys/fs/cgroup/umiexecution.slice/p"),
         slot=SimpleNamespace(cpu_ids=(0, 1)),
         cpu_set_argument="0,1",
