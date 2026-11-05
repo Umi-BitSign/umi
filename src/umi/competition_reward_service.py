@@ -137,7 +137,9 @@ async def _run_executor(executor, stop, limits, coverage):
 
 
 @memory_operation
-async def _prepare_first(preparation, provider, history, packages, decisions, height, maximum):
+async def _prepare_first(
+    preparation, provider, history, packages, decisions, height, maximum, *, coverage=None
+):
     if height < history.first_block:
         return None
     try:
@@ -159,6 +161,11 @@ async def _prepare_first(preparation, provider, history, packages, decisions, he
     initial = reviewed.initial_selection
     if initial is None:
         return None
+    if coverage is not None:
+        first = await coverage.restore_preparation(initial.activation, through_block=height)
+        if first is not None:
+            logger.info("standing_boot_restored cohort_sha256=%s", first.activation.cohort_sha256)
+            return first
     package = await run_owned_thread(packages, initial.activation.package_sha256)
     first = await preparation.prepare_initial(
         package, control=control, history=prefix, source=decisions
@@ -192,8 +199,9 @@ async def run_standing_reward_service(
     """Own the passed providers until stopped; preserve journals on every retry.
 
     Call inside the installed runtime's async context, with its native adapter.
-    Without a supplied first preparation, replay the retained complete history
-    and initial package before handoff, even when a successor is current.
+    Without a supplied first preparation, select the original initial activation
+    from native history, even when a successor is current. Reuse its preparation
+    checkpoint or completed coverage before performing any first package replay.
     Content callbacks cannot grant submission authority. No production timing
     policy is inferred from the per-operation retry interval.
     """
@@ -312,6 +320,7 @@ async def run_standing_reward_service(
                         decisions,
                         bootstrap_height,
                         limits.maximum_history_blocks,
+                        coverage=coverage,
                     )
                     if first is None:
                         bootstrap_height = None
@@ -383,6 +392,7 @@ async def run_standing_reward_service(
                         packages=packages,
                         decisions=decisions,
                         opportunity=opportunity,
+                        coverage=coverage,
                         signer=signer,
                         mortality_period=limits.mortality_period,
                         maximum_history_blocks=limits.maximum_history_blocks,

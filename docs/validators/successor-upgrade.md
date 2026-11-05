@@ -945,8 +945,29 @@ only its series-local lock and cannot observe the new shared lock.
 predecessor handoff through executor shutdown. Transient failures retry with retained state;
 an exited finality observer ends the service invocation so boot supervision can
 construct a new provider. Startup reconstructs the first activation from complete
-retained control history and replays its original reward package. A successor or
-revocation in that history does not erase the initial handoff. Historical replay
+retained control history and prepares its original reward package. Completed native
+preparation is retained under the promotion store's
+`verification/<series>/native/prepared-rewards`, with its sibling owner marker.
+Preserve both with the existing validator state. Restart restores the exact
+allocation after checking its immutable package identity, policy, authority,
+transport qualification and model dependencies. An interrupted dependency capture
+or allocation export resumes after native completion without replaying the package.
+Missing completed metadata requires explicit repair; an unfinished first preparation
+continues its original native path. For an older writer with no preparation
+checkpoint, startup and current-package preparation first look for its indexed
+native coverage completion. Restoration uses the original retained history prefix,
+package snapshot and compact allocation export. It does not capture replacement
+coverage. If the older live-anchor index is absent, a bounded metadata inventory
+indexes retained native completions once, checkpoints each batch and resumes after
+restart. It reads no package, model or proof payload. Only a drained inventory with
+no matching completion permits first preparation; damaged completion metadata
+requires repair. Legacy directory-backed models still require
+their original asset checks, and promotion-based allocations refresh their selected
+native promotion receipt and conflict state. These checks grant no transaction
+authority. Deploy the compatible writer source through the supported host upgrade
+path; this additive local format changes no miner submission or signed reward bytes.
+A successor or revocation in retained history does not erase the initial handoff.
+Historical replay
 uses the retained proofs and a fixed target block while catching up; it grants no
 current submission authority. The executor checks fresh control before signing.
 Each proof-verifier instance remembers up to 64 successful exact storage-proof

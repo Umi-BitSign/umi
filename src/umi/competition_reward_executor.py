@@ -20,6 +20,7 @@ from functools import partial
 from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_progress import _failure_details
 from .competition_reward_control_archive import HistoricalRewardControlProvider
+from .competition_reward_coverage_service import StandingRewardCoverageService
 from .competition_reward_decisions import (
     DecisionSource,
     RewardActivation,
@@ -93,6 +94,7 @@ class StandingRewardExecutor:
         mortality_period: int,
         maximum_history_blocks: int = 64,
         submission_timeout_seconds: float = 120,
+        coverage: StandingRewardCoverageService | None = None,
     ):
         if (
             type(preparation) is not StandingRewardPreparation
@@ -128,6 +130,14 @@ class StandingRewardExecutor:
             or not 0 < submission_timeout_seconds <= 3600
         ):
             raise ValueError("standing execution operation bounds are invalid")
+        if coverage is not None and (
+            type(coverage) is not StandingRewardCoverageService
+            or coverage.preparation is not preparation
+            or coverage.provider is not provider
+            or coverage.history is not history
+        ):
+            raise ValueError("standing restore must share the native execution owners")
+        self.coverage = coverage
         self.preparation, self.provider, self.history = preparation, provider, history
         self.journal, self.first, self.handoff = journal, first, handoff
         self.host = host
@@ -260,6 +270,13 @@ class StandingRewardExecutor:
 
     @memory_operation
     async def _prepare_package(self, activation, control, history):
+        coverage = getattr(self, "coverage", None)
+        if coverage is not None:
+            restored = await coverage.restore_preparation(
+                activation, through_block=control.snapshot.block_number
+            )
+            if restored is not None:
+                return restored
         package = await run_owned_thread(self.packages, activation.package_sha256)
         return await self.preparation.prepare(
             package, control=control, history=history, source=self.decisions

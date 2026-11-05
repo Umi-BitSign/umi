@@ -18,10 +18,12 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_evidence_codec import checked_size
 from .competition_progress import _failure_details
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_coverage_collector import RewardCoverageCollector
+from .competition_reward_coverage_intervals import coverage_point
 from .competition_reward_coverage_journal import RewardCoverageJournal
 from .competition_reward_coverage_source import CoverageHistoryPending, NativeRewardCoverageSource
 from .competition_reward_decisions import (
@@ -36,6 +38,9 @@ from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_opportunity import VerifiedRewardOpportunity, opportunity_rule
 from .competition_reward_opportunity_review import review_opportunity_certificate
 from .competition_reward_preparation import StandingRewardPreparation
+from .competition_reward_preparation_coverage_index import PreparationCoverageIndex
+from .competition_reward_transition_anchor import RewardLiveAnchorMissing
+from .competition_transport_verification import TransferProgress
 from .concurrency import run_owned_thread
 from .historical_header_recovery import HistoricalHeaderRecoveryProgress
 from .open_competition import digest
@@ -43,6 +48,12 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 logger = logging.getLogger(__name__)
 Block = Annotated[int, Field(ge=1, le=2**53 - 1)]
+
+
+class StandingPreparationRepairRequired(ValueError):
+    """A selected completed coverage fact cannot be restored unchanged."""
+
+    reason_code = "standing_preparation_restore_required"
 
 
 class CoverageWork(StrictProtocolModel):
@@ -107,6 +118,126 @@ class StandingRewardCoverageService:
         self._opportunities: dict[str, VerifiedRewardOpportunity] = {}
         self._lock = asyncio.Lock()
         self._package_guard = package_guard if package_guard is not None else asyncio.Lock()
+        self._preparation_model_groups = {}
+        self._preparation_coverage_index = None
+
+    async def _preparation_endpoint(self, activation):
+        """Discover legacy completions without inferring absence from an index."""
+        if self._preparation_coverage_index is None:
+            self._preparation_coverage_index = await run_owned_thread(
+                PreparationCoverageIndex, self.journal
+            )
+        while True:
+            drained, key = await run_owned_thread(
+                self._preparation_coverage_index.advance, activation
+            )
+            if drained:
+                return key
+
+    async def restore_preparation(self, activation, *, through_block):
+        """Migrate an existing native coverage verdict into preparation completion.
+
+        The caller selects the activation from authenticated control history.
+        A preparation checkpoint takes priority. Without one, an existing native
+        live anchor names the exact completion to restore. A missing anchor
+        falls back to a checkpointed metadata inventory of older native results.
+        Only an empty selected inventory permits ordinary first preparation.
+        Host binding and transaction presence do not establish completion.
+        """
+        if type(activation) is not RewardActivation or (
+            type(through_block) is not int or not 0 <= through_block < 2**53
+        ):
+            raise ValueError("preparation restoration requires an activation and block")
+        preparation, files = self.preparation, self.files
+        progress = TransferProgress(
+            "standing_preparation_restore", 3, unit="steps", planning_unit_seconds=(0.001, 30)
+        )
+        try:
+            with progress:
+                async with self._package_guard:
+                    native = await run_owned_thread(
+                        lambda: preparation.preparation_reuse.store.status(
+                            digest(activation), through_block
+                        )
+                    )
+                    if native is not None:
+                        # The normal preparation owner restores this result and
+                        # resumes its own unfinished model dependency capture.
+                        progress.advance(3, restored=True)
+                        return None
+                    try:
+                        key = await run_owned_thread(
+                            partial(
+                                self.journal.first_live_anchor,
+                                activation,
+                                validators=preparation.reader.series.validators,
+                                chain_config_sha256=(
+                                    preparation.reader.admission_chain_config_sha256
+                                ),
+                                not_before_block=(
+                                    preparation.reader.series.recovery.authority.issued_at_block
+                                ),
+                            )
+                        )
+                    except RewardLiveAnchorMissing:
+                        key = await self._preparation_endpoint(activation)
+                        if key is None:
+                            progress.advance(3, restored=False)
+                            return None
+                    progress.advance(1, restored=True)
+                    endpoint = await self.journal.restore_endpoint(
+                        key,
+                        provider=self.provider,
+                        preparation=preparation,
+                        expected_package_sha256=activation.package_sha256,
+                        history=None,
+                        # Existing completion cannot authorize a new history
+                        # capture or replay when its retained prefix is lost.
+                        history_source=self.history.verified_prefix,
+                        profile=self.profile,
+                        completed_model_groups=self._preparation_model_groups,
+                    )
+                    if endpoint is None:
+                        raise StandingPreparationRepairRequired(
+                            "completed preparation endpoint or dependencies require repair"
+                        )
+                    point = coverage_point(endpoint, self.journal.rule)
+                    if (
+                        point.key() != key
+                        or point.block > through_block
+                        or point.activation_sha256 != digest(activation)
+                        or point.allocation_sha256
+                        != (activation.effective_allocation_sha256 or activation.allocation_sha256)
+                    ):
+                        raise StandingPreparationRepairRequired(
+                            "completed preparation endpoint differs from the selected activation"
+                        )
+                    progress.advance(1, restored=True)
+                    package = await run_owned_thread(
+                        partial(
+                            files.package_store.load_existing,
+                            files.root / "packages" / (activation.package_sha256 + ".json"),
+                            CohortRewardPackage,
+                            maximum_bytes=files.maximum_package_bytes,
+                            expected_sha256=activation.package_sha256,
+                        )
+                    )
+                    allocation = await run_owned_thread(
+                        files.allocation,
+                        activation.effective_allocation_sha256 or activation.allocation_sha256,
+                    )
+                    prepared = await preparation.prepare_from_completed_coverage(
+                        endpoint, activation=activation, allocation=allocation, package=package
+                    )
+                    progress.advance(1, restored=True)
+                    return prepared
+        except (ValueError, FileNotFoundError, KeyError, TypeError) as error:
+            progress.emit("repair_required", reason="completed_preparation_restore_required")
+            if isinstance(error, StandingPreparationRepairRequired):
+                raise
+            raise StandingPreparationRepairRequired(
+                "completed preparation original metadata requires repair"
+            ) from error
 
     async def _selection_detail(self, height):
         try:
