@@ -81,6 +81,8 @@ seeds = [
     "competition_cohort_model_batch_adoption_cli",
     "competition_model_byte_store_cli",
     "competition_miner_transition_cli",
+    # Launched by absolute sibling path in an isolated interpreter.
+    "host_cpu_probe",
 ]
 modules = set()
 external_imports = set()

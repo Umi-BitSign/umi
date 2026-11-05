@@ -157,6 +157,7 @@ def validate_case_execution(
             contract_sha256=authorization.adoption_sha256,
             profile_sha256=timing.context.profile_sha256,
             limits=cpu_timing_limits_v1(),
+            measurement_semantics=authorization.measurement_semantics,
         )
     try:
         validate_evaluation_runtime_authorization(

@@ -148,6 +148,94 @@ def test_ordinary_challenge_uses_wall_time_not_cpu_work():
     assert timing.CpuTimingEvidence.model_validate_json(canonical_json_bytes(value)) == value
 
 
+def scheduler_evidence():
+    """Tick-accounted CPU time can undercount scheduler runtime on real Linux."""
+    old = evidence()
+    before = timing.CpuSchedulerTimingSample(
+        **old.before.model_dump(), scheduler_runtime_ns=(0, 0), raw_monotonic_us=2_000_000
+    )
+    coarse_after = sample(old.context, now=11_000_000, ticks=1078, busy=535, usage=10_000_000)
+    after = timing.CpuSchedulerTimingSample(
+        **coarse_after.model_dump(),
+        scheduler_runtime_ns=(5_004_000_000, 5_004_000_000),
+        raw_monotonic_us=12_000_000,
+    )
+    return old.model_copy(
+        update={"schema_": "umi-cpu-timing-evidence/2", "before": before, "after": after}
+    )
+
+
+def test_scheduler_accounting_reconciles_tick_undercount_without_wider_tolerance():
+    value = scheduler_evidence()
+    result = validate(value, measurement_semantics="umi-exclusive-cold-model-cpu-timing/2")
+    assert result["model_cpu_usec"] == 10_000_000
+    assert result["host_busy_usec"] == 10_008_000
+    assert result["external_busy_lower_usec"] == 0
+    assert result["accounting_tolerance_usec"] == validate(evidence())["accounting_tolerance_usec"]
+    raw = canonical_json_bytes(value)
+    assert canonical_json_bytes(timing.CpuTimingEvidence.model_validate_json(raw)) == raw
+
+
+@pytest.mark.parametrize(
+    "change,reason",
+    [
+        ({"scheduler_runtime_ns": (6_000_000_000, 6_000_000_000)}, "external_cpu_contention"),
+        ({"scheduler_runtime_ns": (4_000_000_000, 4_000_000_000)}, "cpu_accounting_mismatch"),
+        ({"scheduler_runtime_ns": (12_000_000_000, 12_000_000_000)}, "scheduler_capacity_mismatch"),
+        ({"raw_monotonic_us": 13_000_000}, "cpu_clock_disagreement"),
+        ({"raw_monotonic_us": 1_000_000}, "counter_reset"),
+    ],
+)
+def test_scheduler_measurement_still_rejects_unfair_or_broken_counters(change, reason):
+    value = scheduler_evidence()
+    value = value.model_copy(update={"after": value.after.model_copy(update=change)})
+    with pytest.raises(timing.CpuTimingInfrastructureError, match=reason):
+        validate(value)
+
+
+def test_retained_v1_bytes_and_semantics_are_preserved():
+    value = evidence()
+    raw = canonical_json_bytes(value)
+    assert b"scheduler_runtime_ns" not in raw and b"raw_monotonic_us" not in raw
+    assert canonical_json_bytes(timing.CpuTimingEvidence.model_validate_json(raw)) == raw
+    validate(value, measurement_semantics="umi-exclusive-cold-model-cpu-timing/1")
+    with pytest.raises(timing.CpuTimingInfrastructureError, match="measurement_semantics_mismatch"):
+        validate(
+            scheduler_evidence(), measurement_semantics="umi-exclusive-cold-model-cpu-timing/1"
+        )
+    with pytest.raises(timing.CpuTimingInfrastructureError, match="measurement_semantics_mismatch"):
+        validate(value, measurement_semantics="umi-exclusive-cold-model-cpu-timing/2")
+    with pytest.raises(timing.CpuTimingInfrastructureError, match="incomparable_reference"):
+        timing.comparable_cpu_timings(value, scheduler_evidence())
+
+
+def test_version_cannot_strip_or_mix_scheduler_evidence():
+    value = scheduler_evidence()
+    for changed in (
+        value.model_copy(update={"schema_": "umi-cpu-timing-evidence/1"}),
+        value.model_copy(update={"before": evidence().before}),
+    ):
+        with pytest.raises(timing.CpuTimingInfrastructureError, match="invalid_observed_context"):
+            validate(changed)
+
+
+@pytest.mark.parametrize("version", [15, 16, 17])
+def test_schedstat_reads_exact_selected_cpu_runtime(version):
+    raw = (
+        f"version {version}\ntimestamp 123\n"
+        "cpu0 0 0 0 0 0 0 125003 999 5\n"
+        "domain0 ffff 1 2 3\n"
+        "cpu1 0 0 0 0 0 0 250007 888 6\n"
+    )
+    assert timing.parse_schedstat(raw, (0, 1)) == (125003, 250007)
+    with pytest.raises(timing.CpuTimingInfrastructureError, match="missing_scheduler_counters"):
+        timing.parse_schedstat(raw, (0, 2))
+    with pytest.raises(timing.CpuTimingInfrastructureError, match="invalid_schedstat"):
+        timing.parse_schedstat(raw + "cpu0 0 0 0 0 0 0 123 456 1\n", (0, 1))
+    with pytest.raises(timing.CpuTimingInfrastructureError, match="unsupported_schedstat"):
+        timing.parse_schedstat(raw.replace(f"version {version}", "version 999"), (0, 1))
+
+
 def test_self_threading_and_quota_throttling_are_not_external_noise():
     ctx = context()
     after = sample(ctx, now=11_000_000, ticks=1100, busy=550, usage=10_000_000, throttled=9_000_000)

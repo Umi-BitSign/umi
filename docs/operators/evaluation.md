@@ -675,6 +675,15 @@ history and checks its genesis in one read-only snapshot. It does not replay the
 same history again just to export it; signature, fork and pending-decision checks
 still run before returning that history.
 
+Public cohort-history requests enter the bounded control FIFO so readiness
+polling cannot fill their waiting queue. They retain the same request-slot and
+input-byte limits; an upload already waiting keeps its place. The control burst
+limit continues to serve ordinary reads. Identical unauthenticated history reads
+share only their in-flight response, with a fresh snapshot on the next request.
+Nonce-bearing authority/readiness requests and differing response inputs remain
+separate. Deploy this HTTP scheduler change through the supported intake source
+update; miners and validators keep using the existing history endpoint.
+
 After its first full replay, a prepared round is reused independently for each
 cohort within a bounded process-local cache. Reads use a consistent read-only
 intake snapshot and do not acquire the admission writer's gate. Each read still
@@ -1144,3 +1153,40 @@ The existing Darwin finality-only artifact does not include a storage-proof
 verifier. Historical admission therefore needs separately qualified artifacts
 for the selected host target before this configuration can be deployed there.
 A unit-test pass alone does not qualify those artifacts or the running miner.
+
+### Sequential model intake
+
+Set `recoverable_intake.sequential_intake_from_sequence` to `8` in the selected
+intake configuration and its matching
+`recoverable_service.lifecycle.sources.intake` copy. The source/configuration
+handoff updates both and checks their equality before cutover. Keep the predecessor and successors in its supported
+cohort bindings. The native admission owner opens each successor only after the
+predecessor's authenticated request phase, using retained state without RPC from
+public progress polling. Existing exact admission permits and participation
+records survive activation and restart. Deadline closure remains independent.
+Keep this setting when extending the configured cohort series; no per-cohort
+timer or manual reopening is required. Older configurations omit the field and
+retain their historical behavior until the supported configuration handoff.
+
+### CPU-work efficiency contract
+
+Root-run adoption publishers inherit the selected actor's actual Unix UID,
+primary group and supplementary groups. This includes groups assigned only by
+systemd. Publication checks the running service/configuration before delegation
+and again inside the actor; a changed process requires an exact retry. The
+publisher does not change account memberships or directory permissions. Deploy
+the updated publisher through the supported source-maintenance path before
+publishing to actors whose configuration requires a service-only group. Existing
+signed requests, contracts and completed host measurements remain reusable.
+
+New CPU-efficiency proposals use measurement semantics
+`umi-exclusive-cold-model-cpu-timing/3`. They count the isolated model process
+tree's user and system CPU consumption. The fixed allocation converts this to
+full-core milliseconds for the matched-case calculation; operational elapsed
+deadlines still apply. Compare the fixed probes' aggregate thread CPU work with
+the unchanged 10% tolerance. Retain probe wall times for diagnostics, but do not
+use them to gate CPU-work comparability. All resource, cache, accounting, external
+contention and runtime identity checks remain required. A v3 contract needs
+its own signatures and host qualification; v1/v2 evidence keeps its original
+semantics and cannot be relabeled. Deliver v3 to every execution and replay
+consumer before selecting it. A signed contract does not start challenges.

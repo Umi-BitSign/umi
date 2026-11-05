@@ -13,6 +13,8 @@ import json
 import os
 import pwd
 import resource
+import signal
+import socket
 import stat
 import subprocess
 import time
@@ -76,6 +78,10 @@ def directory(path):
     path.mkdir(exist_ok=True)
     if path.resolve(strict=True) != path or not path.is_dir():
         raise RuntimeError("unexpected CPU directory alias")
+    # Both evaluator accounts inspect the shared pool for retained payloads.
+    # Keep directories traversable/readable; only their owner can create
+    # children, and resource-control files retain their separate ownership.
+    path.chmod(0o755)
 
 
 def configure(path, *, allowed, nodes, controllers=True):
@@ -86,9 +92,29 @@ def configure(path, *, allowed, nodes, controllers=True):
         write(path / "cgroup.subtree_control", "+cpu +cpuset +memory +io +pids")
 
 
+def retain_partition_service():
+    """Keep systemd's delegated cgroup alive after restoration finishes.
+
+    RemainAfterExit preserves the unit state, but systemd can still trim its
+    empty cgroup. A sleeping process in the setup leaf retains the delegated
+    tree without occupying any model CPU or admission lease.
+    """
+    address = os.environ.get("NOTIFY_SOCKET")
+    if not address or address[0] not in {"/", "@"}:
+        raise RuntimeError("resident partition requires systemd notify supervision")
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as channel:
+        channel.connect(address)
+        channel.sendall(b"READY=1\nSTATUS=CPU partition restored; retaining delegated cgroup")
+    while True:
+        signal.pause()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--resident", action="store_true")
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise RuntimeError("CPU restoration is root startup work")
@@ -285,6 +311,8 @@ def main():
         ),
         flush=True,
     )
+    if args.resident:
+        retain_partition_service()
 
 
 if __name__ == "__main__":

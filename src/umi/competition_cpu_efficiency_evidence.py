@@ -152,8 +152,8 @@ def summarize_evaluator_efficiency(
             CpuCaseTiming(
                 case_id=case.case_id,
                 stratum=case.stratum,
-                candidate_elapsed_ms=pair[0].speed_elapsed_ms,
-                reference_elapsed_ms=pair[1].speed_elapsed_ms,
+                candidate_elapsed_ms=pair[0].efficiency_cost_ms,
+                reference_elapsed_ms=pair[1].efficiency_cost_ms,
                 candidate_valid=(
                     candidate.status == "ok"
                     and candidate.elapsed_ms <= maximum_inference_ms

@@ -52,6 +52,68 @@ def test_control_only_waiting_still_requires_a_positive_bounded_timeout():
         binding(None, reads=0, controls=8, timeout=0)
 
 
+async def test_history_does_not_queue_behind_nonce_polls_or_overtake_uploads():
+    release = asyncio.Event()
+    entered = []
+    history = "/v1/competition/cohorts/" + "a" * 64 + "/history"
+
+    async def app(scope, receive, send):
+        entered.append(scope["path"])
+        if len(entered) == 1:
+            await release.wait()
+        await success(send)
+
+    bound = binding(app, reads=4, controls=2)
+    owner = invoke(bound, request("/v1/competition/readiness", query=b"nonce=0"))[0]
+    await until(lambda: len(entered) == 1)
+    polls = [
+        invoke(bound, request("/v1/competition/readiness", query=f"nonce={n}".encode()))[0]
+        for n in range(1, 5)
+    ]
+    await until(lambda: bound.waiting_groups["read"] == 4)
+    upload = invoke(bound, request("/upload", method="POST"))[0]
+    await until(lambda: bound.waiting_groups["write"] == 1)
+    native, messages, _ = invoke(bound, request(history))
+    await until(lambda: bound.waiting_groups["write"] == 2)
+    assert bound.inflight == 1
+    release.set()
+    await asyncio.gather(owner, *polls, upload, native)
+    assert entered[:3] == ["/v1/competition/readiness", "/upload", history]
+    assert messages[0]["status"] == 200
+    assert bound.inflight == bound.reserved == bound.waiting == bound.shared_bytes == 0
+
+
+async def test_identical_public_history_reads_share_only_the_inflight_snapshot():
+    release = asyncio.Event()
+    entered = []
+    history = "/v1/competition/cohorts/" + "a" * 64 + "/history"
+
+    async def app(scope, receive, send):
+        entered.append(scope["path"])
+        await release.wait()
+        await success(send)
+
+    bound = binding(app)
+    owner = invoke(bound, request(history))[0]
+    await until(lambda: bound.inflight == 1)
+    follower, messages, _ = invoke(bound, request(history))
+    await until(lambda: bound.waiting == 1)
+    release.set()
+    await asyncio.gather(owner, follower)
+    assert entered == [history]
+    assert messages[0]["status"] == 200
+    await invoke(bound, request(history))[0]
+    assert entered == [history, history]
+
+
+@pytest.mark.parametrize("suffix", ["authority", "readiness", "history/extra"])
+def test_other_cohort_reads_do_not_take_history_priority_or_share(suffix):
+    bound = binding(None)
+    scope = request("/v1/competition/cohorts/" + "a" * 64 + "/" + suffix)
+    assert bound._group(scope) == "read"
+    assert bound._share_key(scope) is None
+
+
 async def test_selected_production_byte_bounds_allow_coalescing_and_one_owned_graph():
     release, entered = asyncio.Event(), []
 

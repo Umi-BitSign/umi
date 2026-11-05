@@ -108,9 +108,11 @@ def _within(value, reference, bps=1000):
     return reference * (10_000 - bps) <= value * 10_000 <= reference * (10_000 + bps)
 
 
-def _probe_work(probe):
+def _probe_work(probe, *, cpu_work_only=False):
     # Normal scheduler balancing is intentional. Do not pretend a Python
     # worker is a particular core, or select the fastest worker as the result.
+    if cpu_work_only:
+        return (sum(worker.thread_cpu_us for worker in probe.workers),)
     return (
         max(worker.wall_us for worker in probe.workers),
         sum(worker.thread_cpu_us for worker in probe.workers),
@@ -138,9 +140,12 @@ def validate_conditions(evidence, timing):
         and probes[1].started_us - timing.after.finished_us <= limits.maximum_probe_boundary_gap_us
     ):
         _fail("cpu_condition_probe_not_contemporaneous")
+    cpu_work_only = timing.schema_ == "umi-cpu-timing-evidence/3"
     if any(
         not _within(right, left)
-        for left, right in zip(_probe_work(probes[0]), _probe_work(probes[1]), strict=True)
+        for left, right in zip(
+            *(_probe_work(probe, cpu_work_only=cpu_work_only) for probe in probes), strict=True
+        )
     ):
         _fail("cpu_condition_probe_changed_during_invocation")
     observer = evidence.observer
@@ -181,13 +186,17 @@ def validate_conditions(evidence, timing):
     return changes
 
 
-def comparable_conditions(candidate, baseline):
+def comparable_conditions(candidate, baseline, *, cpu_work_only=False):
     if candidate.topology_sha256 != baseline.topology_sha256:
         _fail("cpu_condition_incomparable_topology")
     for own in (candidate.before_probe, candidate.after_probe):
         for reference in (baseline.before_probe, baseline.after_probe):
             if len(own.cpu_ids) != len(reference.cpu_ids) or any(
                 not _within(a, b)
-                for a, b in zip(_probe_work(own), _probe_work(reference), strict=True)
+                for a, b in zip(
+                    _probe_work(own, cpu_work_only=cpu_work_only),
+                    _probe_work(reference, cpu_work_only=cpu_work_only),
+                    strict=True,
+                )
             ):
                 _fail("cpu_condition_incomparable_reference_calibration")

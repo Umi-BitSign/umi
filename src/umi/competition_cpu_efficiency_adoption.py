@@ -12,6 +12,7 @@ from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_his
 from .competition_cohort_intake import history_tip
 from .competition_cpu_efficiency_policy import (
     CohortCpuEfficiencyAdoption,
+    cpu_adoption_slot,
     default_cpu_efficiency_proposal,
 )
 from .competition_evaluation_runtime import (
@@ -91,17 +92,18 @@ def verify_cpu_efficiency_request(request, history, policy, *, current_block):
         ),
         reason=body.reason,
         issued_at_block=body.issued_at_block,
+        measurement_semantics=body.measurement_semantics,
     )
     if body != expected:
         raise ValueError("CPU adoption changes the fixed rule, authority scope or CPU runtime")
 
 
 async def attest_cpu_efficiency(reviewer, request):
-    """One immutable decision per authority; completed votes never reread history."""
+    """One immutable decision per authority and signed measurement protocol."""
     request = CpuEfficiencyReviewRequest.model_validate_json(canonical_json_bytes(request))
     body, cohort = request.adoption, request.anchor_cohort_sha256
-    slot = body.authority_sha256
-    if reviewer.cohorts.get(cohort) != slot:
+    slot = cpu_adoption_slot(body.authority_sha256, body.measurement_semantics)
+    if reviewer.cohorts.get(cohort) != body.authority_sha256:
         raise ValueError("CPU adoption is outside configured cohort authority")
     directory = reviewer.config.cpu_efficiency_adoptions_directory
     if directory is None:
@@ -126,7 +128,7 @@ async def attest_cpu_efficiency(reviewer, request):
 @memory_operation
 async def _attest_cpu_efficiency_pending(reviewer, request, saved, directory):
     body, cohort = request.adoption, request.anchor_cohort_sha256
-    slot = body.authority_sha256
+    slot = cpu_adoption_slot(body.authority_sha256, body.measurement_semantics)
     with (
         work_heartbeats(),
         WorkProgress(

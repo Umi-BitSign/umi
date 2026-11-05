@@ -22,6 +22,7 @@ from umi.competition_cpu_efficiency_adoption import (
     attest_cpu_efficiency,
 )
 from umi.competition_cpu_efficiency_policy import (
+    cpu_adoption_slot,
     default_cpu_efficiency_proposal,
 )
 from umi.open_competition import digest, identity, sign_object
@@ -105,7 +106,8 @@ def cpu_review(scenario, policy, runtime_adoption, tmp_path):
         directory = Path(config.cpu_efficiency_adoptions_directory)
         ensure_private_directory(directory)
         if approve:
-            publish_private_model(directory / (digest(authority) + ".candidate.json"), request)
+            slot = cpu_adoption_slot(body.authority_sha256, body.measurement_semantics)
+            publish_private_model(directory / (slot + ".candidate.json"), request)
         return reviewer
 
     return SimpleNamespace(
@@ -139,6 +141,49 @@ async def test_completed_cpu_vote_reuses_original_without_candidate_history_or_r
     c.state.online = False
     assert await attest_cpu_efficiency(restarted, c.request) == vote
     assert len(c.state.votes) == 1
+
+
+@pytest.mark.parametrize("version", [2, 3])
+async def test_successor_signing_preserves_v1_candidate_vote_and_offline_replay(
+    cpu_review, version
+):
+    from umi.protocol import canonical_json_bytes
+
+    c = cpu_review
+    reviewer = c.create("Charlie")
+    directory = Path(reviewer.config.cpu_efficiency_adoptions_directory)
+    legacy_body = c.request.adoption.model_copy(
+        update={
+            "measurement_semantics": "umi-exclusive-cold-model-cpu-timing/1",
+            "reward_rule": "cold_cpu_relative_latency/1",
+            "timing_rule": "cold_model_exec_to_validated_result/1",
+        }
+    )
+    current_body = (
+        c.request.adoption
+        if version == 3
+        else legacy_body.model_copy(
+            update={"measurement_semantics": "umi-exclusive-cold-model-cpu-timing/2"}
+        )
+    )
+    current_request = c.request.model_copy(update={"adoption": current_body})
+    legacy_request = c.request.model_copy(update={"adoption": legacy_body})
+    legacy_path = directory / (legacy_body.authority_sha256 + ".candidate.json")
+    publish_private_model(legacy_path, legacy_request)
+    original = legacy_path.read_bytes()
+    legacy_vote = await attest_cpu_efficiency(reviewer, legacy_request)
+    current_slot = cpu_adoption_slot(
+        current_body.authority_sha256, current_body.measurement_semantics
+    )
+    publish_private_model(directory / (current_slot + ".candidate.json"), current_request)
+    current_vote = await attest_cpu_efficiency(reviewer, current_request)
+    assert legacy_path.read_bytes() == original == canonical_json_bytes(legacy_request)
+    assert current_vote.adoption != legacy_vote.adoption
+    restarted = c.create("Charlie")
+    c.state.online = False
+    assert await attest_cpu_efficiency(restarted, legacy_request) == legacy_vote
+    assert await attest_cpu_efficiency(restarted, current_request) == current_vote
+    assert len(c.state.votes) == 2
 
 
 async def test_cpu_adoption_uses_native_memory_lane_and_completed_vote_needs_no_grant(
@@ -208,7 +253,12 @@ async def test_cpu_review_independently_refuses_changed_contract(cpu_review, cha
     reviewer = c.create("Charlie")
     publish_private_model(
         Path(reviewer.config.cpu_efficiency_adoptions_directory)
-        / (request.adoption.authority_sha256 + ".candidate.json"),
+        / (
+            cpu_adoption_slot(
+                request.adoption.authority_sha256, request.adoption.measurement_semantics
+            )
+            + ".candidate.json"
+        ),
         request,
     )
     with pytest.raises(ValueError):
@@ -360,7 +410,8 @@ async def test_cpu_quorum_reuses_votes_after_interruption_and_selects_owner_last
     with pytest.raises(OSError):
         await o.run()
     assert len(o.c.state.votes) == 1
-    assert not (o.selected[0].directory / (digest(o.c.authority) + ".json")).exists()
+    slot = cpu_adoption_slot(digest(o.c.authority), o.c.request.adoption.measurement_semantics)
+    assert not (o.selected[0].directory / (slot + ".json")).exists()
     o.state.fail_vote = None
     first = await o.run()
     assert o.state.deliveries[-1] == o.config.owner.service_unit
@@ -378,7 +429,8 @@ async def test_cpu_signed_delivery_failure_and_lost_vote_require_exact_recovery(
     with pytest.raises(OSError):
         await o.run()
     before = list(o.state.calls)
-    assert not (o.selected[0].directory / (digest(o.c.authority) + ".json")).exists()
+    slot = cpu_adoption_slot(digest(o.c.authority), o.c.request.adoption.measurement_semantics)
+    assert not (o.selected[0].directory / (slot + ".json")).exists()
     o.state.fail_delivery = None
     await o.run()
     assert o.state.calls == before
@@ -412,6 +464,11 @@ async def test_cpu_series_once_per_authority_reuses_and_repairs_without_source_h
     cpu_operator, tmp_path
 ):
     o = cpu_operator
+    legacy_state = tmp_path / "series" / "cpu-efficiency" / digest(o.c.authority)
+    legacy_state.mkdir(parents=True)
+    legacy_plan = legacy_state / "plan.json"
+    legacy_plan.write_bytes(b"original v1 job must not be read, replaced or repaired by v2")
+    original = legacy_plan.read_bytes()
     config = ModelBatchAdoptionSeriesConfig(
         schema="umi-model-batch-adoption-series/1",
         state_directory=str(tmp_path / "series"),
@@ -444,9 +501,14 @@ async def test_cpu_series_once_per_authority_reuses_and_repairs_without_source_h
     first = await run()
     assert first["completed"] == first["total"] == 1
     assert first["authority_sha256"] == digest(o.c.authority)
+    assert legacy_plan.read_bytes() == original
+    assert (
+        tmp_path / "series" / "cpu-efficiency-v3" / digest(o.c.authority) / "completion.json"
+    ).is_file()
     assert (await run())["status"] == "reused"
     assert len(o.c.state.votes) == 2
-    path = o.selected[1].directory / (digest(o.c.authority) + ".json")
+    slot = cpu_adoption_slot(digest(o.c.authority), o.c.request.adoption.measurement_semantics)
+    path = o.selected[1].directory / (slot + ".json")
     original = path.read_bytes()
     path.unlink()
     assert (await run())["status"] == "repaired"
