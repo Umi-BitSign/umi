@@ -131,7 +131,7 @@ class StandingRewardCoverageService:
             drained, key = await run_owned_thread(
                 self._preparation_coverage_index.advance, activation
             )
-            if drained:
+            if drained or key is not None:
                 return key
 
     async def restore_preparation(self, activation, *, through_block):

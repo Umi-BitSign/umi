@@ -50,15 +50,42 @@ def test_inventory_resumes_bounded_pages_and_captures_appends(anchors, caplog):
     c = anchors
     c.endpoint(110)
     earlier = c.endpoint(100)
+    absent = c.activation.model_copy(update={"cohort_sha256": "88" * 32})
     index = PreparationCoverageIndex(c.journal)
     with caplog.at_level("INFO", logger="umi.competition.progress"):
-        assert index.advance(c.activation, maximum_endpoints=1) == (False, None)
+        assert index.advance(absent, maximum_endpoints=1) == (False, None)
         restarted = PreparationCoverageIndex(c.reopen())
+        assert restarted.advance(absent, maximum_endpoints=1) == (True, None)
         assert restarted.advance(c.activation, maximum_endpoints=1) == (True, earlier.point.key())
     assert "standing_preparation_completion_inventory" in caplog.text
     assert "retained_completion_metadata_remaining" in caplog.text
     first = c.endpoint(90)
+    assert restarted.advance(absent, maximum_endpoints=1) == (True, None)
     assert restarted.advance(c.activation, maximum_endpoints=1) == (True, first.point.key())
+
+
+def test_first_matching_endpoint_returns_before_rest_of_inventory(anchors, monkeypatch, caplog):
+    c = anchors
+    first = c.endpoint(100)
+    c.endpoint(101)
+    c.endpoint(102)
+    index = PreparationCoverageIndex(c.journal)
+    original = c.journal.journal.get
+    reads = []
+
+    def only_first_completion(kind, key, **kwargs):
+        if kind == "coverage_verified":
+            reads.append(key)
+            assert len(reads) == 1
+        return original(kind, key, **kwargs)
+
+    monkeypatch.setattr(c.journal.journal, "get", only_first_completion)
+    with caplog.at_level("INFO", logger="umi.competition.progress"):
+        assert index.advance(c.activation) == (False, first.point.key())
+        assert index.advance(c.activation) == (False, first.point.key())
+    assert "selected_native_completion_found" in caplog.text
+    with c.journal.journal.read_transaction() as db:
+        assert db.execute(f"SELECT position,number FROM {STATE}").fetchone() == (1, 1)
 
 
 @pytest.mark.parametrize(

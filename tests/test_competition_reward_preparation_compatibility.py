@@ -324,3 +324,18 @@ async def test_executor_restores_selected_activation_before_package_loading():
         selected, SimpleNamespace(snapshot=SimpleNamespace(block_number=100)), object()
     )
     assert result is prepared and calls == [(selected, 100)]
+
+
+async def test_found_legacy_preparation_does_not_drain_unrelated_metadata():
+    selected = activation()
+    calls = []
+
+    def advance(value):
+        calls.append(value)
+        assert len(calls) == 1
+        return False, "aa" * 32
+
+    coverage = object.__new__(StandingRewardCoverageService)
+    coverage._preparation_coverage_index = SimpleNamespace(advance=advance)
+    assert await coverage._preparation_endpoint(selected) == "aa" * 32
+    assert calls == [selected]

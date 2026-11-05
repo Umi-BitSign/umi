@@ -946,8 +946,10 @@ predecessor handoff through executor shutdown. Transient failures retry with ret
 an exited finality observer ends the service invocation so boot supervision can
 construct a new provider. Startup reconstructs the first activation from complete
 retained control history and prepares its original reward package. Completed native
-preparation is retained under the promotion store's
-`verification/<series>/native/prepared-rewards`, with its sibling owner marker.
+preparation is retained in `prepared-rewards` under the selected native verification
+directory, with its sibling owner marker. `UMI_NATIVE_VERIFICATION_DIRECTORY`
+selects the shared owner namespace when configured; otherwise the directory is
+the promotion store's `verification/<series>/native`.
 Preserve both with the existing validator state. Restart restores the exact
 allocation after checking its immutable package identity, policy, authority,
 transport qualification and model dependencies. An interrupted dependency capture
@@ -960,7 +962,9 @@ package snapshot and compact allocation export. It does not capture replacement
 coverage. If the older live-anchor index is absent, a bounded metadata inventory
 indexes retained native completions once, checkpoints each batch and resumes after
 restart. It reads no package, model or proof payload. Only a drained inventory with
-no matching completion permits first preparation; damaged completion metadata
+no matching completion permits first preparation. A matching completion returns
+immediately without reading unrelated endpoint metadata; the remaining inventory
+keeps its saved position. Damaged completion metadata
 requires repair. Legacy directory-backed models still require
 their original asset checks, and promotion-based allocations refresh their selected
 native promotion receipt and conflict state. These checks grant no transaction

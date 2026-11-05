@@ -141,13 +141,36 @@ class PreparationCoverageIndex:
             "activation=excluded.activation,block=excluded.block,result=excluded.result",
             (position, key, point.activation_sha256, point.block, retained[0]),
         )
+        return point.activation_sha256
+
+    def _selected(self, db, activation):
+        selected = db.execute(
+            f"SELECT id,result FROM {TABLE} WHERE activation=? ORDER BY block,id LIMIT 1",
+            (activation,),
+        ).fetchone()
+        if (
+            selected is None
+            or db.execute(f"SELECT 1 FROM {PENDING} WHERE id=?", (selected[0],)).fetchone()
+        ):
+            return None
+        actual = db.execute(
+            "SELECT result FROM coverage_checkpoint_index WHERE id=?", (selected[0],)
+        ).fetchone()
+        if actual != (selected[1],):
+            raise CoverageCheckpointRepairRequired("selected preparation endpoint index changed")
+        return selected[0]
 
     def advance(self, activation, *, maximum_endpoints=256):
-        """Return (drained, endpoint); no match is meaningful only when drained."""
+        """Return (drained, endpoint); a found hint needs no further inventory.
+
+        Only absence requires a drained inventory. The selected endpoint still
+        needs the native coverage owner's restoration, independent of this hint.
+        """
         if type(maximum_endpoints) is not int or maximum_endpoints < 1:
             raise ValueError("preparation discovery requires a positive metadata batch")
         with self.journal.locked(), self.journal.transaction() as db:
             position, last = self._state(db)
+            activation = digest(activation)
             pending = db.execute(
                 f"SELECT id FROM {PENDING} ORDER BY id LIMIT ?", (maximum_endpoints,)
             ).fetchall()
@@ -158,6 +181,12 @@ class PreparationCoverageIndex:
                 planning_unit_seconds=(0.00001, 0.01),
             ) as progress:
                 progress.advance(position, restored=True)
+                selected = self._selected(db, activation)
+                if selected is not None:
+                    drained = position == last and not pending
+                    if not drained:
+                        progress.emit("matched", reason="selected_native_completion_found")
+                    return drained, selected
                 for (key,) in pending:
                     row = db.execute(
                         "SELECT rowid,owner FROM coverage_completion_ledger WHERE id=?", (key,)
@@ -167,43 +196,43 @@ class PreparationCoverageIndex:
                             "completed endpoint lost its original owner"
                         )
                     # A future ledger page owns as-yet-unindexed endpoints.
-                    if row[0] <= position:
-                        self._retain(db, row[0], key)
+                    if row[0] <= position and self._retain(db, row[0], key) == activation:
+                        selected = key
                     db.execute(f"DELETE FROM {PENDING} WHERE id=?", (key,))
                     progress.advance(1)
-                rows = db.execute(
-                    "SELECT rowid,id,owner FROM coverage_completion_ledger WHERE rowid>? "
-                    "ORDER BY rowid LIMIT ?",
-                    (position, maximum_endpoints - len(pending)),
-                ).fetchall()
+                    if selected is not None:
+                        break
+                rows = (
+                    ()
+                    if selected is not None
+                    else db.execute(
+                        "SELECT rowid,id,owner FROM coverage_completion_ledger WHERE rowid>? "
+                        "ORDER BY rowid LIMIT ?",
+                        (position, maximum_endpoints - len(pending)),
+                    ).fetchall()
+                )
                 for number, key, owner in rows:
                     if number != position + 1 or owner != self.owner.checkpoints.owner:
                         raise CoverageCheckpointRepairRequired(
                             "coverage completion inventory changed"
                         )
-                    self._retain(db, number, key)
+                    if self._retain(db, number, key) == activation:
+                        selected = key
                     position = number
                     db.execute(f"UPDATE {STATE} SET position=? WHERE id=1", (position,))
                     progress.advance(1)
+                    if selected is not None:
+                        break
                 self._state(db)
                 drained = (
                     position == last
                     and db.execute(f"SELECT 1 FROM {PENDING} LIMIT 1").fetchone() is None
                 )
                 if not drained:
-                    progress.emit("pending", reason="retained_completion_metadata_remaining")
-                    return False, None
-                selected = db.execute(
-                    f"SELECT id,result FROM {TABLE} WHERE activation=? ORDER BY block,id LIMIT 1",
-                    (digest(activation),),
-                ).fetchone()
-                if selected is None:
-                    return True, None
-                actual = db.execute(
-                    "SELECT result FROM coverage_checkpoint_index WHERE id=?", (selected[0],)
-                ).fetchone()
-                if actual != (selected[1],):
-                    raise CoverageCheckpointRepairRequired(
-                        "selected preparation endpoint index changed"
+                    progress.emit(
+                        "matched" if selected else "pending",
+                        reason="selected_native_completion_found"
+                        if selected
+                        else "retained_completion_metadata_remaining",
                     )
-                return True, selected[0]
+                return drained, selected
