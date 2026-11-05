@@ -14,18 +14,22 @@ import pytest
 
 
 def test_resident_notifies_then_stays_alive_until_service_stop():
-    source = str(Path(__file__).resolve().parents[1] / 'src')
-    address = 'umi-cpu-resident-test-' + uuid.uuid4().hex
+    source = str(Path(__file__).resolve().parents[1] / "src")
+    address = "umi-cpu-resident-test-" + uuid.uuid4().hex
     with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as channel:
-        channel.bind('\0' + address)
+        channel.bind("\0" + address)
         channel.settimeout(5)
-        code = ('import sys;sys.path.insert(0,' + repr(source) + ');'
-                'from umi.host_cpu_partition import retain_partition_service;'
-                'retain_partition_service()')
-        child = subprocess.Popen([sys.executable, '-I', '-B', '-c', code],
-                                 env={**os.environ, 'NOTIFY_SOCKET': '@' + address})
+        code = (
+            "import sys;sys.path.insert(0," + repr(source) + ");"
+            "from umi.host_cpu_partition import retain_partition_service;"
+            "retain_partition_service()"
+        )
+        child = subprocess.Popen(
+            [sys.executable, "-I", "-B", "-c", code],
+            env={**os.environ, "NOTIFY_SOCKET": "@" + address},
+        )
         try:
-            assert channel.recv(1024).startswith(b'READY=1\n')
+            assert channel.recv(1024).startswith(b"READY=1\n")
             assert child.poll() is None
         finally:
             child.terminate()
@@ -34,17 +38,19 @@ def test_resident_notifies_then_stays_alive_until_service_stop():
 
 def test_resident_requires_notify_supervision(monkeypatch):
     from umi import host_cpu_partition as module
-    monkeypatch.delenv('NOTIFY_SOCKET', raising=False)
-    with pytest.raises(RuntimeError, match='notify supervision'):
+
+    monkeypatch.delenv("NOTIFY_SOCKET", raising=False)
+    with pytest.raises(RuntimeError, match="notify supervision"):
         module.retain_partition_service()
 
 
 def test_partition_directories_remain_readable_under_private_umask(tmp_path, monkeypatch):
     from umi import host_cpu_partition as module
-    monkeypatch.setattr(module, 'DOMAIN', tmp_path)
+
+    monkeypatch.setattr(module, "DOMAIN", tmp_path)
     before = os.umask(0o077)
     try:
-        child = tmp_path / 'models'
+        child = tmp_path / "models"
         module.directory(child)
         assert child.stat().st_mode & 0o777 == 0o755
     finally:
