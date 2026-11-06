@@ -60,5 +60,6 @@
   "source_revision": "9960523a4466194eff1ca5cb656ff78d2b9057d5",
   "dispatch_repair_definitions_sha256": "332514d87cd0d325f836628226cf668e720ece123e59c7bc86d999401f197a9c",
   "model_license_definitions_sha256": "a5b88386466aca80ca5cbb7109cbece766f2832f65338447b0a11baae49f4a63",
-  "cpu_timing_definitions_sha256": "4d00eb608e180a1b9274a381154df49093b631c22c9872e1de901ab8230e6a9e"
+  "cpu_timing_definitions_sha256": "4d00eb608e180a1b9274a381154df49093b631c22c9872e1de901ab8230e6a9e",
+  "cpu_scheduler_timing_sample_sha256": "ff38dad358bce929153c08a1df617666baf191ebea8e5f90dc82bd17885fe842"
 }

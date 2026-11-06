@@ -180,6 +180,27 @@ def test_published_schemas_match_pre_refactor_contracts() -> None:
                     "ProbeWorker",
                 )
             }
+            # Scheduler/CPU-work evidence extends v1 with a versioned sample.
+            # Pin the addition, then check the unchanged original schema below.
+            scheduler = definitions.pop("CpuSchedulerTimingSample")
+            assert json_sha256(scheduler) == contracts["cpu_scheduler_timing_sample_sha256"]
+            timing = additions["CpuTimingEvidence"]["properties"]
+            tag = timing["schema"]
+            assert tag.pop("enum") == [
+                "umi-cpu-timing-evidence/1",
+                "umi-cpu-timing-evidence/2",
+                "umi-cpu-timing-evidence/3",
+            ]
+            tag["const"] = "umi-cpu-timing-evidence/1"
+            for boundary in ("before", "after"):
+                assert timing[boundary] == {
+                    "anyOf": [
+                        {"$ref": "#/$defs/CpuSchedulerTimingSample"},
+                        {"$ref": "#/$defs/CpuTimingSample"},
+                    ],
+                    "title": boundary.title(),
+                }
+                timing[boundary] = {"$ref": "#/$defs/CpuTimingSample"}
             assert json_sha256(additions) == contracts["cpu_timing_definitions_sha256"]
         execution = definitions.get("OfflineCaseExecution")
         if execution is not None:
