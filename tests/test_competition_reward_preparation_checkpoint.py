@@ -102,6 +102,35 @@ def test_full_allocation_payload_keeps_room_for_native_dependency_envelope(check
     assert reopened.status(ACTIVATION, 100) == value
 
 
+def test_shared_consumers_select_their_own_earliest_fact_without_rewriting(checkpoints):
+    checkpoints.begin(ACTIVATION, PACKAGE)
+    owner = {"package_identity": {"path": "/owner/package", "stamp": [1, 2]}, "verifier": "owner"}
+    writer = {
+        "package_identity": {"path": "/writer/package", "stamp": [3, 4]},
+        "verifier": "writer",
+    }
+    values = {100: result(100) | owner, 120: result(120) | writer, 150: result(150) | writer}
+    for block in (120, 150, 100):
+        checkpoints.retain_native(ACTIVATION, block, values[block])
+    reopened = module.PreparationCheckpoints(checkpoints.root, BINDING)
+    assert reopened.status(ACTIVATION, 200) == values[100]
+    assert reopened.status(ACTIVATION, 200, context=writer) == values[120]
+    assert reopened.status(ACTIVATION, 200, context=owner) == values[100]
+    with pytest.raises(module.PreparationCheckpointRepairRequired, match="consumer context"):
+        reopened.status(ACTIVATION, 119, context=writer)
+    with pytest.raises(module.PreparationCheckpointRepairRequired, match="consumer context"):
+        reopened.status(ACTIVATION, 200, context=writer | {"verifier": "changed"})
+    with pytest.raises(ValueError, match="nonempty"):
+        reopened.status(ACTIVATION, 200, context={})
+    with reopened.journal.read_transaction() as db:
+        retained = dict(
+            db.execute(
+                f"SELECT reviewed_at_block,body FROM {module.TABLE} WHERE kind=?", (module.NATIVE,)
+            )
+        )
+    assert retained == {block: canonical_json_bytes(value) for block, value in values.items()}
+
+
 @pytest.mark.parametrize("damage", ["primary", "mirror", "both", "changed"])
 @pytest.mark.parametrize("kind", [module.NATIVE, module.COMPLETE])
 def test_missing_or_changed_completed_records_require_repair(checkpoints, damage, kind):

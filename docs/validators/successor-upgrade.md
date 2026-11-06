@@ -980,6 +980,12 @@ Preserve both with the existing validator state. Restart restores the exact
 allocation after checking its immutable package identity, policy, authority,
 transport qualification and model dependencies. An interrupted dependency capture
 or allocation export resumes after native completion without replaying the package.
+When the coordinator and writer share this directory, each selects the earliest
+eligible retained completion matching its exact package identity and verification
+context. Another consumer's earlier completion cannot displace that record.
+Existing ledger entries need no conversion or rewriting; a missing matching
+completion still requires explicit repair. Carry this reader through supported
+validator and coordinator upgrades while preserving the shared directory.
 Missing completed metadata requires explicit repair; an unfinished first preparation
 continues its original native path. For an older writer with no preparation
 checkpoint, startup and current-package preparation first look for its indexed

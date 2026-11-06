@@ -7132,6 +7132,48 @@ async def test_native_completion_resumes_interrupted_dependencies_without_replay
     assert attempts == [1, 1]
 
 
+async def test_earlier_peer_completion_cannot_displace_writer_context(
+    preparation_case, tmp_path, monkeypatch
+):
+    from umi.competition_reward_files import StandingRewardFiles
+    from umi.competition_verification_snapshot import VerifiedPackageSnapshot
+
+    p = preparation_case
+    packages = []
+    for name in ("writer", "coordinator"):
+        files = StandingRewardFiles(
+            tmp_path / name,
+            maximum_package_bytes=p.preparation.maximum_package_bytes,
+            maximum_witness_bytes=1024**2,
+        )
+        files.retain_package(p.package)
+        packages.append(files.verified_package(digest(p.package)))
+    writer, coordinator = packages
+    ready = await p.preparation.prepare(writer, **replay_args(await p.observations()))
+    reuse = p.preparation.preparation_reuse
+    peer_context = reuse._context(coordinator, ready.activation)
+    peer_block = ready.reviewed_at_block - 1
+    peer = peer_context | {
+        "reviewed_at_block": peer_block,
+        "allocation": ready.allocation.model_dump(mode="json", by_alias=True),
+    }
+    # Earlier native work from another consumer coexists with the writer's
+    # completion; its different immutable local path is not damaged evidence.
+    reuse.store.retain_native(digest(ready.activation), peer_block, peer)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("consumer selection repeated payload reads or native allocation")
+
+    monkeypatch.setattr(preparation, "_replay_detached_reward_package", forbidden)
+    monkeypatch.setattr(VerifiedPackageSnapshot, "read", forbidden)
+    restarted = p.reopen()
+    restored = await restarted.prepare(writer, **replay_args(await p.observations()))
+    assert restored.allocation == ready.allocation
+    assert restored.reviewed_at_block == ready.reviewed_at_block
+    assert not restored.chain_submission_authorized
+    assert reuse.store.status(digest(ready.activation), ready.reviewed_at_block) == peer
+
+
 async def test_completed_preparation_owner_loss_is_not_first_work(
     preparation_case, monkeypatch, caplog
 ):

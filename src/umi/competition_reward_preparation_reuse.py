@@ -121,6 +121,13 @@ class PreparationReuse:
             self.store.begin(digest(activation), activation.package_sha256)
             return None
         context = self._context(package, activation)
+        if any(value.get(key) != expected for key, expected in context.items()):
+            # Shared verification stores can contain an earlier completed fact
+            # for another consumer's package path or model verifier. Reuse this
+            # consumer's original fact without rewriting either completion.
+            value = self.store.status(digest(activation), block, context=context)
+            if value is None:
+                raise PreparationCheckpointRepairRequired("completed preparation disappeared")
         if set(value) != set(context) | {"reviewed_at_block", "allocation"} or any(
             value[key] != expected for key, expected in context.items()
         ):
