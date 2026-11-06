@@ -334,29 +334,42 @@ class PreparationCheckpoints:
                 },
             )
 
-    def status(self, activation_sha256: str, through_block: int) -> dict | None:
+    def status(
+        self, activation_sha256: str, through_block: int, *, context: dict | None = None
+    ) -> dict | None:
         activation, block = _hex(activation_sha256), _block(through_block)
+        if context is not None and (type(context) is not dict or not context):
+            raise ValueError("preparation selection requires a nonempty exact context")
         with self._transaction() as db:
             started = self._load(db, STARTED, activation, activation, -1)
-            row = db.execute(
+            rows = db.execute(
                 f"SELECT id,reviewed_at_block FROM {TABLE} WHERE kind=? AND activation=? "
-                "AND reviewed_at_block<=? ORDER BY reviewed_at_block LIMIT 1",
+                "AND reviewed_at_block<=? ORDER BY reviewed_at_block",
                 (NATIVE, activation, block),
-            ).fetchone()
-            if row is None:
-                return None
-            value = self._load(db, NATIVE, row[0], activation, row[1])
-            if (
-                started is None
-                or row[0] != self.key(activation, row[1])
-                or value.get("activation_sha256") != activation
-                or value.get("reviewed_at_block") != row[1]
-                or value.get("package_sha256") != started.get("package_sha256")
-            ):
+            )
+            found = False
+            for row in rows:
+                found = True
+                value = self._load(db, NATIVE, row[0], activation, row[1])
+                if (
+                    started is None
+                    or row[0] != self.key(activation, row[1])
+                    or value.get("activation_sha256") != activation
+                    or value.get("reviewed_at_block") != row[1]
+                    or value.get("package_sha256") != started.get("package_sha256")
+                ):
+                    raise PreparationCheckpointRepairRequired(
+                        "preparation native binding requires repair"
+                    )
+                if context is None or all(
+                    value.get(key) == expected for key, expected in context.items()
+                ):
+                    return value
+            if found and context is not None:
                 raise PreparationCheckpointRepairRequired(
-                    "preparation native binding requires repair"
+                    "completed preparation has no retained fact matching this consumer context"
                 )
-            return value
+            return None
 
     def retain_native(self, activation_sha256: str, reviewed_at_block: int, value: dict) -> None:
         key = self.key(activation_sha256, reviewed_at_block)
