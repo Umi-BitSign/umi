@@ -14,6 +14,20 @@ from copy import deepcopy
 from threading import RLock
 
 DIRECT_UPLOAD_PROGRESS_FIELDS = (
+    "upload_expiry_total",
+    "upload_expiry_completed",
+    "upload_expiry_pending",
+    "upload_expiry_attempted",
+    "upload_expiry_accepted_completions",
+    "upload_expiry_retrying",
+    "upload_expiry_repair_required",
+    "upload_expiry_error_type",
+    "upload_completion_deadline_unix_ms",
+    "upload_expiry_elapsed_seconds",
+    "upload_expiry_eta_seconds",
+    "upload_expiry_eta_basis",
+    "upload_expiry_eta_scope",
+    "upload_expiry_stalled_or_retrying",
     "completion_recovery_total",
     "completion_recovery_attempted",
     "completion_recovery_completed",

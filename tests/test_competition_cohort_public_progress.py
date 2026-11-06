@@ -764,3 +764,29 @@ async def test_awaited_transfer_inherits_cohort_and_restores_scope_on_failure():
     with pytest.raises(RuntimeError, match="provider unavailable"):
         await await_progress(transfer(), stage="promotion", cohort=C)
     assert PUBLIC_COHORT_SCOPE.get() is None
+
+
+def test_upload_expiry_projection_is_cached_and_excludes_provider_identity():
+    state = CohortProgressSnapshots()
+    state.record(
+        "direct_uploads",
+        dict(
+            cohort_sha256=C,
+            stage="direct_model_upload_scheduling",
+            upload_expiry_total=3,
+            upload_expiry_completed=1,
+            upload_expiry_pending=2,
+            upload_expiry_retrying=1,
+            upload_expiry_repair_required=False,
+            upload_expiry_eta_seconds=None,
+            upload_expiry_eta_scope="selected_unfinished_upload_cleanup_only",
+            upload_expiry_stalled_or_retrying=True,
+            upload_completion_deadline_unix_ms=1_800_001_800_000,
+            provider_upload_id="private-provider-id",
+        ),
+    )
+    value = state.snapshot(C)["components"]["direct_uploads"]
+    assert value["upload_expiry_pending"] == 2
+    assert value["upload_expiry_stalled_or_retrying"] is True
+    assert value["upload_completion_deadline_unix_ms"] == 1_800_001_800_000
+    assert "provider_upload_id" not in value

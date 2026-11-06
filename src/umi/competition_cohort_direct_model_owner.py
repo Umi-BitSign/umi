@@ -34,6 +34,7 @@ from .competition_cohort_direct_model_attempts import (
     DirectModelUploadIntent as _DirectModelUploadIntent,
 )
 from .competition_cohort_direct_model_completion import recover_requested_completions
+from .competition_cohort_direct_model_expiry import expire_selected_uploads, expiry_state
 from .competition_cohort_direct_model_selection import select_issued_model_uploads
 from .competition_cohort_direct_model_upload import (
     DirectModelPayload,
@@ -75,6 +76,10 @@ from .competition_cohort_public_progress import (
     PUBLIC_COHORT_SCOPE,
 )
 from .competition_cohort_recovery import ModelDeliveryProfile
+from .competition_cohort_upload_completion_policy import (
+    DirectUploadCompletionClosed,
+    OperatorUploadCompletionPolicy,
+)
 from .competition_model_review_file import reviewed_file_ready
 from .competition_remote_model_verification import require_remote_model_bytes, verify_remote_model
 from .concurrency import run_owned_thread
@@ -302,6 +307,7 @@ class DirectModelUploadOwner:
         review_policy_continuation=None,
         review_policy_authority=None,
         review_policy_plan=None,
+        completion_policy: OperatorUploadCompletionPolicy | None = None,
     ) -> None:
         self.config = DirectModelUploadOwnerConfig.model_validate_json(canonical_json_bytes(config))
         binding_review_policy = self.config.standing_review_policy
@@ -330,6 +336,20 @@ class DirectModelUploadOwner:
         self.policy = policy
         self.selection_context = selection_context
         self.selection_authority = selection_authority
+        self.completion_policy = (
+            None
+            if completion_policy is None
+            else OperatorUploadCompletionPolicy.model_validate_json(
+                canonical_json_bytes(completion_policy)
+            )
+        )
+        if self.completion_policy is not None and (
+            self.completion_policy.admission_deadline.cohort_sha256 != self.config.cohort_sha256
+            or selection_authority is None
+            or selection_authority(self.config.cohort_sha256)
+            != digest(self.completion_policy.admission_deadline)
+        ):
+            raise ValueError("upload completion policy differs from retained intake authority")
         self.participation_ready = participation_ready
         self.continuation_ready = continuation_ready
         self._participation_wake_pending = False
@@ -376,9 +396,34 @@ class DirectModelUploadOwner:
             maximum_uploads=c.maximum_uploads,
             repair_attempt_index=repair_attempt_index,
             maximum_bytes=c.maximum_metadata_bytes,
+            completion_policy=self.completion_policy,
         )
+        if self.completion_policy is not None:
+            if (
+                self.journal._journal_version() == 6
+                and time.time_ns() // 1_000_000
+                >= self.completion_policy.admission_deadline.close_new_admissions_at_unix_ms
+            ):
+                raise ValueError(
+                    "new upload completion policy must be selected before intake closes"
+                )
+            self.journal.activate_completion_policy()
+            self.journal.initialize_poll_cursor(repair=repair_poll_cursor, expiry=True)
         self.journal.initialize_poll_cursor(repair=repair_poll_cursor)
         self.journal.initialize_poll_cursor(repair=repair_poll_cursor, completion=True)
+
+    def upload_expired(self, upload):
+        return self.completion_policy is not None and expiry_state(self, upload, finalized=True)
+
+    def _require_upload_open(self, upload, now_unix_ms=None):
+        if self.completion_policy is not None and (
+            expiry_state(self, upload)
+            or (
+                now_unix_ms is not None
+                and now_unix_ms >= self.completion_policy.close_completion_at_unix_ms
+            )
+        ):
+            raise DirectUploadCompletionClosed("model_upload_completion_closed")
 
     def _request(self, request: CohortParticipationRequest) -> tuple[str, object]:
         request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(request))
@@ -581,6 +626,7 @@ class DirectModelUploadOwner:
                 if signed is None and now_unix_ms < current.retry_after_unix_ms:
                     raise DirectModelUploadPending("direct upload creation is pending")
             generation = 1 if current is None else current.generation + 1
+            self._require_upload_open(upload_sha256, now_unix_ms)
             attempt_id = self.new_attempt_id()
             if (
                 type(attempt_id) is not str
@@ -647,6 +693,7 @@ class DirectModelUploadOwner:
                 raise ValueError("direct upload restart retry differs")
             superseded = self.journal.get("direct-superseded", request.reservation_sha256)
             if superseded is None:
+                self._require_upload_open(body.payload.upload_sha256, now_unix_ms)
                 if current != attempt:
                     raise ValueError("direct upload restart reservation was superseded")
                 if (
@@ -718,6 +765,7 @@ class DirectModelUploadOwner:
             canonical_json_bytes(signed)
         )
         reservation, payload = signed.reservation, signed.reservation.payload
+        self._require_upload_open(payload.upload_sha256, now_unix_ms)
         attempt_raw = self.journal.get("direct-intent", reservation.attempt_id)
         if attempt_raw is None:
             raise FileNotFoundError("direct upload reservation is not retained")
@@ -819,6 +867,7 @@ class DirectModelUploadOwner:
         """Recover the existing latest reservation through bounded owner metadata."""
         if self.journal.get("direct-request", upload_sha256) is None:
             raise FileNotFoundError("direct model upload is unavailable")
+        self._require_upload_open(upload_sha256)
         attempt = self._latest_attempt(upload_sha256)
         reservation = None if attempt is None else self._signed_reservation(attempt)
         if reservation is None:
@@ -829,6 +878,7 @@ class DirectModelUploadOwner:
 
     def status(self, reservation_sha256: str) -> DirectModelUploadStatus:
         reservation = self._reservation_by_digest(reservation_sha256)
+        self._require_upload_open(reservation.reservation.payload.upload_sha256)
         verification_raw = self.journal.get("direct-verification", reservation_sha256)
         verification = (
             None
@@ -1119,6 +1169,14 @@ class DirectModelUploadOwner:
             signed, reservation, attempt, provider = self._completion(signed)
             key = digest(reservation.reservation)
             prior = self.journal.get("direct-completion", key)
+            # Retained completions keep their recovery authority. Expiry never
+            # aborts those attempts; new completion requests close at the bound.
+            self._require_upload_open(
+                reservation.reservation.payload.upload_sha256,
+                None
+                if prior is not None or self.journal.get("direct-object", key) is not None
+                else now_unix_ms,
+            )
             if prior is None:
                 self.journal.put("direct-completion", key, signed)
             else:
@@ -1615,11 +1673,13 @@ class DirectModelUploadOwner:
         } | {upload: "direct_model_reservation_after_cutoff" for upload in selection.ineligible}
         selected = pending = superseded = ineligible = source_bytes = remaining_bytes = 0
         pending_sources = {}
+        completed_uploads = set()
         verified_candidates = []
         for key in keys:
             signed = self._reservation_by_digest(key)
             reservation = signed.reservation
             upload = reservation.payload.upload_sha256
+            completed_uploads.add(upload)
             if upload not in selection.issued:
                 with self.journal.read_transaction() as db:
                     if self.journal.selection_fence(db) != selection_fence:
@@ -1660,6 +1720,7 @@ class DirectModelUploadOwner:
             },
             pending_sources,
             verified_candidates,
+            tuple(item for item in selection.selected if item.upload not in completed_uploads),
         )
 
     def _selection_authority_current(self, selection_fence):
@@ -1727,7 +1788,11 @@ class DirectModelUploadOwner:
             selection_counts,
             pending_sources,
             verified_candidates,
+            unfinished_uploads,
         ) = await run_owned_thread(self._poll_projection)
+        expiry_progress = await expire_selected_uploads(
+            self, unfinished_uploads, now_unix_ms=now_unix_ms, at=_at(now_unix_ms), report=report
+        )
         self._selection_holds = selection_holds
         self._selection_hold_fence = selection_fence
         backfill_complete = False
@@ -1820,6 +1885,7 @@ class DirectModelUploadOwner:
                     "active_object_stage": stage,
                     "last_retry_error_type": last_retry_error,
                     **completion_recovery,
+                    **expiry_progress,
                     **selection_counts,
                 }
             )
@@ -2063,6 +2129,7 @@ class DirectModelUploadOwner:
             "last_error_type": last_error,
             "last_retry_error_type": last_retry_error,
             **completion_recovery,
+            **expiry_progress,
             **selection_counts,
             **await run_owned_thread(self.journal.metadata_snapshot),
         }
@@ -2131,6 +2198,8 @@ class DirectModelUploadOwners:
                 report["objects_pending"]
                 + report["objects_retrying"]
                 + report.get("participation_enqueue_retrying", 0)
+                + report.get("completion_recovery_pending", 0)
+                + report.get("upload_expiry_pending", 0)
             )
         )
 
@@ -2198,13 +2267,18 @@ class DirectModelUploadOwners:
                             and (
                                 visible.get("objects_retrying")
                                 or visible.get("completion_recovery_pending")
+                                or visible.get("upload_expiry_pending")
                             )
                         )
                     ),
                     "error_type": self._errors.get(cohort)
                     or (
-                        visible.get("last_retry_error_type")
-                        if visible and visible.get("objects_retrying")
+                        (
+                            visible.get("last_retry_error_type")
+                            or visible.get("completion_recovery_error_type")
+                            or visible.get("upload_expiry_error_type")
+                        )
+                        if visible
                         else None
                     ),
                 },
@@ -2308,7 +2382,9 @@ class DirectModelUploadOwners:
                 "eta_seconds": None,
                 "eta_basis": "owner_poll_duration_and_new_uploads_unknown",
                 "stalled_or_retrying": bool(
-                    report["objects_retrying"] or report.get("completion_recovery_pending")
+                    report["objects_retrying"]
+                    or report.get("completion_recovery_pending")
+                    or report.get("upload_expiry_pending")
                 ),
                 "chain_submission_authorized": False,
             }

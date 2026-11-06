@@ -273,6 +273,14 @@ and repair status separately from completed-object verification. An unfinished
 reservation without a signed completion still requires the miner to finish its
 upload; these recovery counts do not enumerate all outstanding reservations.
 Provider outages do not impose a lifetime generation limit on your upload.
+If the operator selected an upload completion grace before intake closed, new
+completion and restart requests stop at that bound. Progress exposes it as
+`upload_completion_deadline_unix_ms`. HTTP 410 with reason
+`model_upload_completion_closed` is terminal; keep the original request and source
+files. Already accepted signed completions retain their recovery path while the
+provider still has the upload or completed object. A confirmed loss of both after
+the grace boundary is terminal. Completed objects remain eligible for ordinary
+verification and certification.
 If intake reports `model_upload_metadata_capacity_pending` or
 `model_upload_metadata_repair_required` in the `X-UMI-Reason-Code` response header,
 keep retrying the same signed request; the operator must provision metadata

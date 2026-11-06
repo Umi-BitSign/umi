@@ -14,10 +14,11 @@ from typing import Annotated, Literal
 from pydantic import Field, model_validator
 from typing_extensions import Self
 
+from .competition_cohort_upload_completion_policy import OperatorUploadCompletionPolicy
 from .competition_round_journal import RoundJournal
 from .competition_transport_verification import TransferProgress
 from .open_competition import digest
-from .protocol import Hex32, StrictProtocolModel, sha256_hex
+from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes, sha256_hex
 
 _MARKER = "round_generation_direct_upload_attempts"
 _HEADS = "direct_upload_attempt_heads"
@@ -37,11 +38,20 @@ _POLL_CURSOR_SQL = (
 )
 _COMPLETION_CURSOR = "direct_upload_completion_cursor"
 _COMPLETION_CURSOR_SQL = _POLL_CURSOR_SQL.replace(_POLL_CURSOR, _COMPLETION_CURSOR)
+_EXPIRY_CURSOR = "direct_upload_expiry_cursor"
+_EXPIRY_CURSOR_SQL = _POLL_CURSOR_SQL.replace(_POLL_CURSOR, _EXPIRY_CURSOR)
+_COMPLETION_POLICY_MARKER = "round_generation_direct_completion_deadline"
+_COMPLETION_POLICY_SQL = (
+    f"CREATE TABLE {_COMPLETION_POLICY_MARKER} "
+    "(id INTEGER PRIMARY KEY CHECK(id=1), policy_sha256 TEXT NOT NULL)"
+)
 
 
-def _cursor_schema(completion):
-    if type(completion) is not bool:
+def _cursor_schema(completion, expiry=False):
+    if type(completion) is not bool or type(expiry) is not bool or (completion and expiry):
         raise ValueError("direct upload cursor selection differs")
+    if expiry:
+        return _EXPIRY_CURSOR, _EXPIRY_CURSOR_SQL
     return (
         (_COMPLETION_CURSOR, _COMPLETION_CURSOR_SQL)
         if completion
@@ -99,6 +109,7 @@ class DirectModelAttemptJournal(RoundJournal):
         repair_attempt_index: bool = False,
         existing_only: bool = False,
         read_only: bool = False,
+        completion_policy: OperatorUploadCompletionPolicy | None = None,
     ):
         if type(maximum_uploads) is not int or not 1 <= maximum_uploads <= 4096:
             raise ValueError("direct upload request capacity must be between 1 and 4096")
@@ -109,6 +120,17 @@ class DirectModelAttemptJournal(RoundJournal):
         self._attempt_owner = digest(binding)
         self._attempt_cohort = binding["cohort_sha256"]
         self._repair_attempt_index = repair_attempt_index
+        self._completion_policy = (
+            None
+            if completion_policy is None
+            else OperatorUploadCompletionPolicy.model_validate_json(
+                canonical_json_bytes(completion_policy)
+            )
+        )
+        if self._completion_policy is not None and (
+            self._completion_policy.admission_deadline.cohort_sha256 != self._attempt_cohort
+        ):
+            raise ValueError("upload completion policy belongs to another cohort")
         super().__init__(
             root,
             binding,
@@ -119,7 +141,7 @@ class DirectModelAttemptJournal(RoundJournal):
         )
         if not self.existing_only:
             self._install_attempt_index()
-        elif self._journal_version() != 6:
+        elif self._journal_version() not in (6, 7):
             raise DirectModelAttemptRepairRequired(
                 "direct upload journal needs its supported migration"
             )
@@ -159,7 +181,7 @@ class DirectModelAttemptJournal(RoundJournal):
 
     def _version(self, db):
         version = db.execute("PRAGMA user_version").fetchone()[0]
-        if version != 6:
+        if version not in (6, 7):
             if db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (_MARKER,)).fetchone():
                 raise DirectModelAttemptRepairRequired(
                     "direct upload journal marker was downgraded"
@@ -169,8 +191,66 @@ class DirectModelAttemptJournal(RoundJournal):
             return RoundJournal._version(db)
         if not self._repair_attempt_index:
             self._check_attempt_schema(db)
+        self._check_completion_policy(db, version)
         # This journal does not enable unrelated round-record reservations.
         return 0
+
+    def _check_completion_policy(self, db, version):
+        marker = db.execute(
+            "SELECT sql FROM sqlite_master WHERE name=?", (_COMPLETION_POLICY_MARKER,)
+        ).fetchone()
+        if version == 6:
+            if (
+                marker is not None
+                or db.execute(
+                    "SELECT 1 FROM records WHERE kind='direct-completion-policy' LIMIT 1"
+                ).fetchone()
+            ):
+                raise DirectModelAttemptRepairRequired(
+                    "upload completion policy marker was downgraded"
+                )
+            return
+        if self._completion_policy is None:
+            raise DirectModelAttemptRepairRequired(
+                "retained upload completion policy must be selected"
+            )
+        if marker != (_COMPLETION_POLICY_SQL,) or db.execute(
+            f"SELECT id,policy_sha256 FROM {_COMPLETION_POLICY_MARKER} LIMIT 2"
+        ).fetchall() != [(1, digest(self._completion_policy))]:
+            raise DirectModelAttemptRepairRequired("upload completion policy marker needs repair")
+        if self.get_raw("direct-completion-policy", self._attempt_owner, db=db) != (
+            canonical_json_bytes(self._completion_policy)
+        ):
+            raise DirectModelAttemptRepairRequired("retained upload completion policy differs")
+
+    def activate_completion_policy(self):
+        """Fence old writers atomically with the exact already authorized local policy."""
+        if self._completion_policy is None or self.existing_only:
+            raise ValueError("upload completion policy requires its selected writable owner")
+
+        def activate(db):
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            if version == 7:
+                self._check_completion_policy(db, version)
+                return
+            if version != 6:
+                raise ValueError("unsupported upload completion policy migration")
+            db.execute(_COMPLETION_POLICY_SQL)
+            db.execute(
+                f"INSERT INTO {_COMPLETION_POLICY_MARKER} VALUES (1,?)",
+                (digest(self._completion_policy),),
+            )
+            db.execute("PRAGMA user_version=7")
+            self._check_completion_policy(db, 7)
+
+        with TransferProgress(
+            "direct_upload_completion_policy_selection", 1, unit="records"
+        ) as progress:
+            self.put_many(
+                (("direct-completion-policy", self._attempt_owner, self._completion_policy),),
+                index=activate,
+            )
+            progress.advance(1)
 
     def _check_attempt_schema(self, db):
         for name, expected in ((_MARKER, _MARKER_SQL), (_HEADS, _HEADS_SQL)):
@@ -188,9 +268,9 @@ class DirectModelAttemptJournal(RoundJournal):
     def _install_attempt_index(self):
         with self.transaction() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version == 6 and not self._repair_attempt_index:
+            if version in (6, 7) and not self._repair_attempt_index:
                 return
-            if version not in (0, 6):
+            if version not in (0, 6, 7):
                 raise ValueError("unsupported direct upload attempt migration")
             request_count = db.execute(
                 "SELECT COUNT(*) FROM records WHERE kind='direct-request'"
@@ -215,11 +295,11 @@ class DirectModelAttemptJournal(RoundJournal):
                 raise ValueError("retained direct requests exceed configured upload capacity")
             stage = (
                 "direct_upload_attempt_index_repair"
-                if version == 6
+                if version in (6, 7)
                 else "direct_upload_attempt_index_migration"
             )
             with TransferProgress(stage, request_count + attempt_count, unit="records") as progress:
-                if version == 6:
+                if version in (6, 7):
                     db.execute(f"DROP TABLE IF EXISTS {_HEADS}")
                     db.execute(f"DROP TABLE IF EXISTS {_MARKER}")
                 db.execute(_HEADS_SQL)
@@ -272,7 +352,7 @@ class DirectModelAttemptJournal(RoundJournal):
                         raise DirectModelAttemptRepairRequired("direct upload attempts have a gap")
                 db.execute(_MARKER_SQL)
                 db.execute(f"INSERT INTO {_MARKER} VALUES (1,?,?)", (_SCHEMA, self._attempt_owner))
-                db.execute("PRAGMA user_version=6")
+                db.execute(f"PRAGMA user_version={7 if version == 7 else 6}")
                 self._check_attempt_schema(db)
                 self._check_attempt_capacity(db)
         self._repair_attempt_index = False
@@ -291,10 +371,20 @@ class DirectModelAttemptJournal(RoundJournal):
             raise DirectModelMetadataCapacityPending("direct upload metadata capacity pending")
 
     def _cursor_bytes(self, db):
-        return 64 * sum(self._poll_cursor(db, completion=c) is not None for c in (False, True))
+        policy_marker = (
+            db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name=?", (_COMPLETION_POLICY_MARKER,)
+            ).fetchone()
+            is not None
+        )
+        return 64 * (
+            int(policy_marker)
+            + int(self._poll_cursor(db, expiry=True) is not None)
+            + sum(self._poll_cursor(db, completion=c) is not None for c in (False, True))
+        )
 
-    def _poll_cursor(self, db, *, completion=False):
-        table, expected = _cursor_schema(completion)
+    def _poll_cursor(self, db, *, completion=False, expiry=False):
+        table, expected = _cursor_schema(completion, expiry)
         schema = db.execute("SELECT sql FROM sqlite_master WHERE name=?", (table,)).fetchone()
         if schema is None:
             return None  # Original journals have no scheduling cursor.
@@ -314,13 +404,13 @@ class DirectModelAttemptJournal(RoundJournal):
             raise DirectModelAttemptRepairRequired("direct upload poll cursor needs repair")
         return after
 
-    def initialize_poll_cursor(self, *, repair=False, completion=False):
+    def initialize_poll_cursor(self, *, repair=False, completion=False, expiry=False):
         """Add one bounded scheduling hint, preserving all original signed records."""
         if type(repair) is not bool or self.existing_only:
             raise ValueError("direct upload poll cursor initialization requires a writable owner")
-        table, schema = _cursor_schema(completion)
+        table, schema = _cursor_schema(completion, expiry)
         with self.transaction() as db:
-            if repair or self._poll_cursor(db, completion=completion) is None:
+            if repair or self._poll_cursor(db, completion=completion, expiry=expiry) is None:
                 stage = (
                     "direct_upload_poll_cursor_repair"
                     if repair
@@ -334,14 +424,14 @@ class DirectModelAttemptJournal(RoundJournal):
                     self._check_attempt_capacity(db)
                     progress.advance(1)
 
-    def poll_cursor(self, *, completion=False):
+    def poll_cursor(self, *, completion=False, expiry=False):
         with self.read_transaction() as db:
-            after = self._poll_cursor(db, completion=completion)
+            after = self._poll_cursor(db, completion=completion, expiry=expiry)
         if after is None:
             raise DirectModelAttemptRepairRequired("direct upload poll cursor is missing")
         return after
 
-    def advance_poll_cursor(self, reservation_sha256, *, completion=False):
+    def advance_poll_cursor(self, reservation_sha256, *, completion=False, expiry=False):
         """Checkpoint a selected attempt before I/O; this never acknowledges completion."""
         if (
             type(reservation_sha256) is not str
@@ -349,9 +439,9 @@ class DirectModelAttemptJournal(RoundJournal):
             or any(c not in "0123456789abcdef" for c in reservation_sha256)
         ):
             raise ValueError("direct upload poll reservation differs")
-        table, _ = _cursor_schema(completion)
+        table, _ = _cursor_schema(completion, expiry)
         with self.transaction() as db:
-            after = self._poll_cursor(db, completion=completion)
+            after = self._poll_cursor(db, completion=completion, expiry=expiry)
             if after is None:
                 raise DirectModelAttemptRepairRequired("direct upload poll cursor is missing")
             if after != reservation_sha256:
@@ -370,6 +460,8 @@ class DirectModelAttemptJournal(RoundJournal):
                 "WHERE o.kind='direct-object' AND o.id=c.id) "
                 "AND NOT EXISTS (SELECT 1 FROM records s "
                 "WHERE s.kind='direct-superseded' AND s.id=c.id) "
+                "AND NOT EXISTS (SELECT 1 FROM records e "
+                "WHERE e.kind='direct-completion-expired' AND e.id=c.id) "
                 "ORDER BY c.id LIMIT ?",
                 (self.maximum_rounds + 1,),
             ).fetchall()
