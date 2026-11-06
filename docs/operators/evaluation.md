@@ -609,7 +609,16 @@ Use the existing root-owned host configuration and immutable operator decision;
 this local scheduling choice does not need another signing round and does not
 change signed phase targets, coverage or certificate authority. The owner
 retains it separately from the original intake binding. Removing the config
-entry or restarting cannot reopen the retained deadline; changing it is refused.
+entry or restarting cannot reopen the retained deadline. Before it takes effect,
+an operator may extend it with a fresh message and plan, binding
+`supersedes_deadline_sha256` to the exact prior deadline's competition digest.
+Select compatible owner code first, then put the extension in both intake
+readers through the supported configuration handoff. The owner retains the old
+decision verbatim and atomically selects the extension. An expired deadline
+cannot be reopened, a deadline cannot be shortened, and a legacy ingress bridge
+cannot be changed through this path. Restart reuses the retained extension;
+deploying the superseded configuration is refused. Miner request formats,
+certificates, signed phase history and challenge-start holds are unchanged.
 
 At the deadline, new upload reservations and unreserved participation return
 HTTP 409 with `X-UMI-Reason-Code: cohort_intake_closed`. Exact existing receipts,

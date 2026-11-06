@@ -138,6 +138,7 @@ def cohort_intake_bytes(db) -> int:
             for name in (
                 "cohort_consents",
                 "cohort_admission_deadlines",
+                "cohort_admission_deadline_history",
                 "cohort_admission_drain_snapshots",
                 "cohort_admission_artifacts",
                 "cohort_admission_votes",
