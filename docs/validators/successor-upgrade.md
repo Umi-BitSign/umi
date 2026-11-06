@@ -4072,3 +4072,11 @@ producer without the component remains supported through per-reference metadata
 checks, with an explicit `waiting_for_receipt_owner_upgrade` status; it cannot
 supply a durable fast frontier until its owner has installed the component. New
 remote input dependencies receive one counted metadata adoption before reuse.
+
+Proof-path lookups check the completion, original receipt and damage fences in
+one fresh database snapshot. Duplicate publication and source capture reuse that
+lookup's checked result; subsequent calls still observe new damage or holds.
+Independent readers check both their own damage ledger and the original producer.
+This changes no receipt format, signed input, native proof rule or upload limit.
+Select the qualified reader through the existing source-maintenance path; model
+upload clients require no protocol migration for this metadata optimization.
