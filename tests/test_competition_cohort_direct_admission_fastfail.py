@@ -23,7 +23,9 @@ async def test_direct_admission_cached_cutoff_precedes_finality_capture(monkeypa
         calls.append("cached_status")
         return None if status == "unconfigured" else {"new_admissions_open": status == "open"}
 
-    intake = SimpleNamespace(admission_status=admission_status)
+    intake = SimpleNamespace(
+        admission_status=admission_status, has_admission_permit=lambda signed: False
+    )
 
     async def capture():
         calls.append("capture")

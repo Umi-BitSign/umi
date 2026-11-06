@@ -1,5 +1,6 @@
 """Retained local admission scheduling; never changes signed cohort clocks."""
 
+import time
 from typing import Annotated, Literal
 
 from pydantic import Field, model_serializer, model_validator
@@ -18,12 +19,15 @@ class OperatorAdmissionDeadline(StrictProtocolModel):
     source_sha256: Hex32
     operator_plan_sha256: Hex32
     reason: Annotated[str, Field(min_length=8, max_length=1024)]
+    supersedes_deadline_sha256: Hex32 | None = None
     legacy_reservations_before_unix_ms: Annotated[int, Field(ge=1, le=2**63 - 1)] | None = None
     ingress_cutoff_receipt_sha256: Hex32 | None = None
 
     @model_serializer(mode="wrap")
     def omit_absent_bridge(self, handler):
         value = handler(self)
+        if self.supersedes_deadline_sha256 is None:
+            value.pop("supersedes_deadline_sha256", None)
         if self.legacy_reservations_before_unix_ms is None:
             value.pop("legacy_reservations_before_unix_ms", None)
             value.pop("ingress_cutoff_receipt_sha256", None)
@@ -62,8 +66,47 @@ def retain_deadline(db, selection, history):
     ).fetchone()
     if prior is not None:
         if prior[0] != raw:
-            raise ValueError("retained admission deadline cannot be replaced")
+            previous = OperatorAdmissionDeadline.model_validate_json(prior[0])
+            if (
+                selection.supersedes_deadline_sha256 != digest(previous)
+                or selection.authority_sha256 != previous.authority_sha256
+                or time.time_ns() // 1_000_000 >= previous.close_new_admissions_at_unix_ms
+                or selection.close_new_admissions_at_unix_ms
+                <= previous.close_new_admissions_at_unix_ms
+                or selection.source_sha256 == previous.source_sha256
+                or selection.operator_plan_sha256 == previous.operator_plan_sha256
+                or previous.legacy_reservations_before_unix_ms is not None
+                or selection.legacy_reservations_before_unix_ms is not None
+            ):
+                raise ValueError(
+                    "retained admission deadline cannot be replaced "
+                    "without an exact prospective extension"
+                )
+            # Local operator scheduling can be extended before closure. Preserve
+            # the original decision verbatim; signed phase history never changes.
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS cohort_admission_deadline_history "
+                "(cohort TEXT NOT NULL, sha256 TEXT NOT NULL, body BLOB NOT NULL, "
+                "PRIMARY KEY(cohort,sha256))"
+            )
+            identity = (selection.cohort_sha256, digest(previous))
+            saved = db.execute(
+                "SELECT body FROM cohort_admission_deadline_history WHERE cohort=? AND sha256=?",
+                identity,
+            ).fetchone()
+            if saved is not None and saved[0] != prior[0]:
+                raise ValueError("retained admission deadline history changed")
+            db.execute(
+                "INSERT OR IGNORE INTO cohort_admission_deadline_history VALUES (?,?,?)",
+                (*identity, prior[0]),
+            )
+            db.execute(
+                "UPDATE cohort_admission_deadlines SET body=? WHERE cohort=?",
+                (raw, selection.cohort_sha256),
+            )
         return
+    if selection.supersedes_deadline_sha256 is not None:
+        raise ValueError("admission deadline extension requires its retained predecessor")
     db.execute(
         "INSERT INTO cohort_admission_deadlines VALUES (?,?)",
         (selection.cohort_sha256, raw),
