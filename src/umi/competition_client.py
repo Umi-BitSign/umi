@@ -35,13 +35,14 @@ class CompetitionSubmissionError(RuntimeError):
 
 
 def intake_rejection(response, fallback):
-    """Expose the fixed terminal cutoff reason without trusting response bodies."""
-    reason = (
-        "cohort_intake_closed"
-        if response.status_code == 409
-        and response.headers.get("X-UMI-Reason-Code") == "cohort_intake_closed"
-        else fallback
-    )
+    """Expose fixed terminal reasons without trusting arbitrary response text."""
+    selected = response.headers.get("X-UMI-Reason-Code")
+    reason = fallback
+    if (response.status_code, selected) in {
+        (409, "cohort_intake_closed"),
+        (410, "model_upload_completion_closed"),
+    }:
+        reason = selected
     return CompetitionSubmissionError(reason, status_code=response.status_code)
 
 

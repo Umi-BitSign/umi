@@ -27,6 +27,7 @@ from .competition_cohort_direct_model_upload import (
     SignedDirectModelUploadRestartRequest,
 )
 from .competition_cohort_intake import CohortAdmissionClosed
+from .competition_cohort_upload_completion_policy import DirectUploadCompletionClosed
 from .concurrency import run_owned_thread
 from .open_competition import digest
 
@@ -63,10 +64,19 @@ def _metadata_pending(error):
         if isinstance(error, DirectModelAttemptRepairRequired)
         else "model_upload_metadata_capacity_pending"
     )
+
     return HTTPException(
         503,
         "direct model upload metadata pending; retry unchanged",
         headers={"X-UMI-Reason-Code": reason},
+    )
+
+
+def _completion_closed():
+    return HTTPException(
+        410,
+        "unfinished model upload is closed by its retained completion policy",
+        headers={"X-UMI-Reason-Code": "model_upload_completion_closed"},
     )
 
 
@@ -113,6 +123,8 @@ def direct_model_upload_routes(
             raise HTTPException(
                 503, "direct model upload creation pending; retry unchanged"
             ) from error
+        except DirectUploadCompletionClosed as error:
+            raise _completion_closed() from error
         except (DirectModelAttemptRepairRequired, DirectModelMetadataCapacityPending) as error:
             raise _metadata_pending(error) from error
         except (ValidationError, ValueError) as error:
@@ -134,6 +146,8 @@ def direct_model_upload_routes(
             return await run_owned_thread(
                 partial(owner.issue_capabilities, value, now_unix_ms=now_unix_ms())
             )
+        except DirectUploadCompletionClosed as error:
+            raise _completion_closed() from error
         except (DirectModelAttemptRepairRequired, DirectModelMetadataCapacityPending) as error:
             raise _metadata_pending(error) from error
         except (ValidationError, ValueError) as error:
@@ -159,6 +173,8 @@ def direct_model_upload_routes(
                 "direct model provider generation expired; signed restart required",
                 headers={"X-UMI-Reason-Code": "model_upload_provider_generation_unavailable"},
             ) from error
+        except DirectUploadCompletionClosed as error:
+            raise _completion_closed() from error
         except (DirectModelAttemptRepairRequired, DirectModelMetadataCapacityPending) as error:
             raise _metadata_pending(error) from error
         except (ValidationError, ValueError) as error:
@@ -180,6 +196,8 @@ def direct_model_upload_routes(
             return await owner.restart(value, now_unix_ms=now_unix_ms())
         except DirectModelUploadPending as error:
             raise HTTPException(503, "direct model upload restart pending") from error
+        except DirectUploadCompletionClosed as error:
+            raise _completion_closed() from error
         except (DirectModelAttemptRepairRequired, DirectModelMetadataCapacityPending) as error:
             raise _metadata_pending(error) from error
         except (ValidationError, ValueError) as error:
@@ -194,6 +212,8 @@ def direct_model_upload_routes(
             if not _hex32(upload_sha256):
                 raise FileNotFoundError("direct model upload is unavailable")
             return await run_owned_thread(owner.status_by_upload, upload_sha256)
+        except DirectUploadCompletionClosed as error:
+            raise _completion_closed() from error
         except (DirectModelAttemptRepairRequired, DirectModelMetadataCapacityPending) as error:
             raise _metadata_pending(error) from error
         except FileNotFoundError as error:
@@ -211,6 +231,8 @@ def direct_model_upload_routes(
             if digest(value.reservation.reservation) != reservation:
                 raise ValueError("direct model upload status identity differs")
             return value
+        except DirectUploadCompletionClosed as error:
+            raise _completion_closed() from error
         except (DirectModelAttemptRepairRequired, DirectModelMetadataCapacityPending) as error:
             raise _metadata_pending(error) from error
         except FileNotFoundError as error:

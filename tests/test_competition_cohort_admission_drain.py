@@ -27,6 +27,7 @@ class _Owner:
         self.config = _Config()
         self.records = {}
         self.statuses = {}
+        self.expired = set()
         self.issued = {}
         self.issue_errors = {}
         self.request_reads = 0
@@ -44,6 +45,9 @@ class _Owner:
         if kind == "direct-request":
             self.request_reads += 1
         return self.records.get((kind, key))
+
+    def upload_expired(self, upload):
+        return upload in self.expired
 
     def _latest_attempt(self, upload):
         return upload
@@ -349,3 +353,31 @@ def test_initial_snapshot_waits_for_inflight_reservation_issuance(drain_case):
     owner.issuance_active = False
     assert drain(deadline.cohort_sha256, db, deadline)["pending"] == 1
     assert owner.scans == 1
+
+
+def test_final_expiry_resolves_even_when_latest_attempt_has_no_reservation(drain_case):
+    owner, db, request, deadline = drain_case
+    upload = owner.add(request)
+    drain = DirectAdmissionDrain({deadline.cohort_sha256: owner})
+    assert drain(deadline.cohort_sha256, db, deadline)["pending"] == 1
+    owner._signed_reservation = lambda attempt: None
+    owner.expired.add(upload)
+    result = drain(deadline.cohort_sha256, db, deadline)
+    assert result["pending"] == 0 and result["failed_resolved"] == 1
+
+
+def test_expiry_intent_without_cleanup_receipt_remains_pending(drain_case):
+    from umi.competition_cohort_upload_completion_policy import DirectUploadCompletionClosed
+
+    owner, db, request, deadline = drain_case
+    upload = owner.add(request)
+
+    def closed(_):
+        raise DirectUploadCompletionClosed("cleanup pending")
+
+    owner.status = closed
+    drain = DirectAdmissionDrain({deadline.cohort_sha256: owner})
+    result = drain(deadline.cohort_sha256, db, deadline)
+    assert result["pending"] == 1 and not result.get("repair_required")
+    owner.expired.add(upload)
+    assert drain(deadline.cohort_sha256, db, deadline)["pending"] == 0

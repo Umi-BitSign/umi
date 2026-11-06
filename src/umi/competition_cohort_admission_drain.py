@@ -11,6 +11,7 @@ from .competition_cohort_direct_model_selection import (
     IssuedModelUpload,
     select_issued_model_uploads,
 )
+from .competition_cohort_upload_completion_policy import DirectUploadCompletionClosed
 from .open_competition import digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -150,13 +151,21 @@ class DirectAdmissionDrain:
                         else "superseded_by_admitted_sequence"
                     )
                     continue
+                if owner.upload_expired(item.upload):
+                    resolved[item.upload] = "terminal_failure"
+                    continue
                 attempt = owner._latest_attempt(item.upload)
                 if attempt is None:
                     continue
                 reservation = owner._signed_reservation(attempt)
                 if reservation is None:
                     continue
-                status = owner.status(digest(reservation.reservation))
+                try:
+                    status = owner.status(digest(reservation.reservation))
+                except DirectUploadCompletionClosed:
+                    # The intent fences new completion, but provider cleanup must
+                    # retain its final receipt before this upload can resolve.
+                    continue
                 if status.upload_sha256 != item.upload:
                     raise ValueError("current retained upload status identity differs")
                 if (

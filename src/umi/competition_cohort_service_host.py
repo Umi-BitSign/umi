@@ -75,6 +75,7 @@ from .competition_cohort_reserved_participation import (
 from .competition_cohort_service_api import ServiceWorkAdmissionAPI, prepared_service_roster
 from .competition_cohort_service_queue import ServiceWorkQueue, ServiceWorkQueueConfig
 from .competition_cohort_service_work import MAX_CATALOG_BYTES, SignedServiceWorkCatalog
+from .competition_cohort_upload_completion_policy import OperatorUploadCompletionPolicy
 from .competition_cpu_efficiency_policy import (
     SignedCohortCpuEfficiencyAdoption,
     verify_cpu_efficiency_adoption_selection,
@@ -179,13 +180,25 @@ class DirectModelUploadHostConfig(StrictProtocolModel):
     )
     cleanup_batch_size: Annotated[int, Field(ge=1, le=16)] = 2
     r2_timeout_seconds: Annotated[int, Field(ge=1, le=300)] = 60
+    completion_policies: Annotated[
+        tuple[OperatorUploadCompletionPolicy, ...], Field(max_length=4096)
+    ] = ()
 
     @model_serializer(mode="wrap")
     def preserve_original_review_selection(self, handler):
         value = handler(self)
         if self.standing_review_policy_continuation is None:
             value.pop("standing_review_policy_continuation", None)
+        if not self.completion_policies:
+            value.pop("completion_policies", None)
         return value
+
+    @model_validator(mode="after")
+    def unique_completion_policies(self):
+        cohorts = [p.admission_deadline.cohort_sha256 for p in self.completion_policies]
+        if len(cohorts) != len(set(cohorts)):
+            raise ValueError("upload completion policies require unique cohorts")
+        return self
 
     def stores(self) -> tuple[Path, ...]:
         return tuple(
@@ -755,6 +768,19 @@ class ServiceAdmissionHost:
             raise ValueError("model upload host differs from owned authenticated transport")
         if c.direct_model_uploads is not None:
             direct = c.direct_model_uploads
+            completion_policies = {
+                p.admission_deadline.cohort_sha256: p for p in direct.completion_policies
+            }
+            for cohort, selected_policy in completion_policies.items():
+                if (
+                    cohort not in deliveries
+                    or deliveries[cohort].mechanism != "direct_r2_multipart_v1"
+                    or intake.direct_upload_selection_authority(cohort)
+                    != digest(selected_policy.admission_deadline)
+                ):
+                    raise ValueError(
+                        "upload completion policy differs from retained intake authority"
+                    )
             loaded = load_r2_credentials(Path(direct.r2_credentials_file))
             signer = R2SigV4(loaded.endpoint, direct.r2_bucket, loaded.credentials)
             multipart = R2MultipartClient(signer, timeout_seconds=direct.r2_timeout_seconds)
@@ -821,6 +847,7 @@ class ServiceAdmissionHost:
                     review_policy_continuation=direct.standing_review_policy_continuation,
                     review_policy_authority=c.series.recovery,
                     review_policy_plan=plan,
+                    completion_policy=completion_policies.get(cohort),
                 )
             self.direct_uploads = DirectModelUploadOwners(
                 owners,

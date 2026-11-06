@@ -91,6 +91,43 @@ Completed certificates and votes survive restart and are reused. Closure still
 uses the native finalized-registration filter and exact certificates; a last-minute
 upload or an unresolved review can leave unfinished work at closure.
 
+The direct-upload owner resumes retained, miner-signed completion requests in
+bounded background batches. It reconciles the provider object through the
+ordinary completion path, then runs byte verification and independent review.
+Provider failures remain retryable; a missing or inconsistent signed record
+requires repair. Recovery never supplies an unsigned completion for a reservation.
+The separate completion cursor preserves rotation after interruption and adds
+64 bytes to the journal's enforced metadata allowance. Upgrade through the
+selected host path with its original journals and directory bindings. Existing
+signed records, completed byte results and the verification cursor are retained.
+Public `completion_recovery_*` fields report this substage separately from
+completed-object verification; they do not count uploads still awaiting a miner's
+completion request or predict final certification time.
+
+An optional `direct_model_uploads.completion_policies` list selects a completion
+grace for exact retained operator intake deadlines. Each entry names the original
+deadline, grace seconds, operator decision/source digests and reason. There is no
+default grace. Select it before intake closes through the supported host update
+and rebind any armed consumer cutover to the resulting configuration. The owner
+refuses an unknown cohort, changed deadline or replacement completion policy.
+
+Activation atomically retains the policy and advances that cohort's upload
+journal from version 6 to 7. Older owners refuse version 7; recovery must use a
+compatible owner with the same policy. Signed records and completed objects stay
+intact. Without a policy, version 6 and existing configuration bytes are preserved.
+The owner fences new completion requests at the grace boundary, retains cleanup
+intent before aborting the exact unfinished multipart generation, and records
+terminal resolution only after provider cleanup succeeds. Restart resumes that
+cleanup through a separate bounded cursor. Accepted signed completion requests
+continue recovery while their provider upload or completed object exists. If both
+are confirmed absent after the grace boundary, the owner retains the original
+signed request and a terminal cleanup receipt, then stops retrying that completion.
+Missing metadata or an unexpected complete provider object holds for repair.
+Provider outages remain visible and can delay drain resolution.
+Public `upload_expiry_*` fields count this work separately, and
+`upload_completion_deadline_unix_ms` exposes the selected bound without polling
+provider state. A cleanup intent alone never permits roster sealing.
+
 Restoring completed model-file byte checkpoints yields between files so cached
 progress and other service requests can run. Bulk receipt migration and byte-fact
 imports use owned metadata workers; cancellation drains them before releasing
