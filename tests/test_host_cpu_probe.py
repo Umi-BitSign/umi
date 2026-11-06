@@ -1,7 +1,10 @@
 """Real fixed-work helpers, without touching production CPU partitions."""
 
+import json
 import os
 import signal
+import subprocess
+import sys
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -14,12 +17,33 @@ from umi.competition_cpu_conditions import PROBE_RESULT
 
 @pytest.mark.parametrize("executor", ["threads", "processes"])
 def test_same_fixed_work_and_complete_worker_cleanup(executor):
-    rows = probe.collect_workers(2, executor)
+    # Other tests can leave multiprocessing infrastructure children in pytest.
+    # Check the probe's own process tree without waiting on unrelated children.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            "import json, os, sys; sys.path.insert(0, sys.argv[1]); "
+            "from umi.host_cpu_probe import collect_workers; "
+            "rows = collect_workers(2, sys.argv[2]); "
+            "print(json.dumps(rows))\n"
+            "try: os.waitpid(-1, os.WNOHANG)\n"
+            "except ChildProcessError: pass\n"
+            "else: raise AssertionError('probe retained a child process')\n",
+            str(Path(probe.__file__).parents[1]),
+            executor,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    rows = json.loads(result.stdout)
     assert [row["worker"] for row in rows] == [0, 1]
     assert all(row["result_sha256"] == PROBE_RESULT for row in rows)
     assert all(0 < row["thread_cpu_us"] <= row["wall_us"] for row in rows)
-    with pytest.raises(ChildProcessError):
-        os.waitpid(-1, os.WNOHANG)
 
 
 def test_workers_die_with_probe_parent(tmp_path):
