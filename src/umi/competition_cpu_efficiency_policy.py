@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import lru_cache
+from hashlib import sha256
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
@@ -19,6 +21,28 @@ from .open_competition import CompetitionPolicy, Signature, digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 _ISSUER = object()
+CURRENT_CPU_MEASUREMENT = "umi-exclusive-cold-model-cpu-timing/3"
+SCHEDULER_CPU_MEASUREMENT = "umi-exclusive-cold-model-cpu-timing/2"
+LEGACY_CPU_MEASUREMENT = "umi-exclusive-cold-model-cpu-timing/1"
+
+
+def cpu_adoption_slot(authority_sha256, measurement_semantics):
+    """Separate prospective measurement upgrades from immutable original votes."""
+    if measurement_semantics == LEGACY_CPU_MEASUREMENT:
+        return authority_sha256
+    if measurement_semantics not in (CURRENT_CPU_MEASUREMENT, SCHEDULER_CPU_MEASUREMENT):
+        raise ValueError("unsupported CPU measurement selection")
+    return sha256((authority_sha256 + "\n" + measurement_semantics).encode()).hexdigest()
+
+
+def cpu_operator_state(root, authority_sha256, measurement_semantics=CURRENT_CPU_MEASUREMENT):
+    cpu_adoption_slot(authority_sha256, measurement_semantics)
+    namespace = (
+        "cpu-efficiency"
+        if measurement_semantics == LEGACY_CPU_MEASUREMENT
+        else "cpu-efficiency-v" + measurement_semantics.rsplit("/", 1)[1]
+    )
+    return Path(root) / namespace / authority_sha256
 
 
 class CohortCpuEfficiencyAdoption(StrictProtocolModel):
@@ -32,10 +56,12 @@ class CohortCpuEfficiencyAdoption(StrictProtocolModel):
     runtime_sha256: Hex32
     issued_at_block: Block
     reason: Annotated[str, Field(min_length=8, max_length=1024)]
-    reward_rule: Literal["cold_cpu_relative_latency/1"] = "cold_cpu_relative_latency/1"
-    timing_rule: Literal["cold_model_exec_to_validated_result/1"] = (
-        "cold_model_exec_to_validated_result/1"
+    reward_rule: Literal["cold_cpu_relative_latency/1", "cold_cpu_relative_work/1"] = (
+        "cold_cpu_relative_latency/1"
     )
+    timing_rule: Literal[
+        "cold_model_exec_to_validated_result/1", "cold_model_cgroup_cpu_to_validated_result/1"
+    ] = "cold_model_exec_to_validated_result/1"
     aggregation_rule: Literal["task_weighted_per_case_slowdown/1"] = (
         "task_weighted_per_case_slowdown/1"
     )
@@ -44,9 +70,11 @@ class CohortCpuEfficiencyAdoption(StrictProtocolModel):
     multiplier_precision_ppm: Literal[1000000] = 1000000
     multiplier_rounding_rule: Literal["floor_integer_tenth_root/1"] = "floor_integer_tenth_root/1"
     elapsed_floor_ms: Literal[1] = 1
-    measurement_semantics: Literal["umi-exclusive-cold-model-cpu-timing/1"] = (
-        "umi-exclusive-cold-model-cpu-timing/1"
-    )
+    measurement_semantics: Literal[
+        "umi-exclusive-cold-model-cpu-timing/1",
+        "umi-exclusive-cold-model-cpu-timing/2",
+        "umi-exclusive-cold-model-cpu-timing/3",
+    ] = "umi-exclusive-cold-model-cpu-timing/1"
     bundle_cache_rule: Literal["verified_bundle_pagecache_eviction/1"] = (
         "verified_bundle_pagecache_eviction/1"
     )
@@ -81,6 +109,14 @@ class CohortCpuEfficiencyAdoption(StrictProtocolModel):
 
     @model_validator(mode="after")
     def canonical_scope(self):
+        cpu_work = self.measurement_semantics == CURRENT_CPU_MEASUREMENT
+        expected = (
+            ("cold_cpu_relative_work/1", "cold_model_cgroup_cpu_to_validated_result/1")
+            if cpu_work
+            else ("cold_cpu_relative_latency/1", "cold_model_exec_to_validated_result/1")
+        )
+        if (self.reward_rule, self.timing_rule) != expected:
+            raise ValueError("CPU reward and timing rules differ from measurement semantics")
         if self.cohort_sha256s != tuple(sorted(set(self.cohort_sha256s))):
             raise ValueError("CPU efficiency cohort scope must be sorted and unique")
         return self
@@ -92,7 +128,13 @@ class SignedCohortCpuEfficiencyAdoption(StrictProtocolModel):
 
 
 def default_cpu_efficiency_proposal(
-    *, policy, authority, runtime_sha256, reason, issued_at_block=None
+    *,
+    policy,
+    authority,
+    runtime_sha256,
+    reason,
+    issued_at_block=None,
+    measurement_semantics=CURRENT_CPU_MEASUREMENT,
 ):
     """Prepare the CPU contract in a new authority's existing quorum batch.
 
@@ -116,6 +158,17 @@ def default_cpu_efficiency_proposal(
         runtime_sha256=runtime_sha256,
         issued_at_block=issued,
         reason=reason,
+        measurement_semantics=measurement_semantics,
+        reward_rule=(
+            "cold_cpu_relative_work/1"
+            if measurement_semantics == CURRENT_CPU_MEASUREMENT
+            else "cold_cpu_relative_latency/1"
+        ),
+        timing_rule=(
+            "cold_model_cgroup_cpu_to_validated_result/1"
+            if measurement_semantics == CURRENT_CPU_MEASUREMENT
+            else "cold_model_exec_to_validated_result/1"
+        ),
     )
 
 
@@ -150,6 +203,7 @@ class AuthorizedCpuEfficiency:
     adoption_sha256: str
     _issuer: object = field(default=None, repr=False, compare=False)
     _binding: str = field(default="", repr=False, compare=False)
+    measurement_semantics: str = "umi-exclusive-cold-model-cpu-timing/1"
 
 
 def _binding(value):
@@ -162,6 +216,7 @@ def _binding(value):
             value.runtime_sha256,
             value.prepared_at_block,
             value.adoption_sha256,
+            value.measurement_semantics,
         ]
     )
 
@@ -176,6 +231,7 @@ def _authorized(body, *, cohort_sha256, sequence, prepared_at_block):
         prepared_at_block,
         digest(body),
         _ISSUER,
+        measurement_semantics=body.measurement_semantics,
     )
     object.__setattr__(value, "_binding", _binding(value))
     return value

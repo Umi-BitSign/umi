@@ -171,9 +171,13 @@ allocation is available. A 404 means that the score artifact has not been publis
 
 For C8 and later, the selected signed CPU-efficiency contract adds a bounded
 adjustment to model reward weight. Quality still determines eligibility, duplicate
-exclusion, bands and displayed rank. For each case, compare the candidate's cold
-CPU model execution time with the frozen reference on the same evaluator and
-comparable resources. Average those ratios using the suite's task weights, round
+exclusion, bands and displayed rank. For each case, compare the candidate model's total cold-execution CPU consumption with the frozen reference on the same evaluator
+and comparable resources. The signed v3 rule counts user and system CPU time
+across the entire isolated process tree, expressed as full-allocation
+milliseconds (CPU microseconds divided by the allocated core count and 1,000,
+rounded upward). Waiting for scheduling or I/O earns no CPU charge, but the
+elapsed execution deadline still applies. Earlier signed timing contracts keep
+their original elapsed-time calculation. Average those ratios using the suite's task weights, round
 each evaluator's normalized result upward to the nearest `1e-9`, then average
 across its selected evaluators. If that slowdown
 is `D`, the reward multiplier is `clamp(D^(-0.1), 0.85, 1.15)`, rounded down to
@@ -900,3 +904,10 @@ A shared CDN IP does not establish a shared operator. The current bridge's IP
 grouping can combine miners behind the same proxy IP; hostname support here does
 not silently exempt those miners from the bridge's signed reward policy. An
 external health response alone also does not establish model-serving readiness.
+
+New model reservations and replacements open one cohort at a time. The next
+cohort opens automatically when its predecessor enters the authenticated
+challenge/request phase, not when a planned start time passes. Existing accepted
+reservations may finish preservation and certification while new intake is held.
+The cohort list and `/progress` expose `admission.new_admissions_open`; transport
+availability alone does not mean a cohort accepts new submissions.

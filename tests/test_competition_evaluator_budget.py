@@ -16,6 +16,7 @@ from umi.competition_cpu_conditions import (
     ProbeWorker,
 )
 from umi.competition_cpu_timing import (
+    CpuSchedulerTimingSample,
     CpuTicks,
     CpuTimingContext,
     CpuTimingEvidence,
@@ -767,6 +768,7 @@ def test_structural_formulas_cover_current_model_field_sets(work, track, monkeyp
         CpuTimingEvidence,
         CpuTimingContext,
         CpuTimingSample,
+        CpuSchedulerTimingSample,
         CpuTicks,
         CpuBundleCacheEvidence,
         CpuConditionEvidence,

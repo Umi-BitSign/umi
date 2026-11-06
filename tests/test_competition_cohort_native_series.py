@@ -18,9 +18,10 @@ from umi.competition_cohort_recovery import (
 from umi.competition_cohort_reward_allocation import derive_effective_reward_allocation
 from umi.competition_cpu_efficiency_policy import (
     SignedCohortCpuEfficiencyAdoption,
+    cpu_adoption_slot,
     default_cpu_efficiency_proposal,
 )
-from umi.competition_cpu_timing import CpuTimingEvidence
+from umi.competition_cpu_timing import CpuSchedulerTimingSample, CpuTimingEvidence
 from umi.competition_execution import execution_boundary
 from umi.competition_geometric_rewards import cohort_reward_parameters
 from umi.open_competition import digest, sign_object
@@ -140,10 +141,14 @@ def timed_output(job, attempt):
     invocation = digest(attempt)
     ctx = context(memory_max_bytes=job.runtime.memory_bytes)
     assert len(ctx.cpu_ids) == job.runtime.cpus
-    before = sample(ctx)
+    before = CpuSchedulerTimingSample(
+        **sample(ctx).model_dump(),
+        scheduler_runtime_ns=(0,) * len(ctx.cpu_ids),
+        raw_monotonic_us=2_000_000,
+    )
     finished = before.finished_us + elapsed_ms * 1000
     timing = CpuTimingEvidence(
-        schema="umi-cpu-timing-evidence/1",
+        schema="umi-cpu-timing-evidence/3",
         contract_sha256=digest(adopted.adoption),
         context=ctx,
         bundle_cache=bundle_cache(
@@ -155,12 +160,16 @@ def timed_output(job, attempt):
             ctx, started=before.finished_us, finished=finished, invocation=invocation
         ),
         before=before,
-        after=sample(
-            ctx,
-            now=finished,
-            ticks=100 + elapsed_ms // 10,
-            busy=50 + elapsed_ms // 20,
-            usage=elapsed_ms * 1000,
+        after=CpuSchedulerTimingSample(
+            **sample(
+                ctx,
+                now=finished,
+                ticks=100 + elapsed_ms // 10,
+                busy=50 + elapsed_ms // 20,
+                usage=elapsed_ms * 1000,
+            ).model_dump(),
+            scheduler_runtime_ns=(elapsed_ms * 1_000_000 // len(ctx.cpu_ids),) * len(ctx.cpu_ids),
+            raw_monotonic_us=before.raw_monotonic_us + elapsed_ms * 1000,
         ),
         started_monotonic_us=before.finished_us,
         model_started_monotonic_us=before.finished_us + 1,
@@ -192,7 +201,8 @@ async def test_six_cohorts_reuse_owners_and_recover_without_extensions(
     )
     adoption = SignedCohortCpuEfficiencyAdoption(adoption=proposal, signatures=signatures(proposal))
     directory = tmp_path / "cpu-adoptions"
-    publish_private_model(directory / (digest(authority) + ".json"), adoption)
+    slot = cpu_adoption_slot(digest(authority), proposal.measurement_semantics)
+    publish_private_model(directory / (slot + ".json"), adoption)
     # The next configure_owner goes through validated ServiceAdmissionHost
     # startup and its ordinary immutable directory selection. C5-C7 deliberately
     # ignore the future contract while the same owners retain their old work.

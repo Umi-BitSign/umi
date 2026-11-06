@@ -337,7 +337,7 @@ class ModelBatchAcceptanceWorker:
             # review during open intake. The existing authenticated deadline
             # controls dispatch; final preparation still requires native drain.
             admission = self.worker.owner.intake.admission_status(cohort)
-            if admission is None or admission["new_admissions_open"]:
+            if admission is None or admission["stage"] != "new_submissions_closed":
                 continue
             try:
                 adoption = await run_owned_thread(

@@ -485,6 +485,7 @@ class WorkloadASGIBinding:
         self.queues = {"read": deque(), "write": deque()}
         self.control_burst = max(1, maximum_control_waiting)
         self.controls_since_read = 0
+        self.priority_read_streak = 0
         self.closing = False
         self.shared = {}
         self.shared_bytes = 0
@@ -511,8 +512,26 @@ class WorkloadASGIBinding:
                 shared["future"].set_result(None)
 
     @staticmethod
-    def _group(scope):
-        # Read-only status polling must not consume the mutation waiters.
+    def _public_history_path(path):
+        parts = path.split("/")
+        return (
+            len(parts) == 6
+            and parts[:4] == ["", "v1", "competition", "cohorts"]
+            and parts[5] == "history"
+            and len(parts[4]) == 64
+            and all(c in "0123456789abcdef" for c in parts[4])
+        )
+
+    @classmethod
+    def _group(cls, scope):
+        # Published history is a prerequisite for uploads and operator controls.
+        # Put its bounded snapshot read in the same FIFO as those controls so
+        # nonce-bearing readiness polls cannot fill its queue. It still owns
+        # the ordinary request slot and byte reservation. The existing burst
+        # bound keeps ordinary reads moving, and history cannot overtake a
+        # control already waiting in this FIFO.
+        if scope.get("method") == "GET" and cls._public_history_path(scope.get("path", "")):
+            return "write"
         return "read" if scope.get("method") in ("GET", "HEAD") else "write"
 
     def _enter_wait(self, group):
@@ -613,6 +632,10 @@ class WorkloadASGIBinding:
         self.reserved += ticket["reservation"]
         self.active[id(ticket)] = ticket
         self.controls_since_read = self.controls_since_read + 1 if ticket["group"] == "write" else 0
+        if ticket["group"] == "read":
+            self.priority_read_streak = (
+                self.priority_read_streak + 1 if ticket["priority_read"] else 0
+            )
 
     def _wake(self):
         if self.closing:
@@ -629,7 +652,21 @@ class WorkloadASGIBinding:
                 while queue and queue[0]["future"].done():
                     queue.popleft()
                 if queue and self._fits(queue[0]["reservation"]):
-                    ticket = queue.popleft()
+                    ticket = queue[0]
+                    if group == "read" and self.priority_read_streak < self.control_burst:
+                        # Upload discovery/status stays within read capacity;
+                        # polling cannot consume the separate mutation queue.
+                        ticket = next(
+                            (
+                                item
+                                for item in queue
+                                if item["priority_read"]
+                                and not item["future"].done()
+                                and self._fits(item["reservation"])
+                            ),
+                            ticket,
+                        )
+                    queue.remove(ticket)
                     break
             if ticket is None:
                 return
@@ -653,6 +690,7 @@ class WorkloadASGIBinding:
             active=False,
             route=self._route(scope),
             group=self._group(scope),
+            priority_read=self._priority_read(scope),
         )
         if not any(self.queues.values()) and self._fits(reservation):
             self._grant(ticket)
@@ -681,13 +719,24 @@ class WorkloadASGIBinding:
         finally:
             self._leave_wait(ticket["group"])
 
-    @staticmethod
-    def _public_share_path(path):
+    @classmethod
+    def _priority_read(cls, scope):
+        path = scope.get("path", "")
+        return (
+            scope.get("method") == "GET"
+            and cls._public_share_path(path)
+            and (path == "/v1/competition/cohorts" or "/direct-model-uploads/" in path)
+        )
+
+    @classmethod
+    def _public_share_path(cls, path):
         if path in {
             "/v1/competition/status",
             "/v1/competition/cohorts",
             "/v1/competition/service-work",
         }:
+            return True
+        if cls._public_history_path(path):
             return True
         parts = path.split("/")
         if (

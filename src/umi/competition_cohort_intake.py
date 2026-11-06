@@ -43,6 +43,7 @@ from .competition_cohort_intake_seal import (
     CohortIntakeSeal,
     verify_intake_closure,
 )
+from .competition_cohort_intake_window import SequentialIntakeWindow
 from .competition_cohort_participation import (
     CohortParticipationReceipt,
     CohortParticipationRequest,
@@ -80,6 +81,8 @@ class CohortIntakeConfig(StrictProtocolModel):
     directory: Annotated[str, Field(min_length=1, max_length=4096)]
     cohorts: Annotated[tuple[CohortIntakeBinding, ...], Field(min_length=1, max_length=512)]
 
+    sequential_intake_from_sequence: Annotated[int, Field(ge=2)] | None = None
+
     admission_deadlines: Annotated[
         tuple[OperatorAdmissionDeadline, ...], Field(max_length=512)
     ] = ()
@@ -89,6 +92,8 @@ class CohortIntakeConfig(StrictProtocolModel):
         value = handler(self)
         if not self.admission_deadlines:
             value.pop("admission_deadlines", None)
+        if self.sequential_intake_from_sequence is None:
+            value.pop("sequential_intake_from_sequence", None)
         return value
 
     @model_validator(mode="after")
@@ -133,6 +138,7 @@ def cohort_intake_bytes(db) -> int:
             for name in (
                 "cohort_consents",
                 "cohort_admission_deadlines",
+                "cohort_admission_deadline_history",
                 "cohort_admission_drain_snapshots",
                 "cohort_admission_artifacts",
                 "cohort_admission_votes",
@@ -229,6 +235,9 @@ class CohortIntake:
         self._process_lock = ThreadGate()
         self.model_certification_progress = ModelCertificationProgress()
         self.bindings = {item.cohort_sha256: item.authority_sha256 for item in config.cohorts}
+        self._sequence_window = SequentialIntakeWindow(
+            self.config.sequential_intake_from_sequence, self.bindings
+        )
         if self.directory.resolve() != self.directory:
             raise ValueError("cohort intake state must not traverse symlinks")
         fresh_state = initialize and not (self.directory / "intake.sqlite3").exists()
@@ -246,15 +255,36 @@ class CohortIntake:
                     self._admission_deadlines[cohort] = (
                         OperatorAdmissionDeadline.model_validate_json(raw)
                     )
+            if self.config.sequential_intake_from_sequence is not None:
+                for cohort in self.bindings:
+                    if store.has_published_history(cohort):
+                        history = store.published_history(cohort)
+                        state, _ = store.status(cohort)
+                        self._sequence_window.observe(history.plan, state)
         self._initialize = False
+
+    def refresh_admission_window(self, history, store):
+        if self.config.sequential_intake_from_sequence is None:
+            return None
+        cohort = digest(history.plan)
+        state, _ = store.status(cohort)
+        self._sequence_window.observe(history.plan, state)
+        predecessor = self._sequence_window.predecessor(cohort)
+        if predecessor is not None:
+            previous, _ = store.status(predecessor)
+            self._sequence_window.observe(self._sequence_window.plan(predecessor), previous)
+        return self._sequence_window.status(cohort)
 
     def admission_status(self, cohort):
         """Cached scheduling metadata only: no RPC, payload or database reads."""
         deadline = self._admission_deadlines.get(cohort)
+        window = self._sequence_window.status(cohort)
         if deadline is None:
-            return None
+            return window
         now = time.time_ns() // 1_000_000
         closed = now >= deadline.close_new_admissions_at_unix_ms
+        if not closed and window is not None and not window["new_admissions_open"]:
+            return window
         return {
             "stage": "new_submissions_closed" if closed else "accepting_new_submissions",
             "new_admissions_open": not closed,
@@ -387,7 +417,9 @@ class CohortIntake:
             {
                 "policy_sha256": digest(self.policy),
                 "config": self.config.model_dump(
-                    mode="json", by_alias=True, exclude={"admission_deadlines"}
+                    mode="json",
+                    by_alias=True,
+                    exclude={"admission_deadlines", "sequential_intake_from_sequence"},
                 ),
                 "tracks": list(self.tracks),
             }
@@ -640,6 +672,7 @@ class CohortIntake:
             for evidence in decision_inputs or ():
                 store.retain_source(cohort, evidence)
         self._remember_model_delivery_state(state)
+        self._sequence_window.observe(history.plan, state)
         return state
 
     def pending_policy_adoption(self, cohort: str) -> CohortRecoveryTransition | None:
@@ -758,7 +791,15 @@ class CohortIntake:
             ).fetchone()
             return None if prior is None else self._receipt(prior[0], store, request)
 
-    def require_new_admission(self, db, history, request):
+    def has_admission_permit(self, request):
+        with self._connection(prefer_history=True) as (db, _):
+            prior = db.execute(
+                "SELECT cohort FROM cohort_admission_reservations WHERE request=?",
+                (digest(request),),
+            ).fetchone()
+            return prior == (request.consent.consent.cohort_sha256,)
+
+    def require_new_admission(self, db, history, request, *, store=None):
         """Authorize a new delivery, or finish the exact retained authorization."""
         cohort = digest(history.plan)
         deadline = retained_deadline(db, cohort)
@@ -777,6 +818,12 @@ class CohortIntake:
             return
         if deadline is not None and now >= deadline.close_new_admissions_at_unix_ms:
             raise CohortAdmissionClosed("new cohort admissions are closed by the operator deadline")
+        if self.config.sequential_intake_from_sequence is not None:
+            if store is None:
+                raise ValueError("sequential admission requires its fenced native store")
+            window = self.refresh_admission_window(history, store)
+            if window is not None and not window["new_admissions_open"]:
+                raise CohortAdmissionClosed("cohort intake awaits predecessor challenges")
         if (
             db.execute("SELECT COUNT(*) FROM cohort_admission_reservations").fetchone()[0]
             >= self.capacity.maximum_records
@@ -882,6 +929,14 @@ class CohortIntake:
                 # history just to discover the original-reservation lookup.
                 return None
             history = store.published_history(cohort)
+            window = self.refresh_admission_window(history, store)
+            if window is not None and not window["new_admissions_open"]:
+                permit = db.execute(
+                    "SELECT cohort FROM cohort_admission_reservations WHERE request=?",
+                    (digest(request),),
+                ).fetchone()
+                if permit != (cohort,):
+                    raise CohortAdmissionClosed("cohort intake awaits predecessor challenges")
             if not self._require_retained_admission(
                 db, history, request, reservation, defer_reservation=defer_reservation
             ):

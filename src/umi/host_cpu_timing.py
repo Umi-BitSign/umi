@@ -120,7 +120,9 @@ def _directory(binding, root, identities):
     return path
 
 
-def measurement_profile_sha256(profile, runtime):
+def measurement_profile_sha256(
+    profile, runtime, *, measurement_semantics="umi-exclusive-cold-model-cpu-timing/1"
+):
     """Stable measurement meaning, independent of a kernel object's lifetime.
 
     The installation file has a separate exact digest. Its selected paths and
@@ -131,13 +133,18 @@ def measurement_profile_sha256(profile, runtime):
         canonical_json_bytes(
             {
                 "schema": "umi-cpu-measurement-profile/2",
-                "measurement_semantics": "umi-exclusive-cold-model-cpu-timing/1",
+                "measurement_semantics": measurement_semantics,
                 "ancestor_quota_rule": "unlimited_shared_ancestors_no_throttle_delta/1",
                 "timing_rule": "cold_model_exec_to_validated_result/1",
                 "partition_mode": "root",
                 "bundle_cache_rule": "verified_bundle_pagecache_eviction/1",
                 "topology_sha256": profile.topology_sha256,
                 "probe_rule": PROBE_RULE,
+                **(
+                    {"probe_executor": "independent_processes_parent_bound/1"}
+                    if measurement_semantics == "umi-exclusive-cold-model-cpu-timing/3"
+                    else {}
+                ),
                 "pressure_rule": PRESSURE_RULE,
                 "condition_limits": CpuConditionLimits().model_dump(mode="json"),
                 "host_identity_sha256": profile.host_identity_sha256,
@@ -216,6 +223,7 @@ class CpuTimingSession:
         cpu_root=Path("/sys/devices/system/cpu"),
         cpuinfo_path=Path("/proc/cpuinfo"),
         proc_stat_path=Path("/proc/stat"),
+        schedstat_path=Path("/proc/schedstat"),
     ):
         self.profile, self.lease = profile, lease
         self.root, self.cpu_root = Path(cgroup_root), Path(cpu_root)
@@ -223,6 +231,15 @@ class CpuTimingSession:
         self.runtime = runtime
         self.installation_profile_sha256 = profile_sha256
         self.contract_sha256 = authorization.adoption_sha256
+        self.measurement_semantics = getattr(
+            authorization, "measurement_semantics", "umi-exclusive-cold-model-cpu-timing/1"
+        )
+        if self.measurement_semantics not in {
+            "umi-exclusive-cold-model-cpu-timing/1",
+            "umi-exclusive-cold-model-cpu-timing/2",
+            "umi-exclusive-cold-model-cpu-timing/3",
+        }:
+            _error("cpu_timing_measurement_semantics_mismatch")
         self._sampler = None
         self._conditions = self._condition_evidence = None
         self._kernel_identities = {}
@@ -264,7 +281,9 @@ class CpuTimingSession:
             ):
                 _error("cpu_timing_visible_topology_changed")
             self.context = CpuTimingContext(
-                profile_sha256=measurement_profile_sha256(profile, runtime),
+                profile_sha256=measurement_profile_sha256(
+                    profile, runtime, measurement_semantics=self.measurement_semantics
+                ),
                 hardware_sha256=hardware,
                 cpu_class_sha256=cpu_class,
                 topology_sha256=profile.topology_sha256,
@@ -286,6 +305,11 @@ class CpuTimingSession:
                 cgroup_root=self.root,
                 cpuinfo_path=cpuinfo_path,
                 proc_stat_path=proc_stat_path,
+                schedstat_path=(
+                    schedstat_path
+                    if self.measurement_semantics != "umi-exclusive-cold-model-cpu-timing/1"
+                    else None
+                ),
             )
             self._sampler.check_context()
         except CpuTimingInfrastructureError:
@@ -420,6 +444,7 @@ class CpuTimingSession:
             limits=cpu_timing_limits_v1(),
             conditions=self._condition_evidence,
             bundle_cache=bundle_cache,
+            measurement_semantics=self.measurement_semantics,
         )
 
     def close(self):

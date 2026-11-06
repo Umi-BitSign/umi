@@ -6,17 +6,67 @@ No privileged broker, extra scheduler, affinity pinning or long-lived daemon.
 """
 
 import argparse
+import ctypes
 import hashlib
 import json
+import multiprocessing
 import os
 import resource
+import signal
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
 
+_rendezvous = None
 
-def run(cgroup, cpu_ids, profile, invocation, boundary):
+
+def _process_start(barrier, parent_pid):
+    # Killing the bounded probe must also kill its owned workers, including the
+    # race where the supervisor dies between fork and this initialization.
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "cannot bind probe worker lifetime")
+    if os.getppid() != parent_pid:
+        os._exit(1)
+    global _rendezvous
+    _rendezvous = barrier
+
+
+def _worker(index, barrier=None):
+    value = bytes(65536)
+    (barrier if barrier is not None else _rendezvous).wait(timeout=1)
+    start, cpu_start = time.monotonic_ns(), time.thread_time_ns()
+    for _ in range(4096):
+        result = hashlib.sha256(value).digest()
+    cpu_finish, finish = time.thread_time_ns(), time.monotonic_ns()
+    return dict(
+        worker=index,
+        wall_us=(finish - start + 999) // 1000,
+        thread_cpu_us=(cpu_finish - cpu_start + 999) // 1000,
+        result_sha256=result.hex(),
+    )
+
+
+def collect_workers(count, executor):
+    if executor == "processes":
+        context = multiprocessing.get_context("fork")
+        barrier = context.Barrier(count)
+        with ProcessPoolExecutor(
+            max_workers=count,
+            mp_context=context,
+            initializer=_process_start,
+            initargs=(barrier, os.getpid()),
+        ) as pool:
+            return tuple(pool.map(_worker, range(count)))
+    if executor != "threads":
+        raise ValueError("unsupported probe executor")
+    barrier = Barrier(count)
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        return tuple(pool.map(_worker, range(count), [barrier] * count))
+
+
+def run(cgroup, cpu_ids, profile, invocation, boundary, executor="threads"):
     resource.setrlimit(resource.RLIMIT_AS, (128 * 1024**2, 128 * 1024**2))
     resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
     if not 1 <= len(cpu_ids) <= 8 or cpu_ids != tuple(sorted(set(cpu_ids))):
@@ -48,25 +98,8 @@ def run(cgroup, cpu_ids, profile, invocation, boundary):
     expected = "0::/" + str(cgroup.relative_to("/sys/fs/cgroup"))
     if Path("/proc/self/cgroup").read_text().strip() != expected:
         raise RuntimeError("probe migrated to another cgroup")
-    rendezvous = Barrier(len(cpu_ids))
     started = time.monotonic_ns() // 1000
-
-    def worker(index):
-        value = bytes(65536)
-        rendezvous.wait(timeout=1)
-        start, cpu_start = time.monotonic_ns(), time.thread_time_ns()
-        for _ in range(4096):
-            result = hashlib.sha256(value).digest()
-        cpu_finish, finish = time.thread_time_ns(), time.monotonic_ns()
-        return dict(
-            worker=index,
-            wall_us=(finish - start + 999) // 1000,
-            thread_cpu_us=(cpu_finish - cpu_start + 999) // 1000,
-            result_sha256=result.hex(),
-        )
-
-    with ThreadPoolExecutor(max_workers=len(cpu_ids)) as pool:
-        workers = tuple(pool.map(worker, range(len(cpu_ids))))
+    workers = collect_workers(len(cpu_ids), executor)
     return dict(
         schema="umi-fixed-cpu-condition-probe/1",
         rule="parallel_sha256_4096x65536_load_balanced/1",
@@ -87,6 +120,7 @@ def main():
     parser.add_argument("--profile", required=True)
     parser.add_argument("--invocation", required=True)
     parser.add_argument("--boundary", choices=("before", "after"), required=True)
+    parser.add_argument("--executor", choices=("threads", "processes"), default="threads")
     args = parser.parse_args()
     value = run(
         args.cgroup,
@@ -94,6 +128,7 @@ def main():
         args.profile,
         args.invocation,
         args.boundary,
+        args.executor,
     )
     print(json.dumps(value, sort_keys=True, separators=(",", ":")))
 

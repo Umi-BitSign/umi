@@ -146,6 +146,69 @@ def test_restart_cannot_replace_retained_cutoff(intake, scenario):
         selected(intake, scenario, close_new_admissions_at_unix_ms=DEADLINE_MS + 1)
 
 
+def extension(intake, scenario, **changes):
+    return (
+        dict(
+            supersedes_deadline_sha256=digest(selection_for(intake, scenario)),
+            close_new_admissions_at_unix_ms=DEADLINE_MS + 1_800_000,
+            source_sha256="c3" * 32,
+            operator_plan_sha256="d4" * 32,
+        )
+        | changes
+    )
+
+
+def test_explicit_future_extension_preserves_decisions_receipts_and_new_boundary(
+    intake, scenario, monkeypatch
+):
+    clock(monkeypatch, DEADLINE_MS - 100)
+    owner = selected(intake, scenario)
+    request = request_for(scenario)
+    receipt = owner.retain(request, capture_at(210))
+    original = canonical_json_bytes(selection_for(intake, scenario))
+    history = canonical_json_bytes(owner.history(digest(scenario["intake_history"].plan)))
+    owner = selected(intake, scenario, **extension(intake, scenario))
+    clock(monkeypatch, DEADLINE_MS + 1)
+    assert owner.retain(request, capture_at(230)) == receipt
+    assert owner.retain(request_for(scenario, sequence=2), capture_at(230))
+    with owner._connection() as (db, _):
+        assert db.execute("SELECT body FROM cohort_admission_deadline_history").fetchall() == [
+            (original,)
+        ]
+    # Restart is idempotent, including after the original deadline. Removing
+    # configuration cannot reopen either the original or extended fence.
+    owner = selected(intake, scenario, **extension(intake, scenario))
+    owner = CohortIntake(intake.config, intake.policy)
+    clock(monkeypatch, DEADLINE_MS + 1_800_000)
+    with pytest.raises(CohortIntakeFenced, match="operator deadline"):
+        owner.retain(request_for(scenario, sequence=3), capture_at(230))
+    assert canonical_json_bytes(owner.history(digest(scenario["intake_history"].plan))) == history
+
+
+@pytest.mark.parametrize("fault", ["late", "shorter", "parent", "source", "plan", "missing"])
+def test_extension_cannot_reopen_or_replace_unbound_decision(intake, scenario, monkeypatch, fault):
+    clock(monkeypatch, DEADLINE_MS - 100)
+    if fault != "missing":
+        selected(intake, scenario)
+    changes = extension(intake, scenario)
+    if fault == "late":
+        clock(monkeypatch, DEADLINE_MS)
+    elif fault == "shorter":
+        changes["close_new_admissions_at_unix_ms"] = DEADLINE_MS - 1
+    elif fault == "parent":
+        changes["supersedes_deadline_sha256"] = "99" * 32
+    elif fault == "source":
+        changes["source_sha256"] = "a1" * 32
+    elif fault == "plan":
+        changes["operator_plan_sha256"] = "b2" * 32
+    with pytest.raises(ValueError, match="deadline"):
+        selected(intake, scenario, **changes)
+
+
+def test_old_deadline_bytes_keep_original_shape(intake, scenario):
+    assert b"supersedes" not in canonical_json_bytes(selection_for(intake, scenario))
+
+
 def model_request(scenario, tmp_path):
     signed = submission(scenario["policy"], bundle=bundle_at(tmp_path / "model"))
     body = scenario["consent"].consent.model_copy(

@@ -1223,6 +1223,16 @@ start the coverage/history owner at launch, retain the complete finalized interv
 from its original authority block, and monitor catch-up during intake, paid work
 and certification. Selecting workers alone does not start a missing capture owner.
 
+Retained-frame windows charge actual input bytes while reserving room for one
+maximum-size frame before each additional read. Small frames can therefore use
+the selected count window without increasing its byte ceiling. Oversized batches
+split into smaller windows; they do not reject otherwise supported evidence.
+The memory reservation still covers the selected workers and byte ceiling.
+Deploy this reader before increasing a count window independently of its byte
+ceiling; older readers conservatively reserve the maximum size for every frame.
+Use the same supported source/configuration maintenance path for coordinators,
+reviewers and writers, preserving their original history roots and receipts.
+
 When a retained proof frame is missing, native capture remains serialized, while
 durable source publication and proof export overlap across the selected byte and
 count window. Without a profile the window holds at most two frames; a one-frame
@@ -2475,7 +2485,7 @@ current intake snapshot as `cpu_efficiency_anchor_history_file`; an already
 closed earlier cohort does not prevent a later open cohort from anchoring the
 same authority. Retained jobs reuse their original snapshot without another
 owner request. Its normal `run-series` pass prepares one CPU contract
-per recovery authority, not one per model or cohort, and uses the owner's actual
+per recovery authority and measurement version, not one per model or cohort, and uses the owner's actual
 original or separately authorized CPU runtime. Future authority generations
 receive the same default automatically from sequence 8. This CPU runtime
 identity is unrelated to the chain's routinely changing runtime/spec version.
@@ -2486,7 +2496,7 @@ existing model-review peers. Each checks its independently selected candidate,
 current intake authority and signed runtime, then retains the original decision
 and vote. Completed votes do not reread history, approval files or chain state.
 The operator retains its exact plan, history, votes and envelope under
-`<state_directory>/cpu-efficiency/<authority>/`, publishes all reviewer
+`<state_directory>/cpu-efficiency-v2/<authority>/`, publishes all reviewer
 selections before the owner, and checks readback. Unchanged completed authority
 jobs are reused after supported source/config upgrades. Lost original records
 require explicit repair; a missing consumer selection is a counted restoration
@@ -2504,14 +2514,24 @@ role, service unit/account and actual selected config path/hash. This reuses
 the normal actor publication and quorum workflow; the command opens no wallet.
 
 First new timed preparation and operator start read the same signed
-`<cpu_efficiency_adoptions_directory>/<authority>.json`. The contract is
+`<cpu_efficiency_adoptions_directory>/<slot>.json`. For v2, `slot` is the
+SHA-256 of the UTF-8 authority digest, a newline, and
+`umi-exclusive-cold-model-cpu-timing/2`. The contract is
 retained in the resulting round. Existing rounds never reread this selection or
 change their bytes, and installing the standing timer does not authorize intake
 closure or challenge start. Keep the signed selection and original operator
 state on durable storage, outside disposable qualification scratch.
 
+V1 contracts retain their original `<authority>.json` selection, journal keys
+and `cpu-efficiency/<authority>/` operator state. V2 candidates, votes and
+operator state are separate; never overwrite the original signatures. Deploy
+the versioned readers to every signing and execution consumer before signing
+v2. New rounds prefer a delivered v2 selection and verify its quorum, authority
+and runtime. A corrupt v2 selection fails explicitly rather than falling back
+to v1. Existing rounds continue using their retained contract and evidence.
+
 The fixed timing rule is `cold_model_exec_to_validated_result/1`, with semantics
-`umi-exclusive-cold-model-cpu-timing/1`. A trusted host gate records the boundary
+`umi-exclusive-cold-model-cpu-timing/2` for new proposals. A trusted host gate records the boundary
 before any model code runs. The speed interval includes fresh model/Python
 startup, loading, preprocessing, inference and postprocessing through validated
 output. Payload restoration, queueing, container provisioning and host gate
@@ -2522,6 +2542,22 @@ noise limits are 100 basis points external CPU activity, 50 basis points steal,
 50 ms snapshot duration, 100 ms boundary overhead, and 100 basis points clock
 disagreement. Infrastructure/noise invalidations are held for explicit retry or
 repair; they are not scored as a model failure or silently assigned neutral speed.
+
+New contracts select `umi-exclusive-cold-model-cpu-timing/2`. This records
+per-CPU scheduler runtime from `/proc/schedstat` alongside the existing cgroup
+usage and `/proc/stat` steal counters. Tick-based user/system counters can
+undercount execution on Linux; they are retained as diagnostics, not used to
+reconcile scheduler runtime. The clock check compares monotonic elapsed time
+with `CLOCK_MONOTONIC_RAW` over the same bounded snapshots. The external-busy,
+steal, clock-disagreement and probe tolerances are unchanged. Counter resets,
+missing scheduler counters, impossible CPU usage and incompatible evidence
+versions remain infrastructure errors.
+
+The selected signed contract controls this version. Install compatible evaluator,
+certification and replay readers before selecting a v2 contract, then qualify a
+new host profile under that contract. Do not rewrite an existing signed adoption
+or completed measurement. Retained v1 evidence keeps its original tick accounting
+and canonical bytes; candidate/reference comparisons cannot mix versions.
 
 Capacity checks include the complete timing record: both CPU samples, repeated
 contexts, eight-CPU probes, pressure observations and the bundle-cache receipt.
@@ -2633,6 +2669,21 @@ Each reviewer parent has the signed CPU/memory ceilings, a bounded `probe` leaf
 and its `libpod-<CID>` payload. Do not set a 64 MiB service-wide MemoryMax on the
 partition service: its model descendants share that service. Limit only the
 setup leaf and restorer process.
+
+Run the restorer with `--resident` under `Type=notify`. It sends readiness after
+restoring the full slot map, releases admission locks, then sleeps in the setup
+leaf so systemd retains the delegated cgroup between model invocations. An
+`active (exited)` oneshot is insufficient: systemd can remove its empty cgroup
+even with `RemainAfterExit=yes`. Check the live resident PID and kernel partition,
+as well as the completion receipt. The receipt's total is the actual active-slot
+count, not a fixed lane count.
+
+For an installed oneshot, drain all consumers of its admission slots, including
+settlement verification, before replacing the service with the notify template.
+Keep the original memory policy and signed cohort state. Resume the services
+after qualification; the migration controller must arrange their restart on
+failure as well. This migration remains necessary for installations still using
+the oneshot template.
 
 Grant the shared `umi-cpu-execution` migration group access only to the dedicated
 `umiexecution.slice/cgroup.procs`. Never widen migration permissions on the root

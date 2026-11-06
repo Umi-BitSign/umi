@@ -132,6 +132,11 @@ def cohort_routes(
                     "participation_url": f"/v1/competition/cohorts/{cohort}/participation",
                     "admissions_url": f"/v1/competition/cohorts/{cohort}/admissions",
                     **model_route,
+                    **(
+                        {"admission": intake.admission_status(cohort)}
+                        if intake.admission_status(cohort) is not None
+                        else {}
+                    ),
                 }
             )
         return {"schema": "umi-public-cohorts/1", "cohorts": entries}

@@ -139,22 +139,30 @@ def _cpu_timing_bound() -> int:
     ticks = object_bound(
         {"cpu_id": _length(8191), **dict.fromkeys(("total", "busy", "steal"), _BLOCK_BYTES)}
     )
-    sample = object_bound(
-        {
-            **dict.fromkeys(
-                (
-                    "started_us",
-                    "finished_us",
-                    "cgroup_usage_usec",
-                    "cgroup_throttled_usec",
-                    "cgroup_throttled_periods",
-                ),
-                _BLOCK_BYTES,
+    sample_fields = {
+        **dict.fromkeys(
+            (
+                "started_us",
+                "finished_us",
+                "cgroup_usage_usec",
+                "cgroup_throttled_usec",
+                "cgroup_throttled_periods",
             ),
-            "context": context,
-            "cpu_ticks": repeated_array_bound(ticks, 8),
-            "populated": _length(False),
-        }
+            _BLOCK_BYTES,
+        ),
+        "context": context,
+        "cpu_ticks": repeated_array_bound(ticks, 8),
+        "populated": _length(False),
+    }
+    sample = max(
+        object_bound(sample_fields),
+        object_bound(
+            sample_fields
+            | {
+                "scheduler_runtime_ns": repeated_array_bound(_BLOCK_BYTES, 8),
+                "raw_monotonic_us": _BLOCK_BYTES,
+            }
+        ),
     )
     worker = object_bound(
         {

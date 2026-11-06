@@ -160,6 +160,12 @@ selection and restoration dependencies until every reader using them has moved.
 
 ### CPU-efficiency readers
 
+Scheduler-based timing requires readers for `umi-cpu-timing-evidence/2` and the
+signed `umi-exclusive-cold-model-cpu-timing/2` measurement semantics in every
+execution, certification and reward-replay consumer. Upgrade those readers
+before selecting the new contract and qualifying its host profile. Preserve v1
+adoptions and evidence unchanged; their historical validation remains supported.
+
 CPU-efficiency adoption from cohort sequence 8 is a prospective reader-first
 transition. Preserve historical signed inputs, timing evidence and reward behavior.
 Do not attach the contract to an already prepared round or infer timing from historical
@@ -194,6 +200,19 @@ Qualify actual rootless migration, bounded probe cancellation, cache ownership,
 restart cleanup and the intended concurrent lane/load profile before selection.
 Restoration completion alone records neither qualification nor contract selection.
 
+CPU-work timing v3 runs the fixed calibration workload in separate processes,
+so Python interpreter-lock contention does not dominate the calibration. Each
+worker still performs the same fixed hashes and reports its main-thread CPU
+time. Workers share the allocated CPU set and die with their probe parent.
+The measurement-profile digest binds this executor; earlier v3 calibration
+receipts cannot qualify the new host. Keep all original receipts. Historical
+v1/v2 execution and profile digests retain their thread-based probe, and replay
+preserves the measurements recorded in existing evidence. Deploy the probe and
+profile reader together before qualifying or selecting the new v3 host.
+The evaluator launches the probe file from its selected source tree with the
+installed interpreter and `-I -B`. Resolving the helper with `python -m` can load
+an older bundled copy after a supported source-only maintenance update.
+
 The corrected timing host additionally qualifies explicit core-class equivalence
 and shared-ancestor CPU budgets. Select the matching restorer and evaluator
 together, then qualify the new topology and measurement-profile identities.
@@ -206,7 +225,7 @@ host's supported signed maintenance/source selection and any explicit overlay
 authority. That same selected-config update must carry the private
 `cpu_efficiency_adoptions_directory` for owner/preparation and model reviewers.
 The existing adoption series timer then signs and delivers one retained CPU
-contract per authority through the authenticated model-review peers. Verify the
+contract per authority and measurement version through the authenticated model-review peers. Verify the
 exact reviewer selections before the owner selection; dynamic delivery changes
 only first new preparation from sequence 8, never a retained round. The standalone
 model client has no background source updater; when a
@@ -217,6 +236,13 @@ selected host/overlay, published release selection and retained restart behavior
 before claiming rollout. Keep challenge start held until its operator approval
 names the exact prepared contract. No source merge or automatic image poll by
 itself grants that approval.
+
+For timing v2, update all signing and execution readers before delivery. V2
+uses separate candidate files and reviewer vote keys bound to the authority
+and measurement protocol, plus `cpu-efficiency-v2/<authority>/` operator state.
+Retain v1 files and journals unchanged. New work prefers the verified v2
+selection; retained rounds continue to replay their original contract. The
+selection and storage rules are documented in the settlement guide.
 
 ### Automatic translation reference releases
 

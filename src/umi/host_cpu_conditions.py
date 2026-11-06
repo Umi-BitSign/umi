@@ -344,13 +344,21 @@ async def run_probe(session, invocation, boundary):
     path = Path(session.parent.path) / "probe"
     check_probe_leaf(path, session.slot.cpu_ids)
     process = None
+    executor = (
+        ["--executor", "processes"]
+        if getattr(session, "measurement_semantics", None)
+        == "umi-exclusive-cold-model-cpu-timing/3"
+        else []
+    )
     try:
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-I",
             "-B",
-            "-m",
-            "umi.host_cpu_probe",
+            # Source maintenance can select a newer application while retaining
+            # the installed interpreter. -m would load its old bundled helper.
+            # The sibling helper belongs to the same qualified source manifest.
+            str(Path(__file__).resolve().with_name("host_cpu_probe.py")),
             "--cgroup",
             str(path),
             "--cpus",
@@ -361,6 +369,7 @@ async def run_probe(session, invocation, boundary):
             invocation,
             "--boundary",
             boundary,
+            *executor,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
