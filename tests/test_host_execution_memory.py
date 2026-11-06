@@ -629,3 +629,56 @@ def test_worker_reattachment_refuses_graph_only_policy(provisioned):
     _, path, _, _, expected = provisioned
     with pytest.raises(native.AdmissionBindingError, match="model execution admission"):
         native.HostMemoryAdmission(path, expected_sha256=expected, _reattach_model_worker=True)
+
+
+def test_startup_probe_remeasures_exact_native_envelope_without_leases(joint, monkeypatch, caplog):
+    required = 20 * GIB
+    monkeypatch.setattr(native, "_available_memory", lambda: required - 17)
+    with pytest.raises(native.HostMemoryStartupPending) as caught:
+        joint.graph()
+    row = caught.value.observation
+    assert row["required_available_bytes"] == required
+    assert row["available_bytes"] == required - 17
+    assert row["shortfall_bytes"] == 17
+    assert row["reserved_bytes"] == 15 * GIB
+    assert row["minimum_available_bytes"] == 4 * GIB
+    assert row["background_reservation_bytes"] == GIB
+    assert row["stalled_or_retrying"] and row["eta_seconds"] is None
+    assert row["elapsed_seconds"] >= 0 and row["observed_unix_ms"] > 0
+    assert not row["capacity_reserved"]
+    emitted = json.loads(caplog.records[-1].message)
+    assert emitted == row
+    assert joint.selection.policy_path not in caplog.text
+
+    def no_grant(*args, **kwargs):
+        raise AssertionError("startup probe must not acquire a runtime lease")
+
+    monkeypatch.setattr(native.HostMemoryAdmission, "try_acquire", no_grant)
+    assert memory.probe_memory_startup(joint.selection)["status"] == "capacity_required"
+    monkeypatch.setattr(native, "_available_memory", lambda: required)
+    ready = memory.probe_memory_startup(joint.selection)
+    assert ready["status"] == "admitted" and ready["shortfall_bytes"] == 0
+    assert ready["completed"] == ready["total"] == required and ready["eta_seconds"] == 0
+    monkeypatch.setattr(native, "_available_memory", lambda: required - 1)
+    assert memory.probe_memory_startup(joint.selection)["shortfall_bytes"] == 1
+
+
+def test_startup_probe_does_not_hide_invalid_bindings_as_capacity_wait(joint, monkeypatch):
+    monkeypatch.setattr(native, "_available_memory", lambda: 0)
+    changed = joint.selection.model_copy(update={"policy_sha256": "f" * 64})
+    with pytest.raises(native.AdmissionBindingError, match="differs"):
+        memory.probe_memory_startup(changed)
+
+
+def test_startup_reporting_failure_preserves_native_stop(joint, monkeypatch):
+    import logging
+
+    monkeypatch.setattr(native, "_available_memory", lambda: 0)
+
+    def failed(*args, **kwargs):
+        raise OSError("diagnostic output unavailable")
+
+    monkeypatch.setattr(logging.getLogger("umi.competition.progress"), "warning", failed)
+    with pytest.raises(native.HostMemoryStartupPending, match="qualified headroom") as caught:
+        joint.graph()
+    assert caught.value.observation["shortfall_bytes"] == 20 * GIB

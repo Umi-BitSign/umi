@@ -19,7 +19,7 @@ import re
 import stat
 import time
 import weakref
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -312,6 +312,14 @@ class HostMemoryLease:
         self.close()
 
 
+class HostMemoryStartupPending(OSError):
+    """A validated selection awaits its unchanged full startup envelope."""
+
+    def __init__(self, observation):
+        self.observation = observation
+        super().__init__("host memory admission startup awaits qualified headroom")
+
+
 class HostMemoryAdmission:
     """No files are created, no limits inferred, and no lease is reentrant.
 
@@ -328,6 +336,8 @@ class HostMemoryAdmission:
         host_identity_path: Path = Path("/etc/machine-id"),
         _reattach_model_worker: bool = False,
     ):
+        started = time.monotonic()
+        self.startup_observation = None
         raw = _read_policy(_absolute(str(policy_path)))
         if hashlib.sha256(raw).hexdigest() != expected_sha256:
             raise AdmissionBindingError("host admission policy differs from selection")
@@ -360,17 +370,52 @@ class HostMemoryAdmission:
         # all idle startup slots again would block it behind unrelated active
         # work. Reattachment grants nothing: every invocation still takes the
         # native locks and remeasures the full current reservation envelope.
-        if (
-            not _reattach_model_worker
-            and (not self.model_execution_stage or self.joint_execution_stage)
-            and (
-                _available_memory()
-                < self.policy.minimum_available_bytes
+        if not _reattach_model_worker and (
+            not self.model_execution_stage or self.joint_execution_stage
+        ):
+            available = _available_memory()
+            required = (
+                self.policy.minimum_available_bytes
                 + self.policy.reserved_bytes
                 + self.policy.background_reservation_bytes
             )
-        ):
-            raise OSError("host memory admission startup awaits qualified headroom")
+            pending = available < required
+            self.startup_observation = dict(
+                schema="umi-host-memory-startup/1",
+                stage="host_memory_startup",
+                status="capacity_required" if pending else "admitted",
+                policy_sha256=self.policy_sha256,
+                available_bytes=available,
+                required_available_bytes=required,
+                minimum_available_bytes=self.policy.minimum_available_bytes,
+                reserved_bytes=self.policy.reserved_bytes,
+                background_reservation_bytes=self.policy.background_reservation_bytes,
+                shortfall_bytes=max(0, required - available),
+                completed=min(available, required),
+                total=required,
+                unit="bytes",
+                percent=100 * min(available, required) / required,
+                elapsed_seconds=time.monotonic() - started,
+                observed_unix_ms=int(time.time() * 1000),
+                eta_seconds=None if pending else 0,
+                planning_eta_seconds=None,
+                eta_basis="awaiting_memory_release_no_measured_rate"
+                if pending
+                else "capacity_available",
+                eta_scope="startup_admission_only_not_service_readiness",
+                stalled_or_retrying=pending,
+                capacity_reserved=False,
+                certification_authority=False,
+            )
+            if pending:
+                # Emit bounded numeric evidence before CLI redaction. Logging
+                # failure must not weaken or replace the original admission stop.
+                with suppress(Exception):
+                    logging.getLogger("umi.competition.progress").warning(
+                        "%s",
+                        json.dumps(self.startup_observation, sort_keys=True, separators=(",", ":")),
+                    )
+                raise HostMemoryStartupPending(self.startup_observation)
 
     @property
     def model_execution_stage(self) -> bool:

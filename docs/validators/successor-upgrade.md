@@ -49,6 +49,30 @@ miner maintenance manifests and reports the effective code separately as
 start. Preserve generous cooperative stop budgets and verify application readiness
 and completed work after startup; `systemctl start` alone is insufficient.
 
+Before stopping a working host, sample the target configuration's full native
+startup memory envelope with `umi.host_memory_runtime.probe_memory_startup`.
+Run the target source with the installed interpreter's `-I -B` flags, in the
+service mount namespace with its actual UID, GID and supplementary groups.
+Resolve the selection from the target's typed configuration: intake uses
+`recoverable_service.admission_owner.host_memory_admission`; reviewer and
+settlement hosts use `host_memory_admission`.
+Check during preparation and again immediately before the maintenance hold.
+A `capacity_required` result keeps the working service running and reports
+required, available and missing bytes while waiting for memory release. Invalid
+configuration, policy, host or slot bindings refuse before stopping the service.
+The probe reserves no memory, so ordinary startup and every subsequent grant
+still enforce their existing checks. A previous passing sample is not reusable
+capacity evidence. Startup reports the same bounded numeric observation before
+the CLI's sanitized error if capacity falls after the probe.
+
+Include the current handoff helper and its native probe capability in newly
+prepared maintenance controls; do not copy an older helper without this check.
+Keep already selected recovery controls and signed source trees immutable.
+An interrupted hold resumes through its retained recovery path rather than
+requiring the previous service to be running for a new preflight. These checks
+apply to native host maintenance; upload-only miners retain their existing
+client update path and signed submission bytes.
+
 Order selection restores a missing evaluation-suite declaration from the configured
 `evaluation_suite_adoption_candidates` entry for that cohort. The candidate must
 match the exact suite in the retained certified preparation. Restoration publishes

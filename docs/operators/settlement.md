@@ -5709,6 +5709,15 @@ independent opt-in configuration: select the same qualified host policy in every
 co-resident aggregate consumer; enabling one consumer alone does not establish
 a host-wide capacity bound.
 
+Native startup requires available memory to cover the selected minimum reserve,
+reserved workload bytes and background allowance together. The
+`umi-host-memory-startup/1` observation reports these amounts and any shortfall
+before a sanitized startup error. A maintenance preflight can call
+`probe_memory_startup` with the target's typed selection in the installed service
+namespace and Unix groups. Sample again before stopping a working consumer;
+capacity observations reserve nothing and cannot replace startup or per-grant
+checks. See [controlled host maintenance](../validators/successor-upgrade.md#intake-runtime-maintenance).
+
 Provision the `umi-host-memory-admission/2` policy and its empty lock files on
 persistent root-owned storage. The policy binds the host's `/etc/machine-id`,
 namespace directory, group and every file's device/inode. The directory is mode
