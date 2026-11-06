@@ -10,7 +10,7 @@ import json
 import os
 import re
 import sqlite3
-from dataclasses import asdict
+from collections import Counter
 from pathlib import Path
 from threading import RLock
 
@@ -187,75 +187,118 @@ class ForecastIndex:
             previous_head = self.head
             try:
                 with self.db:
-                    accepted = [
-                        self._accept(row, verified_event=None if events is None else events[i])
-                        for i, row in enumerate(rows)
-                    ]
-                return accepted
+                    return self._accept_rows(rows, events)
             except BaseException:
                 self.head = previous_head
                 raise
 
-    def _accept(self, row, *, verified_event=None):
-        sequence, identity, scope, body, previous, checksum = row
-        if type(sequence) is not int or sequence < 1:
-            raise ValueError("forecast index input sequence is invalid")
-        if sequence <= self.head[0]:
-            retained = self.db.execute(
-                "SELECT identity,scope,previous,digest FROM identities WHERE sequence=?",
-                (sequence,),
-            ).fetchone()
-            if retained != (identity, scope, previous, checksum):
-                raise ValueError("completed forecast index entry changed or is missing")
-            return False
-        if (
-            type(sequence) is not int
-            or sequence != self.head[0] + 1
-            or previous != self.head[1]
-            or type(body) is not bytes
-            or not 0 < len(body) <= 16 * 1024
-            or (
-                verified_event is None
-                and hashlib.sha256(previous.encode() + body).hexdigest() != checksum
-            )
-        ):
-            raise ValueError("forecast index input chain is damaged")
-        event = json.loads(body) if verified_event is None else verified_event
-        if verified_event is None and (
-            encode_forecast_json(event) != body
-            or event.get("schema") != "umi-forecast-event/1"
-            or (event.get("identity"), event.get("scope")) != (identity, scope)
-            or event.get("certification_authority") is not False
-        ):
-            raise ValueError("forecast index input identity is damaged")
-        summary = self.summary(scope)
-        if summary is None:
-            summary = ForecastSummary()
-        summary.accept(event, sequence=sequence)
-        for finish in summary.pending:
+    def _insert_rows(self, statement, rows, *, suffix=""):
+        # Stay below SQLite's historical 999-variable limit. One SQL statement
+        # per bounded group avoids a GIL handoff for every small row operation.
+        for start in range(0, len(rows), 128):
+            page = rows[start : start + 128]
+            placeholders = "(" + ",".join("?" for _ in page[0]) + ")"
             self.db.execute(
-                "INSERT INTO deadlines VALUES(?,?,1) ON CONFLICT(scope,finish) "
-                "DO UPDATE SET count=count+1",
-                (scope, finish),
+                statement + ",".join(placeholders for _ in page) + suffix,
+                tuple(value for row in page for value in row),
             )
-        value = {k: v for k, v in asdict(summary).items() if k in _SUMMARY_FIELDS}
-        encoded = encode_forecast_json(value)
-        if len(encoded) > 16 * 1024:
-            raise ValueError("forecast summary exceeds its metadata bound")
-        self.db.execute(
-            "INSERT INTO summaries VALUES(?,?,?) ON CONFLICT(scope) DO UPDATE SET "
-            "body=excluded.body,digest=excluded.digest",
-            (scope, encoded, hashlib.sha256(encoded).hexdigest()),
+
+    def _accept_rows(self, rows, events=None):
+        """Prepare one bounded page, then persist it in the caller's transaction."""
+        head = self.head
+        retained = {}
+        sequences = sorted(
+            {row[0] for row in rows if type(row[0]) is int and 0 < row[0] <= head[0]}
         )
-        self.db.execute(
-            "INSERT INTO identities VALUES(?,?,?,?,?,?)",
-            (sequence, identity, scope, event["kind"], previous, checksum),
+        for start in range(0, len(sequences), 128):
+            page = sequences[start : start + 128]
+            retained.update(
+                (row[0], row[1:])
+                for row in self.db.execute(
+                    "SELECT sequence,identity,scope,previous,digest FROM identities "
+                    "WHERE sequence IN (" + ",".join("?" for _ in page) + ")",
+                    page,
+                )
+            )
+        summaries, identities, originals, accepted = {}, [], [], []
+        for position, row in enumerate(rows):
+            sequence, identity, scope, body, previous, checksum = row
+            if type(sequence) is not int or sequence < 1:
+                raise ValueError("forecast index input sequence is invalid")
+            if sequence <= head[0]:
+                if retained.get(sequence) != (identity, scope, previous, checksum):
+                    raise ValueError("completed forecast index entry changed or is missing")
+                accepted.append(False)
+                continue
+            event = None if events is None else events[position]
+            if (
+                sequence != head[0] + 1
+                or previous != head[1]
+                or type(body) is not bytes
+                or not 0 < len(body) <= 16 * 1024
+                or (
+                    event is None
+                    and hashlib.sha256(previous.encode() + body).hexdigest() != checksum
+                )
+            ):
+                raise ValueError("forecast index input chain is damaged")
+            if event is None:
+                event = json.loads(body)
+                if (
+                    encode_forecast_json(event) != body
+                    or event.get("schema") != "umi-forecast-event/1"
+                    or (event.get("identity"), event.get("scope")) != (identity, scope)
+                    or event.get("certification_authority") is not False
+                ):
+                    raise ValueError("forecast index input identity is damaged")
+            if scope not in summaries:
+                summaries[scope] = self.summary(scope) or ForecastSummary()
+            summaries[scope].accept(event, sequence=sequence)
+            identities.append((sequence, identity, scope, event["kind"], previous, checksum))
+            retained[sequence] = identity, scope, previous, checksum
+            if event["kind"] != "forecast":
+                originals.append((sequence, body))
+            head = sequence, checksum
+            accepted.append(True)
+
+        encoded_summaries, deadlines = [], []
+        for scope, summary in summaries.items():
+            value = {key: getattr(summary, key) for key in _SUMMARY_FIELDS}
+            encoded = encode_forecast_json(value)
+            if len(encoded) > 16 * 1024:
+                raise ValueError("forecast summary exceeds its metadata bound")
+            encoded_summaries.append((scope, encoded, hashlib.sha256(encoded).hexdigest()))
+            deadlines.extend(
+                (scope, finish, count) for finish, count in Counter(summary.pending).items()
+            )
+        self._insert_rows("INSERT INTO identities VALUES", identities)
+        self._insert_rows(
+            "INSERT INTO summaries VALUES",
+            encoded_summaries,
+            suffix=" ON CONFLICT(scope) DO UPDATE SET body=excluded.body,digest=excluded.digest",
         )
-        if event["kind"] != "forecast":
-            self._cache_original(sequence, body)
-        self.db.execute("UPDATE head SET sequence=?,digest=?", (sequence, checksum))
-        self.head = sequence, checksum
-        return True
+        self._insert_rows(
+            "INSERT INTO deadlines VALUES",
+            deadlines,
+            suffix=" ON CONFLICT(scope,finish) DO UPDATE SET count=count+excluded.count",
+        )
+        if originals:
+            used = self.db.execute("SELECT COALESCE(MAX(used),0) FROM originals").fetchone()[0]
+            self._insert_rows(
+                "INSERT INTO originals VALUES",
+                [
+                    (sequence, body, used + offset)
+                    for offset, (sequence, body) in enumerate(originals, 1)
+                ][-512:],
+            )
+            self.db.execute(
+                "DELETE FROM originals WHERE sequence IN (SELECT sequence FROM originals "
+                "ORDER BY used DESC LIMIT -1 OFFSET 512)"
+            )
+        if identities:
+            self.db.execute("UPDATE head SET sequence=?,digest=?", head)
+        self.head = head
+        return accepted
 
     def _cache_original(self, sequence, body):
         used = self.db.execute("SELECT COALESCE(MAX(used),0)+1 FROM originals").fetchone()[0]
@@ -350,8 +393,7 @@ class ForecastIndex:
             previous_head = self.head
             try:
                 with self.db:
-                    for row, event in zip(segment.rows, segment._validated_events, strict=True):
-                        self._accept(row, verified_event=event)
+                    self._accept_rows(segment.rows, segment._validated_events)
                     self.db.execute(
                         "INSERT INTO archives(first_sequence,last_sequence,metadata,body) "
                         "VALUES(?,?,?,?)",

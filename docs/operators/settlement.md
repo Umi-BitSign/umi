@@ -652,7 +652,9 @@ The service archives exact original events in bounded compressed segments.
 Segment bytes, identities and compact summaries commit together under
 `forecast-accounting/retention/index/`. The separate
 `forecast_retention_index_bytes` budget defaults to 512 MiB and preserves old
-configuration bytes at that default. Maintenance indexes at most 256 events per
+configuration bytes at that default. Index writes and summary updates are batched
+inside each page transaction to bound database calls during shared-process work.
+Maintenance indexes at most 256 events per
 page, retains completed R2 receipts, then removes archived originals from the
 hot database. Small final batches flush after 30 seconds. Reclaimed SQLite pages
 are reused without growing the original file; this does not shrink its physical

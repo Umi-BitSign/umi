@@ -1,6 +1,8 @@
 """Compact summaries survive restart without replaying original payloads."""
 
 import hashlib
+import json
+import sqlite3
 
 import pytest
 
@@ -178,3 +180,106 @@ def test_index_refuses_another_segments_owner(historical, tmp_path):
         with pytest.raises(ValueError, match="another index"):
             store.accept_segment(segment)
         assert store.head == (0, "0" * 64)
+
+
+def mixed_page(count=1024):
+    rows, expected, previous = [], {}, "0" * 64
+    for sequence in range(1, count + 1):
+        scope = f"scope:{sequence % 7}"
+        kind = (
+            "scope_started"
+            if sequence <= 7
+            else "completed"
+            if 700 <= sequence < 707
+            else "forecast"
+            if sequence % 3
+            else "attempt_started"
+        )
+        event = dict(
+            schema="umi-forecast-event/1",
+            identity=f"item:{sequence}",
+            scope=scope,
+            certification_authority=False,
+            kind=kind,
+            observed_unix_ms=1000 + sequence,
+        )
+        if kind == "forecast":
+            event.update(finish_unix_ms=3000 + sequence % 3, eta_seconds=1, elapsed_seconds=0)
+        body = encode_forecast_json(event)
+        checksum = hashlib.sha256(previous.encode() + body).hexdigest()
+        rows.append((sequence, event["identity"], scope, body, previous, checksum))
+        expected.setdefault(scope, ForecastSummary()).accept(event, sequence=sequence)
+        previous = checksum
+    return rows, expected
+
+
+def test_bounded_bulk_pages_preserve_deadline_multiplicity_completion_and_retries(tmp_path):
+    rows, expected = mixed_page()
+    with index.ForecastIndex(tmp_path / "index", "b" * 64) as store:
+        if hasattr(store.db, "setlimit"):
+            store.db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+        statements = []
+        store.db.set_trace_callback(statements.append)
+        assert store.accept_many(rows[:512]) == [True] * 512
+        # Retry the committed prefix and one repeated row from this transaction.
+        second = [*rows[500:800], rows[799], *rows[800:]]
+        assert store.accept_many(second) == [False] * 12 + [True] * 288 + [False] + [True] * 224
+        # Bound database crossings independently of machine timing or CPU speed.
+        assert len(statements) < 100
+        store.db.set_trace_callback(None)
+        for scope, summary in expected.items():
+            for now in (1500, 4000, 2500):
+                assert store.status(scope, now) == summary.status(scope, now)
+        nonforecasts = [r for r in rows if json.loads(r[3])["kind"] != "forecast"]
+        assert store.db.execute("SELECT sequence FROM originals ORDER BY used").fetchall() == [
+            (r[0],) for r in nonforecasts[-512:]
+        ]
+    with index.ForecastIndex(tmp_path / "index", "b" * 64) as store:
+        assert store.head == (len(rows), rows[-1][-1])
+        for scope, summary in expected.items():
+            assert store.status(scope, 4000) == summary.status(scope, 4000)
+
+
+def test_bulk_cache_evicts_oldest_exact_originals_once_per_page(tmp_path):
+    rows, _ = mixed_page(7)
+    previous = rows[-1][-1]
+    for sequence in range(8, 1100):
+        event = dict(
+            schema="umi-forecast-event/1",
+            identity=f"item:{sequence}",
+            scope="scope:0",
+            certification_authority=False,
+            kind="attempt_started",
+            observed_unix_ms=sequence,
+        )
+        body = encode_forecast_json(event)
+        checksum = hashlib.sha256(previous.encode() + body).hexdigest()
+        rows.append((sequence, event["identity"], "scope:0", body, previous, checksum))
+        previous = checksum
+    with index.ForecastIndex(tmp_path / "index", "b" * 64) as store:
+        store.accept_many(rows[:256])
+        store.accept_many(rows[256:])
+        assert store.db.execute("SELECT sequence FROM originals ORDER BY used").fetchall() == [
+            (r[0],) for r in rows[-512:]
+        ]
+        assert store.cached_original(1) is None
+        assert store.cached_original(rows[-1][0]) == rows[-1][3]
+
+
+def test_bulk_archive_failure_rolls_back_all_page_state(historical, tmp_path):
+    segment, _, _ = historical
+    root = tmp_path / "index"
+    with index.ForecastIndex(root, segment.ledger_sha256) as store:
+        store.db.execute(
+            "CREATE TRIGGER reject_archive BEFORE INSERT ON archives "
+            "BEGIN SELECT RAISE(ABORT,'interrupted archive'); END"
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="interrupted archive"):
+            store.stage_archive(segment)
+        assert store.head == (0, "0" * 64)
+        for table in ("identities", "summaries", "deadlines", "originals", "archives"):
+            assert store.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (0,)
+        store.db.execute("DROP TRIGGER reject_archive")
+    with index.ForecastIndex(root, segment.ledger_sha256) as store:
+        store.stage_archive(segment)
+        assert store.head == (segment.last_sequence, segment.last_sha256)
