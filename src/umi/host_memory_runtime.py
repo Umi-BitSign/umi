@@ -485,6 +485,7 @@ class WorkloadASGIBinding:
         self.queues = {"read": deque(), "write": deque()}
         self.control_burst = max(1, maximum_control_waiting)
         self.controls_since_read = 0
+        self.priority_read_streak = 0
         self.closing = False
         self.shared = {}
         self.shared_bytes = 0
@@ -631,6 +632,10 @@ class WorkloadASGIBinding:
         self.reserved += ticket["reservation"]
         self.active[id(ticket)] = ticket
         self.controls_since_read = self.controls_since_read + 1 if ticket["group"] == "write" else 0
+        if ticket["group"] == "read":
+            self.priority_read_streak = (
+                self.priority_read_streak + 1 if ticket["priority_read"] else 0
+            )
 
     def _wake(self):
         if self.closing:
@@ -647,7 +652,21 @@ class WorkloadASGIBinding:
                 while queue and queue[0]["future"].done():
                     queue.popleft()
                 if queue and self._fits(queue[0]["reservation"]):
-                    ticket = queue.popleft()
+                    ticket = queue[0]
+                    if group == "read" and self.priority_read_streak < self.control_burst:
+                        # Upload discovery/status stays within read capacity;
+                        # polling cannot consume the separate mutation queue.
+                        ticket = next(
+                            (
+                                item
+                                for item in queue
+                                if item["priority_read"]
+                                and not item["future"].done()
+                                and self._fits(item["reservation"])
+                            ),
+                            ticket,
+                        )
+                    queue.remove(ticket)
                     break
             if ticket is None:
                 return
@@ -671,6 +690,7 @@ class WorkloadASGIBinding:
             active=False,
             route=self._route(scope),
             group=self._group(scope),
+            priority_read=self._priority_read(scope),
         )
         if not any(self.queues.values()) and self._fits(reservation):
             self._grant(ticket)
@@ -698,6 +718,15 @@ class WorkloadASGIBinding:
             raise
         finally:
             self._leave_wait(ticket["group"])
+
+    @classmethod
+    def _priority_read(cls, scope):
+        path = scope.get("path", "")
+        return (
+            scope.get("method") == "GET"
+            and cls._public_share_path(path)
+            and (path == "/v1/competition/cohorts" or "/direct-model-uploads/" in path)
+        )
 
     @classmethod
     def _public_share_path(cls, path):

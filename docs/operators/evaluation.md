@@ -693,6 +693,14 @@ Nonce-bearing authority/readiness requests and differing response inputs remain
 separate. Deploy this HTTP scheduler change through the supported intake source
 update; miners and validators keep using the existing history endpoint.
 
+Cohort discovery and direct-upload status reads have priority within the read
+queue, so ordinary readiness polling does not delay upload preparation and
+completion checks. They use read capacity, leaving the mutation queue available
+for reservations and upload completion. After a burst bounded by the existing
+control-burst setting, the oldest queued read advances. Request-slot and byte
+limits are unchanged. Existing miner and validator clients use the same routes;
+deploy the scheduling behavior through the supported intake source update.
+
 After its first full replay, a prepared round is reused independently for each
 cohort within a bounded process-local cache. Reads use a consistent read-only
 intake snapshot and do not acquire the admission writer's gate. Each read still

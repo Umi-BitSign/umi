@@ -175,18 +175,89 @@ async def test_upload_status_poll_preserves_the_mutation_queue():
     owner = invoke(bound, request("/owner"))[0]
     await until(lambda: entered)
     poll = invoke(bound, request("/read"))[0]
-    status, _, status_reads = invoke(bound, request("/v1/competition/direct-model-uploads/id"))
+    upload_path = "/v1/competition/cohorts/" + "a" * 64 + "/direct-model-uploads/" + "b" * 64
+    status, _, status_reads = invoke(bound, request(upload_path))
     await until(lambda: bound.waiting == 2)
     assert bound.waiting_groups == {"read": 2, "write": 0}
-    control, _, control_reads = invoke(
-        bound, request("/v1/competition/direct-model-uploads/id/parts", method="POST")
-    )
+    control, _, control_reads = invoke(bound, request(upload_path + "/parts", method="POST"))
     await until(lambda: bound.waiting == 3)
     assert bound.waiting_groups == {"read": 2, "write": 1}
     assert not status_reads and not control_reads
     release.set()
     await asyncio.gather(owner, poll, status, control)
     assert entered[1].endswith("/parts")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/competition/cohorts",
+        "/v1/competition/cohorts/" + "a" * 64 + "/direct-model-uploads/" + "b" * 64,
+        "/v1/competition/cohorts/" + "a" * 64 + "/direct-model-uploads/by-upload/" + "b" * 64,
+    ],
+)
+async def test_upload_reads_advance_ahead_of_queued_readiness_without_taking_write_capacity(path):
+    release, entered = asyncio.Event(), []
+
+    async def app(scope, receive, send):
+        entered.append(scope["path"])
+        if len(entered) == 1:
+            await release.wait()
+        await success(send)
+
+    bound = binding(app, reads=4, controls=1)
+    owner = invoke(bound, request("/owner"))[0]
+    await until(lambda: entered)
+    polls = [invoke(bound, request("/readiness/" + str(i)))[0] for i in range(3)]
+    await until(lambda: bound.waiting == 3)
+    status = invoke(bound, request(path))[0]
+    await until(lambda: bound.waiting == 4)
+    assert bound.waiting_groups == {"read": 4, "write": 0}
+    upload = invoke(bound, request("/upload", method="POST"))[0]
+    await until(lambda: bound.waiting_groups["write"] == 1)
+    assert bound.inflight == 1
+    release.set()
+    await asyncio.gather(owner, *polls, status, upload)
+    assert entered[:3] == ["/owner", "/upload", path]
+    assert bound.inflight == bound.reserved == bound.waiting == bound.shared_bytes == 0
+
+
+async def test_upload_read_burst_keeps_ordinary_reads_advancing():
+    release, entered = asyncio.Event(), []
+
+    async def app(scope, receive, send):
+        entered.append(scope["path"])
+        if len(entered) == 1:
+            await release.wait()
+        await success(send)
+
+    bound = binding(app, reads=4, controls=2)
+    owner = invoke(bound, request("/owner"))[0]
+    await until(lambda: entered)
+    ordinary = invoke(bound, request("/ordinary"))[0]
+    paths = [
+        "/v1/competition/cohorts/" + "a" * 64 + "/direct-model-uploads/" + key * 64 for key in "bcd"
+    ]
+    uploads = [invoke(bound, request(path))[0] for path in paths]
+    await until(lambda: bound.waiting == 4)
+    release.set()
+    await asyncio.gather(owner, ordinary, *uploads)
+    assert entered == ["/owner", paths[0], paths[1], "/ordinary", paths[2]]
+    assert bound.inflight == bound.reserved == bound.waiting == bound.shared_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/competition/readiness",
+        "/v1/competition/service-work",
+        "/v1/competition/cohorts/" + "a" * 64 + "/readiness",
+        "/v1/competition/cohorts/invalid/direct-model-uploads/" + "b" * 64,
+        "/v1/competition/cohorts/" + "a" * 64 + "/direct-model-uploads/" + "b" * 64 + "/files",
+    ],
+)
+def test_only_exact_upload_discovery_and_status_paths_get_read_priority(path):
+    assert not binding(None)._priority_read(request(path))
 
 
 @pytest.mark.parametrize("suffix", ["b" * 64, "by-upload/" + "b" * 64])
