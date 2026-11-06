@@ -431,7 +431,6 @@ class JournalSourceExternalizer:
                 reference = self.remote.reference_for_path("objects/" + wire_sha)
                 if reference is None:
                     raise self.repair_error("captured source lost completed transport metadata")
-                self.remote.validate_reference(reference)
                 alias = {
                     "schema": SCHEMA if encoding is None else CAPTURE_SCHEMA,
                     "owner": self.checkpoints.owner,
