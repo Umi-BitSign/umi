@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from umi import competition_reward_history_parallel as parallel
 from umi import competition_reward_history_workers as workers
 from umi.competition_reward_history import RewardControlHistoryReader
 from umi.competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
@@ -445,6 +446,68 @@ async def test_one_worker_byte_window_keeps_supported_inputs_and_bounds_dispatch
     assert await h.reader.advance(h.item.provider, through_block=h.end) == h.expected
     assert all(count == 1 and size <= workers.MAX_FRAME_BYTES for count, size in pending)
     assert len(h.pools) == 1
+
+
+async def test_small_retained_frames_fill_count_window_without_larger_byte_reservation(
+    parallel_case, monkeypatch
+):
+    h = parallel_case
+    h.reader.verification_profile = profile(workers=2, maximum_in_flight=4)
+    submit = HistoryWorkers.submit
+    pending = []
+
+    def observed(pool, **kw):
+        future = submit(pool, **kw)
+        pending.append((len(pool._pending), pool._bytes))
+        return future
+
+    monkeypatch.setattr(HistoryWorkers, "submit", observed)
+    assert await h.reader.advance(h.item.provider, through_block=h.end) == h.expected
+    assert max(count for count, _ in pending) == min(4, len(h.frames))
+    assert max(count for count, _ in pending) > 2
+    assert all(size <= 2 * workers.MAX_FRAME_BYTES for _, size in pending)
+    h.reader = h.open_parallel()
+
+    def forbidden(*_):
+        pytest.fail("completed native inputs were reread after window update")
+
+    monkeypatch.setattr(h.reader, "_load", forbidden)
+    assert await h.reader.advance(h.item.provider, through_block=h.end) == h.expected
+    assert h.reader.progress.native_completed == 0
+
+
+async def test_retained_prefetch_reserves_a_maximum_frame_before_loading(
+    parallel_case, monkeypatch
+):
+    h = parallel_case
+    # Scale only this fixture's byte bounds to exercise exhaustion using real
+    # native frames, without allocating production-sized synthetic payloads.
+    maximum = max(sum(map(len, fields.values())) for fields in h.frames.values())
+    budget = maximum * 2
+    h.reader.verification_profile = profile(workers=2, maximum_in_flight=4).model_copy(
+        update={"maximum_in_flight_bytes": budget}
+    )
+    monkeypatch.setattr(parallel, "MAX_FRAME_BYTES", maximum)
+    submit, load = HistoryWorkers.submit, h.reader._load
+    active = []
+    pending = []
+
+    def observed(pool, **kw):
+        future = submit(pool, **kw)
+        active[:] = [pool]
+        pending.append((len(pool._pending), pool._bytes))
+        return future
+
+    def bounded_load(height):
+        if active:
+            assert active[0]._bytes + maximum <= budget
+        return load(height)
+
+    monkeypatch.setattr(HistoryWorkers, "submit", observed)
+    monkeypatch.setattr(h.reader, "_load", bounded_load)
+    assert await h.reader.advance(h.item.provider, through_block=h.end) == h.expected
+    assert all(size <= budget for _, size in pending)
+    assert max(count for count, _ in pending) < 4
 
 
 async def test_one_frame_byte_window_does_not_prefetch_fresh_capture(history_case, monkeypatch):

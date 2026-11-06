@@ -1223,6 +1223,16 @@ start the coverage/history owner at launch, retain the complete finalized interv
 from its original authority block, and monitor catch-up during intake, paid work
 and certification. Selecting workers alone does not start a missing capture owner.
 
+Retained-frame windows charge actual input bytes while reserving room for one
+maximum-size frame before each additional read. Small frames can therefore use
+the selected count window without increasing its byte ceiling. Oversized batches
+split into smaller windows; they do not reject otherwise supported evidence.
+The memory reservation still covers the selected workers and byte ceiling.
+Deploy this reader before increasing a count window independently of its byte
+ceiling; older readers conservatively reserve the maximum size for every frame.
+Use the same supported source/configuration maintenance path for coordinators,
+reviewers and writers, preserving their original history roots and receipts.
+
 When a retained proof frame is missing, native capture remains serialized, while
 durable source publication and proof export overlap across the selected byte and
 count window. Without a profile the window holds at most two frames; a one-frame

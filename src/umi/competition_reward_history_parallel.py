@@ -115,6 +115,7 @@ async def _persist(reader, pool, future, fields, retained):
 async def _window(reader, provider, pool, entries, stop, *, last_height):
     tasks = []
     error = None
+    admitted_bytes = sum(sum(map(len, fields.values())) for _, fields, _ in entries)
     reader.progress.preparation_start(
         "owned_history_provider_wait",
         entries[0][0] if entries else None,
@@ -175,13 +176,20 @@ async def _window(reader, provider, pool, entries, stop, *, last_height):
                             )
                         )
                         # Start this native check before loading the next frame.
-                        # The list grows only within the original bounded window;
-                        # no extra raw frame, worker slot or byte budget is added.
-                        if height < last_height and not stop.is_set():
+                        # Reserve a maximum-size frame before reading another.
+                        # Small frames can fill the count window without each
+                        # consuming a maximum-frame reservation for its lifetime.
+                        if (
+                            height < last_height
+                            and not stop.is_set()
+                            and admitted_bytes + MAX_FRAME_BYTES
+                            <= reader.verification_profile.maximum_in_flight_bytes
+                        ):
                             completed, following, following_retained = await _load_input(
                                 reader, height + 1
                             )
                             if completed is None and following is not None:
+                                admitted_bytes += sum(map(len, following.values()))
                                 entries.append((height + 1, following, following_retained))
             # Checkpoint coroutines run as each worker finishes; gathering here
             # never imposes block order on durable completion.
@@ -250,9 +258,12 @@ async def _apply_prepared_window(reader, entries, values, stop):
 
 async def _run(reader, provider, last, stop):
     profile = reader.verification_profile
-    # Conservative raw-frame slots include a maximum permitted block; large
-    # evidence lowers throughput rather than failing an accepted input.
-    count = min(profile.maximum_in_flight, profile.maximum_in_flight_bytes // MAX_FRAME_BYTES)
+    # Fresh capture has no retained sizes to account before admission. Retained
+    # inputs reserve one maximum frame for each read, then charge its actual
+    # bytes for the rest of the window. Both paths keep the same byte ceiling.
+    capture_count = min(
+        profile.maximum_in_flight, profile.maximum_in_flight_bytes // MAX_FRAME_BYTES
+    )
     async with history_memory_window(profile.required_memory_bytes):
         pool = fields = values = None
         entries = []
@@ -263,7 +274,7 @@ async def _run(reader, provider, last, stop):
                 if reader._next > last or stop.is_set():
                     break
                 entries = []
-                window_last = min(last, reader._next + count - 1)
+                window_last = min(last, reader._next + profile.maximum_in_flight - 1)
                 completed, fields, retained = await _load_input(reader, reader._next)
                 if completed is None and fields is not None:
                     entries.append((reader._next, fields, retained))
@@ -272,7 +283,10 @@ async def _run(reader, provider, last, stop):
                     # uses every admitted frame for overlapping source persistence
                     # and export. A one-frame profile still forbids lookahead.
                     await reader._advance_capture_locked(
-                        provider, window_last, maximum_in_flight=count, stop=stop
+                        provider,
+                        min(last, reader._next + capture_count - 1),
+                        maximum_in_flight=capture_count,
+                        stop=stop,
                     )
                     continue
                 if pool is None:
