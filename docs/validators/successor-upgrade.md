@@ -715,6 +715,21 @@ wait without increasing concurrent reads, submissions or registration captures.
 Queued requests perform their normal admission checks after acquiring a slot;
 waiting does not create a receipt or bypass freshness, proof or capacity checks.
 
+Private phase-review clients retry the exact request when the selected owner
+returns an explicit pre-admission request-capacity or queue-timeout rejection.
+The retry closes the rejected response, waits one second, and shares the original
+exchange deadline. A fresh-challenge collision therefore preserves the caller's
+completed proof review. Other HTTP failures still return to the native recovery
+path; signatures, response bounds and authority checks remain required. Counted
+retry telemetry reports elapsed time and remaining budget, with the delay ETA
+scoped to the next attempt rather than completion of the review.
+
+Carry this shared transport source through the supported owner, phase-reviewer
+and settlement maintenance selections, preserving their actual configurations,
+service caps, journals and signed inputs. Older configurations require no schema
+migration. Miner upload requests and the standalone upload-client selection are
+unchanged. Retained completed votes continue to use their existing journal path.
+
 HTTP services allow five minutes for request shutdown before cancellation and
 retain ownership until durable cleanup finishes. Original provider/task failures
 are reported before cleanup begins and survive a shutdown grace timeout, without
