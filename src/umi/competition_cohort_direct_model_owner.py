@@ -33,6 +33,7 @@ from .competition_cohort_direct_model_attempts import (
 from .competition_cohort_direct_model_attempts import (
     DirectModelUploadIntent as _DirectModelUploadIntent,
 )
+from .competition_cohort_direct_model_completion import recover_requested_completions
 from .competition_cohort_direct_model_selection import select_issued_model_uploads
 from .competition_cohort_direct_model_upload import (
     DirectModelPayload,
@@ -377,6 +378,7 @@ class DirectModelUploadOwner:
             maximum_bytes=c.maximum_metadata_bytes,
         )
         self.journal.initialize_poll_cursor(repair=repair_poll_cursor)
+        self.journal.initialize_poll_cursor(repair=repair_poll_cursor, completion=True)
 
     def _request(self, request: CohortParticipationRequest) -> tuple[str, object]:
         request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(request))
@@ -1705,6 +1707,9 @@ class DirectModelUploadOwner:
         self, *, now_unix_ms: int, report: PollReport | None = None
     ) -> dict[str, int | str]:
         _at(now_unix_ms)
+        completion_recovery = await recover_requested_completions(
+            self, now_unix_ms=now_unix_ms, report=report
+        )
         ready = pending = retrying = failed = reviews_ready = reviews_held = 0
         completed = terminal = 0
         continuation_retrying = 0
@@ -1814,6 +1819,7 @@ class DirectModelUploadOwner:
                     "model_sha256": model,
                     "active_object_stage": stage,
                     "last_retry_error_type": last_retry_error,
+                    **completion_recovery,
                     **selection_counts,
                 }
             )
@@ -2056,6 +2062,7 @@ class DirectModelUploadOwner:
             "objects_retained_for_cleanup": retained_for_cleanup,
             "last_error_type": last_error,
             "last_retry_error_type": last_retry_error,
+            **completion_recovery,
             **selection_counts,
             **await run_owned_thread(self.journal.metadata_snapshot),
         }
@@ -2185,7 +2192,14 @@ class DirectModelUploadOwners:
                     "eta_basis": "owner_poll_duration_and_new_uploads_unknown",
                     "eta_scope": "direct_upload_cohort_queue",
                     "stalled_or_retrying": bool(
-                        self._errors.get(cohort) or (visible and visible.get("objects_retrying"))
+                        self._errors.get(cohort)
+                        or (
+                            visible
+                            and (
+                                visible.get("objects_retrying")
+                                or visible.get("completion_recovery_pending")
+                            )
+                        )
                     ),
                     "error_type": self._errors.get(cohort)
                     or (
@@ -2293,6 +2307,8 @@ class DirectModelUploadOwners:
                 "elapsed_seconds": round(time.monotonic() - started, 3),
                 "eta_seconds": None,
                 "eta_basis": "owner_poll_duration_and_new_uploads_unknown",
-                "stalled_or_retrying": bool(report["objects_retrying"]),
+                "stalled_or_retrying": bool(
+                    report["objects_retrying"] or report.get("completion_recovery_pending")
+                ),
                 "chain_submission_authorized": False,
             }

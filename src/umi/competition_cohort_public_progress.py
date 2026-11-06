@@ -14,6 +14,17 @@ from copy import deepcopy
 from threading import RLock
 
 DIRECT_UPLOAD_PROGRESS_FIELDS = (
+    "completion_recovery_total",
+    "completion_recovery_attempted",
+    "completion_recovery_completed",
+    "completion_recovery_pending",
+    "completion_recovery_retrying",
+    "completion_recovery_repair_required",
+    "completion_recovery_error_type",
+    "completion_recovery_elapsed_seconds",
+    "completion_recovery_eta_seconds",
+    "completion_recovery_eta_basis",
+    "completion_recovery_scope",
     "objects_pending",
     "objects_retrying",
     "objects_ready",

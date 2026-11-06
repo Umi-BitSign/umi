@@ -137,6 +137,34 @@ def test_poll_cursor_allocation_preserves_metadata_limit(tmp_path, monkeypatch):
     assert current.metadata_snapshot()["remaining_metadata_bytes"] == 0
 
 
+def test_completion_cursor_has_separate_rotation_and_bounded_restart_metadata(tmp_path):
+    current = open_current(native_legacy(tmp_path / "journal").root)
+    original = records(current)
+    before = current.metadata_snapshot()["metadata_bytes"]
+    current.initialize_poll_cursor()
+    current.initialize_poll_cursor(completion=True)
+    current.advance_poll_cursor("12" * 32)
+    current.advance_poll_cursor("34" * 32, completion=True)
+    reopened = open_current(current.root)
+    reopened.initialize_poll_cursor(completion=True)
+    assert reopened.poll_cursor() == "12" * 32
+    assert reopened.poll_cursor(completion=True) == "34" * 32
+    assert reopened.metadata_snapshot()["metadata_bytes"] == before + 128
+    assert records(reopened) == original
+
+
+def test_completion_cursor_capacity_failure_rolls_back_only_new_hint(tmp_path, monkeypatch):
+    current = open_current(native_legacy(tmp_path / "journal").root)
+    current.initialize_poll_cursor()
+    before = current.metadata_snapshot()["metadata_bytes"]
+    monkeypatch.setattr(current, "maximum_bytes", before + 63)
+    with pytest.raises(DirectModelMetadataCapacityPending):
+        current.initialize_poll_cursor(completion=True)
+    assert current.poll_cursor() == ""
+    with pytest.raises(DirectModelAttemptRepairRequired):
+        current.poll_cursor(completion=True)
+
+
 def test_retry_history_has_no_upload_times_attempt_count_ceiling(tmp_path, monkeypatch):
     current = open_current(tmp_path / "journal")
     current.retain_request(UPLOAD, {"signed": "request"}, {"signed": "payload"})

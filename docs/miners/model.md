@@ -264,8 +264,16 @@ not change. This also recovers expiry after you sent completion metadata: an
 unfinished completion intent does not count as a completed object. The client
 requests an authenticated replacement only after the server confirms that both
 the multipart generation and completed object are absent. A lost completion
-response for an existing object is reconciled without another upload. Provider
-outages do not impose a lifetime generation limit on your upload. If intake reports `model_upload_metadata_capacity_pending` or
+response for an existing object is reconciled without another upload. Completion
+requests already retained by intake also resume through its background
+worker after a server restart, without requiring another client request. The
+worker uses the original signed completion and verifies the recovered object
+before admission. Public progress reports `completion_recovery_pending`, retry
+and repair status separately from completed-object verification. An unfinished
+reservation without a signed completion still requires the miner to finish its
+upload; these recovery counts do not enumerate all outstanding reservations.
+Provider outages do not impose a lifetime generation limit on your upload.
+If intake reports `model_upload_metadata_capacity_pending` or
 `model_upload_metadata_repair_required` in the `X-UMI-Reason-Code` response header,
 keep retrying the same signed request; the operator must provision metadata
 capacity or repair the retained index. Changing your nonce or signing a new

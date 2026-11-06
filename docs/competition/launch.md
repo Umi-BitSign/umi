@@ -91,6 +91,19 @@ Completed certificates and votes survive restart and are reused. Closure still
 uses the native finalized-registration filter and exact certificates; a last-minute
 upload or an unresolved review can leave unfinished work at closure.
 
+The direct-upload owner resumes retained, miner-signed completion requests in
+bounded background batches. It reconciles the provider object through the
+ordinary completion path, then runs byte verification and independent review.
+Provider failures remain retryable; a missing or inconsistent signed record
+requires repair. Recovery never supplies an unsigned completion for a reservation.
+The separate completion cursor preserves rotation after interruption and adds
+64 bytes to the journal's enforced metadata allowance. Upgrade through the
+selected host path with its original journals and directory bindings. Existing
+signed records, completed byte results and the verification cursor are retained.
+Public `completion_recovery_*` fields report this substage separately from
+completed-object verification; they do not count uploads still awaiting a miner's
+completion request or predict final certification time.
+
 Restoring completed model-file byte checkpoints yields between files so cached
 progress and other service requests can run. Bulk receipt migration and byte-fact
 imports use owned metadata workers; cancellation drains them before releasing
