@@ -52,11 +52,18 @@ and completed work after startup; `systemctl start` alone is insufficient.
 Order selection restores a missing evaluation-suite declaration from the configured
 `evaluation_suite_adoption_candidates` entry for that cohort. The candidate must
 match the exact suite in the retained certified preparation. Restoration publishes
-only that declaration through the native evidence store and reuses existing media
-and provenance qualification. A damaged existing declaration or a different candidate
+that declaration through the native evidence store and reuses existing media
+and provenance qualification. Before invocation, both local and R2-backed evaluators
+also restore an absent case video from their configured candidate into the selected
+benchmark video directory. The retained execution must name that exact suite, case
+and video digest. The bounded native reader checks the source bytes; publication is
+atomic and followed by native readback. Existing videos use the original reader,
+including after restart, without requiring another candidate review.
+A damaged existing declaration or video, or a different candidate,
 requires repair; neither is replaced silently. Older installations without a candidate
-continue to require their original evidence objects. Preserve the candidate files
-until the selected declaration is durably published. Subsequent orders and restarts
+continue to require their original evidence objects and videos. Preserve candidate
+files until the selected declaration and all required videos are durably published.
+Subsequent orders and restarts
 reuse that publication; miners do not need to resubmit or change their signed inputs.
 The owner checks current authority and collects finalized chain state for each
 order selection. Delivery can advance the shared journal while a large roster is
@@ -225,6 +232,11 @@ profile reader together before qualifying or selecting the new v3 host.
 The evaluator launches the probe file from its selected source tree with the
 installed interpreter and `-I -B`. Resolving the helper with `python -m` can load
 an older bundled copy after a supported source-only maintenance update.
+
+Pressure sampling accepts a kernel `io.stat` device row with no statistics yet.
+It sums the read-byte counters on populated rows and rejects missing, malformed
+or duplicate `rbytes` fields there. Install this reader with both evaluators;
+no timing contract, condition threshold, model input or historical receipt changes.
 
 The corrected timing host additionally qualifies explicit core-class equivalence
 and shared-ancestor CPU budgets. Select the matching restorer and evaluator

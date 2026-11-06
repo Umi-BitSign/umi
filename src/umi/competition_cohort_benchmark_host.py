@@ -145,6 +145,7 @@ class BenchmarkHost:
             archive=Path(c.archive_directory),
             videos=Path(c.videos_directory),
             workspace=Path(c.workspace_directory),
+            suite_candidates=getattr(config, "evaluation_suite_adoption_candidates", ()),
         )
         if c.model_execution_admission is not None:
             sandbox["execution_admission"] = ModelExecutionAdmission(

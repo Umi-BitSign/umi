@@ -16,6 +16,7 @@ from .competition_cohort_execution import RecoverableExecutionJob
 from .competition_cohort_execution_journal import CohortExecutionAttempt, case_role_model
 from .competition_cohort_model_acceptance import ModelReviewRequest
 from .competition_cohort_public_progress import PUBLIC_COHORT_SCOPE
+from .competition_cohort_suite_media import restore_selected_suite_video
 from .competition_evaluation_runtime import prepared_runtime_authorization
 from .competition_execution import read_case_video
 from .competition_model_cache_space import BootDiskModelCache, managed_model_slot
@@ -42,9 +43,11 @@ class CohortCpuSandbox:
         videos: Path,
         workspace: Path,
         execution_admission=None,
+        suite_candidates=(),
     ):
         self.policy, self.archive, self.videos, self.workspace = policy, archive, videos, workspace
         self.execution_admission = execution_admission
+        self.suite_candidates = tuple(suite_candidates)
         ensure_private_directory(workspace)
         for path in (archive, videos):
             private_path(str(path))
@@ -52,6 +55,22 @@ class CohortCpuSandbox:
                 raise ValueError(
                     "cohort scratch must be separate from retained artifacts and videos"
                 )
+
+    def _case_video(self, job, case):
+        maximum = job.runtime.maximum_video_bytes
+        try:
+            return read_case_video(self.videos, case.video_sha256, maximum)
+        except FileNotFoundError:
+            if not self.suite_candidates:
+                raise
+        return restore_selected_suite_video(
+            policy=self.policy,
+            candidates=self.suite_candidates,
+            videos=self.videos,
+            job=job,
+            case=case,
+            maximum=maximum,
+        )
 
     def _path(self, attempt: CohortExecutionAttempt) -> Path:
         path = self.workspace / digest(attempt)
@@ -104,9 +123,7 @@ class CohortCpuSandbox:
         path = self._path(attempt)
 
         async def execute(cache_lease, native_capacity=None):
-            video = await run_owned_thread(
-                read_case_video, self.videos, case.video_sha256, job.runtime.maximum_video_bytes
-            )
+            video = await run_owned_thread(self._case_video, job, case)
             return await execute_offline_case(
                 bundle=model,
                 archive=archive,
@@ -185,6 +202,7 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         request: Callable[[RecoverableExecutionJob], ModelReviewRequest],
         legacy_artifacts=None,
         execution_admission=None,
+        suite_candidates=(),
         concurrency=1,
     ) -> None:
         boot = getattr(getattr(artifacts, "config", None), "materialization_boot_disk_cache", None)
@@ -199,6 +217,7 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
             videos=videos,
             workspace=workspace,
             execution_admission=execution_admission,
+            suite_candidates=suite_candidates,
         )
         if not callable(request):
             raise ValueError("direct model execution request source is not callable")

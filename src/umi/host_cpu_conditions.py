@@ -274,6 +274,33 @@ def _pressure(path):
     return rows["full"]
 
 
+def _read_bytes(path):
+    total = 0
+    for line in _text(path, 32768).splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        device = parts[0].split(":")
+        if len(device) != 2 or not all(value.isdecimal() for value in device):
+            _fail("cpu_condition_invalid_io_counter")
+        # blkcg can list a device before it has any controller statistics.
+        # Such a row contributes no counters. A populated row must still
+        # supply rbytes; missing or malformed measurements are not zeroes.
+        if len(parts) == 1:
+            continue
+        fields = {}
+        for part in parts[1:]:
+            key, separator, value = part.partition("=")
+            if not separator or not key or key in fields:
+                _fail("cpu_condition_invalid_io_counter")
+            fields[key] = value
+        value = fields.get("rbytes", "")
+        if not value.isdecimal():
+            _fail("cpu_condition_invalid_io_counter")
+        total += int(value)
+    return total
+
+
 class PressureReader:
     def __init__(self, root, model_parent, *, proc_root=Path("/proc")):
         self.root, self.parent, self.proc = Path(root), Path(model_parent), Path(proc_root)
@@ -297,10 +324,7 @@ class PressureReader:
             line.split() for line in _text(self.parent / "memory.stat", 32768).splitlines()
         )
         vm = dict(line.split() for line in _text(self.proc / "vmstat", 32768).splitlines())
-        read_bytes = 0
-        for line in _text(self.parent / "io.stat", 32768).splitlines():
-            fields = dict(part.split("=", 1) for part in line.split()[1:])
-            read_bytes += int(fields["rbytes"])
+        read_bytes = _read_bytes(self.parent / "io.stat")
         values = dict(
             external_memory_full_us=memory,
             external_io_full_us=io,

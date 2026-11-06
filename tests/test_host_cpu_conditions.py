@@ -65,6 +65,41 @@ def test_external_scope_creation_requires_fresh_measurement(pressure_tree):
         reader.sample()
 
 
+def test_pressure_device_without_statistics_then_acquires_counters(pressure_tree):
+    fixture = pressure_tree
+    reader = host.PressureReader(fixture.root, fixture.own, proc_root=fixture.proc)
+    path = fixture.own / "io.stat"
+    path.write_text("8:16 \n8:0 rbytes=6140510208 wbytes=0 rios=122713 wios=0\n")
+    before = reader.sample()
+    path.write_text("8:16 rbytes=4096 wbytes=0\n8:0 rbytes=6140510208 wbytes=0\n")
+    after = reader.sample()
+    assert before.model_read_bytes == 6140510208
+    assert after.model_read_bytes - before.model_read_bytes == 4096
+    path.write_text("")
+    assert reader.sample().model_read_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "8:16 wbytes=0",
+        "8:16 rbytes=-1",
+        "8:16 rbytes=bad",
+        "8:16 rbytes=1 rbytes=2",
+        "8:16 rbytes=1 invalid",
+        "device",
+        "8:16:0",
+        "8:16 rbytes=",
+    ],
+)
+def test_pressure_refuses_malformed_or_missing_io_measurement(pressure_tree, row):
+    fixture = pressure_tree
+    (fixture.own / "io.stat").write_text(row + "\n")
+    reader = host.PressureReader(fixture.root, fixture.own, proc_root=fixture.proc)
+    with pytest.raises(CpuTimingInfrastructureError, match="invalid_io_counter"):
+        reader.sample()
+
+
 async def test_observer_detects_stall_even_before_first_tick(monkeypatch):
     clock = SimpleNamespace(now=1_000_000)
     monkeypatch.setattr(host, "time", SimpleNamespace(monotonic_ns=lambda: clock.now * 1000))
