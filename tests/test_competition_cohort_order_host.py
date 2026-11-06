@@ -155,6 +155,102 @@ async def test_complete_roster_selected_and_delivered_without_manual_orders(owne
     assert (len(r.h.calls), len(r.receipt_calls), o.prepared_reads) == calls
 
 
+async def test_selection_refreshes_finality_as_delivery_advances_shared_journal(owner, monkeypatch):
+    o, r = owner, owner.network.r
+    host = o.host()
+    select = host.queue.select
+    observed = []
+
+    def concurrent_delivery(*args):
+        slot = select(*args)
+        observed.append(host.queue.intent(slot).observation.block)
+        r.h.block += 1
+        host.queue.journal.observe(r.h.block)
+        return slot
+
+    monkeypatch.setattr(host.queue, "select", concurrent_delivery)
+    count = len(r.h.batch["roster"].participants)
+    assert count > 1
+    assert await host.select(r.cohort) == count
+    assert observed == sorted(set(observed))
+    assert host.queue.intent(r.slot).order == r.h.order
+
+
+def selected_suite_candidate(owner, tmp_path, suite):
+    suite_path = tmp_path / "selected-suite.json"
+    manifest_path = tmp_path / "selected-manifest.json"
+    suite_path.write_bytes(canonical_json_bytes(suite))
+    manifest_path.write_bytes(canonical_json_bytes({"suite_sha256": digest(suite)}))
+    suite_path.chmod(0o600)
+    manifest_path.chmod(0o600)
+    candidate = SimpleNamespace(
+        cohort_sha256=owner.network.r.cohort,
+        suite_file=str(suite_path),
+        selection_manifest_file=str(manifest_path),
+        maximum_metadata_bytes=16 * 1024**2,
+    )
+    owner.service.config.lifecycle.evaluation_suite_adoption_candidates = (candidate,)
+    return suite_path
+
+
+async def test_missing_selected_suite_restores_and_delivers_original_orders(owner, tmp_path):
+    o, r = owner, owner.network.r
+    suite = r.h.batch["suite"]
+    original = canonical_json_bytes(suite)
+    candidate_path = selected_suite_candidate(o, tmp_path, suite)
+    o.files._path(digest(suite)).unlink()
+    host = o.host()
+    count = len(r.h.batch["roster"].participants)
+    assert await host.select(r.cohort) == count
+    assert o.files(digest(suite)) == original
+    assert host.queue.intent(r.slot).order == r.h.order
+    assert (await host.worker.poll_once())["retry_count"] == 0
+    # A restart and repeat use the durable original, without the candidate or
+    # new media/provenance qualification becoming a continuing dependency.
+    candidate_path.unlink()
+    assert o.host()._suite(r.h.order.round) == suite
+    assert await o.host().select(r.cohort) == count
+
+
+async def test_changed_candidate_cannot_restore_selected_suite(owner, tmp_path):
+    o, r = owner, owner.network.r
+    suite = r.h.batch["suite"]
+    selected_suite_candidate(o, tmp_path, suite.model_copy(update={"policy_sha256": "ff" * 32}))
+    o.files._path(digest(suite)).unlink()
+    host = o.host()
+    with pytest.raises(ValueError):
+        await host.select(r.cohort)
+    assert not o.files._path(digest(suite)).exists()
+    assert not host.queue.pending(r.cohort)
+
+
+async def test_valid_candidate_for_another_suite_cannot_replace_round_identity(owner, tmp_path):
+    o, r = owner, owner.network.r
+    selected_suite_candidate(o, tmp_path, r.h.batch["suite"])
+    round_ = r.h.order.round.model_copy(update={"suite_sha256": "ee" * 32})
+    with pytest.raises(ValueError, match="differs from the certified prepared round"):
+        o.host()._suite(round_)
+    assert not o.files._path(round_.suite_sha256).exists()
+
+
+async def test_damaged_suite_is_not_replaced_from_candidate(owner, tmp_path):
+    o, r = owner, owner.network.r
+    suite = r.h.batch["suite"]
+    selected_suite_candidate(o, tmp_path, suite)
+    destination = o.files._path(digest(suite))
+    destination.write_bytes(b"{}")
+    with pytest.raises(ValueError):
+        await o.host().select(r.cohort)
+    assert destination.read_bytes() == b"{}"
+
+
+async def test_legacy_missing_suite_without_candidate_stays_explicit(owner):
+    o, r = owner, owner.network.r
+    o.files._path(digest(r.h.batch["suite"])).unlink()
+    with pytest.raises(FileNotFoundError):
+        await o.host().select(r.cohort)
+
+
 async def test_waiting_history_reuses_native_result_after_restart_off_event_loop(
     owner, monkeypatch
 ):

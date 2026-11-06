@@ -49,6 +49,19 @@ miner maintenance manifests and reports the effective code separately as
 start. Preserve generous cooperative stop budgets and verify application readiness
 and completed work after startup; `systemctl start` alone is insufficient.
 
+Order selection restores a missing evaluation-suite declaration from the configured
+`evaluation_suite_adoption_candidates` entry for that cohort. The candidate must
+match the exact suite in the retained certified preparation. Restoration publishes
+only that declaration through the native evidence store and reuses existing media
+and provenance qualification. A damaged existing declaration or a different candidate
+requires repair; neither is replaced silently. Older installations without a candidate
+continue to require their original evidence objects. Preserve the candidate files
+until the selected declaration is durably published. Subsequent orders and restarts
+reuse that publication; miners do not need to resubmit or change their signed inputs.
+The owner checks current authority and collects finalized chain state for each
+order selection. Delivery can advance the shared journal while a large roster is
+prepared; retained orders keep their original bytes and observations on retry.
+
 ## Supervisor maintenance for an installed successor
 
 ### Challenge execution lanes
