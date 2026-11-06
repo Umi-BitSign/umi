@@ -326,6 +326,7 @@ class HostMemoryAdmission:
         *,
         expected_sha256: str,
         host_identity_path: Path = Path("/etc/machine-id"),
+        _reattach_model_worker: bool = False,
     ):
         raw = _read_policy(_absolute(str(policy_path)))
         if hashlib.sha256(raw).hexdigest() != expected_sha256:
@@ -351,13 +352,23 @@ class HostMemoryAdmission:
         if self.policy.host_identity_sha256 != _host_identity(host_identity_path):
             raise AdmissionBindingError("host admission policy belongs to another host")
         self._validate_all()
+        if _reattach_model_worker and not self.model_execution_stage:
+            raise AdmissionBindingError("worker reattachment requires model execution admission")
         # Startup and every later grant remeasure current memory. Idle Python
         # heaps remain in MemAvailable accounting after logical leases close.
-        if (not self.model_execution_stage or self.joint_execution_stage) and (
-            _available_memory()
-            < self.policy.minimum_available_bytes
-            + self.policy.reserved_bytes
-            + self.policy.background_reservation_bytes
+        # An isolated child rejoins its already-started model host. Requiring
+        # all idle startup slots again would block it behind unrelated active
+        # work. Reattachment grants nothing: every invocation still takes the
+        # native locks and remeasures the full current reservation envelope.
+        if (
+            not _reattach_model_worker
+            and (not self.model_execution_stage or self.joint_execution_stage)
+            and (
+                _available_memory()
+                < self.policy.minimum_available_bytes
+                + self.policy.reserved_bytes
+                + self.policy.background_reservation_bytes
+            )
         ):
             raise OSError("host memory admission startup awaits qualified headroom")
 

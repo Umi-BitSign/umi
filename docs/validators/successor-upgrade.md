@@ -243,7 +243,11 @@ the timing observer's event loop or hold its interpreter lock. The evaluator
 launches the worker from the selected source with the installed interpreter and
 `-I -B`. Include `competition_cohort_sandbox_worker` and its native source guard
 in supported source updates for both evaluators. The child acquires the existing
-memory and model-cache leases. Each sandbox bounds resident workers by its
+memory and model-cache leases. It reattaches to the selected model admission
+controller, checking policy, host identity and slot bindings again. Reattachment
+does not repeat the full host-startup capacity gate; every invocation still
+remeasures and reserves its native memory envelope before any model allocation.
+Each sandbox bounds resident workers by its
 selected model-lane count; waiting review tasks do not spawn more interpreters.
 The parent retains materialized model residency
 until the child exits after container cleanup. Cancellation and parent death

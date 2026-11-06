@@ -228,7 +228,8 @@ async def test_child_owns_native_admission_and_preserves_result(timed, scenario,
     admission = object()
     calls = []
 
-    def admit(selection, policy):
+    def admit(selection, policy, *, reattach_worker):
+        assert reattach_worker
         assert selection == timed.admission and policy == timed.policy
         calls.append("admission")
         return admission

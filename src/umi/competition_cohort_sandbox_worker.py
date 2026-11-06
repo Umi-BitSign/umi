@@ -36,7 +36,7 @@ async def execute_request(request):
     for signum in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signum, current.cancel)
     try:
-        admission = ModelExecutionAdmission(request.admission, request.policy)
+        admission = ModelExecutionAdmission(request.admission, request.policy, reattach_worker=True)
         sandbox = CohortCpuSandbox(
             request.policy,
             archive=Path(request.archive),
