@@ -3762,6 +3762,17 @@ authority. Synchronous commit checks remain nonblocking. Select the qualified
 native owner/reviewer source through the existing cooperative maintenance update;
 no miner protocol change or new public client manifest is needed.
 
+Chunked verification runs per-file receipt lookup, document restoration and
+durable receipt publication in owned workers so filesystem delays yield the
+service event loop. Cancellation drains the active worker before releasing its
+byte-checkpoint leases. Completed checks retain their original byte identities
+and are reused without reading model payloads. Apply the compatible source to
+intake, independent reviewers and settlement through their supported immutable
+source/host maintenance selections, retaining it in subsequent release and
+recovery selections. Native model readers receive the change with that source;
+upload-only miners keep the existing client protocol. Existing receipts and
+signed submissions require no migration.
+
 Direct-upload polling records successful private review-file shape checks in its
 existing metadata journal. Unchanged owned file identities reuse those checks
 across polls and restart, without rereading documents on the event loop. Missing
