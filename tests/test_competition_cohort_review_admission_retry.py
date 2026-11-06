@@ -123,7 +123,7 @@ async def test_one_deadline_includes_admission_delay_and_response():
 
     started = time.monotonic()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        with pytest.raises(TimeoutError):
+        with pytest.raises(asyncio.TimeoutError):
             await exchange(client, timeout=2)(Request(challenge="same-deadline"))
     assert len(calls) == 2 and calls[0] == calls[1]
     assert closed.is_set() and time.monotonic() - started < 2.8
