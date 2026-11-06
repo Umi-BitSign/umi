@@ -83,6 +83,8 @@ seeds = [
     "competition_miner_transition_cli",
     # Launched by absolute sibling path in an isolated interpreter.
     "host_cpu_probe",
+    # Timed invocations launch this selected-source module through runpy.
+    "competition_cohort_sandbox_worker",
 ]
 modules = set()
 external_imports = set()

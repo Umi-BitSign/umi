@@ -202,6 +202,11 @@ class ModelExecutionMemoryPolicy(StrictProtocolModel):
 
 class ModelExecutionAdmission:
     def __init__(self, selection, policy):
+        self.selection = {
+            "policy_path": str(selection.policy_path),
+            "policy_sha256": selection.policy_sha256,
+            "host_identity_path": str(selection.host_identity_path),
+        }
         self.controller = HostMemoryAdmission(
             policy_path=_absolute(selection.policy_path),
             expected_sha256=selection.policy_sha256,

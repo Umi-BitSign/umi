@@ -16,6 +16,7 @@ from .competition_cohort_execution import RecoverableExecutionJob
 from .competition_cohort_execution_journal import CohortExecutionAttempt, case_role_model
 from .competition_cohort_model_acceptance import ModelReviewRequest
 from .competition_cohort_public_progress import PUBLIC_COHORT_SCOPE
+from .competition_cohort_sandbox_process import TimedSandboxRequest, run_timed_sandbox
 from .competition_cohort_suite_media import restore_selected_suite_video
 from .competition_evaluation_runtime import prepared_runtime_authorization
 from .competition_execution import read_case_video
@@ -44,10 +45,13 @@ class CohortCpuSandbox:
         workspace: Path,
         execution_admission=None,
         suite_candidates=(),
+        _isolate_timed=True,
     ):
         self.policy, self.archive, self.videos, self.workspace = policy, archive, videos, workspace
         self.execution_admission = execution_admission
         self.suite_candidates = tuple(suite_candidates)
+        self._isolate_timed = _isolate_timed
+        self._timed_workers = None
         ensure_private_directory(workspace)
         for path in (archive, videos):
             private_path(str(path))
@@ -115,6 +119,35 @@ class CohortCpuSandbox:
         from .competition_cpu_efficiency_policy import prepared_cpu_efficiency_authorization
 
         cpu_authorization = prepared_cpu_efficiency_authorization(job.round, self.policy)
+        if cpu_authorization is not None and self._isolate_timed:
+            if self.execution_admission is None:
+                raise EvaluationInfrastructureError("timed execution requires native admission")
+            if self._timed_workers is None:
+                count = len(self.execution_admission.slots)
+                if count < 1:
+                    raise EvaluationInfrastructureError("timed execution requires a native slot")
+                self._timed_workers = asyncio.Semaphore(count)
+            # Bound interpreter residency by selected model lanes. Waiting
+            # review tasks must not create an unbounded set of child hosts.
+            with TransferProgress("timed_host_worker_capacity", 1, unit="workers") as progress:
+                await self._timed_workers.acquire()
+                progress.advance(1)
+            try:
+                return await run_timed_sandbox(
+                    TimedSandboxRequest(
+                        schema="umi-timed-sandbox-request/1",
+                        policy=self.policy,
+                        job=job,
+                        attempt=attempt,
+                        archive=str(archive),
+                        videos=str(self.videos),
+                        workspace=str(self.workspace),
+                        admission=self.execution_admission.selection,
+                        suite_candidates=self.suite_candidates,
+                    )
+                )
+            finally:
+                self._timed_workers.release()
         runtime_options = (
             {}
             if runtime_authorization is None

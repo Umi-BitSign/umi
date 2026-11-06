@@ -238,6 +238,24 @@ It sums the read-byte counters on populated rows and rejects missing, malformed
 or duplicate `rbytes` fields there. Install this reader with both evaluators;
 no timing contract, condition threshold, model input or historical receipt changes.
 
+Timed host invocations run in an owned subprocess so review traffic cannot stall
+the timing observer's event loop or hold its interpreter lock. The evaluator
+launches the worker from the selected source with the installed interpreter and
+`-I -B`. Include `competition_cohort_sandbox_worker` and its native source guard
+in supported source updates for both evaluators. The child acquires the existing
+memory and model-cache leases. Each sandbox bounds resident workers by its
+selected model-lane count; waiting review tasks do not spawn more interpreters.
+The parent retains materialized model residency
+until the child exits after container cleanup. Cancellation and parent death
+request cooperative cleanup. Existing retained-attempt reconciliation handles
+interrupted invocations after restart.
+
+Qualify the worker under each evaluator's actual service memory cap and host
+reserves before selection. Isolation does not change timing thresholds, CPU or
+cache qualification, signed inputs, evidence formats or reward validation.
+Historical untimed execution keeps its existing invocation path. Upload-only
+miners and reference-following validators do not launch this private worker.
+
 The corrected timing host additionally qualifies explicit core-class equivalence
 and shared-ancestor CPU budgets. Select the matching restorer and evaluator
 together, then qualify the new topology and measurement-profile identities.
