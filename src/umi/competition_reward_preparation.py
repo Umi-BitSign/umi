@@ -61,6 +61,7 @@ from .competition_reward_manifest import (
     retain_reward_manifest,
 )
 from .competition_reward_opportunity import require_previous_opportunity
+from .competition_reward_preparation_reuse import PreparationReuse
 from .competition_reward_transactions import (
     PendingStandingWeight,
     StandingTransactionEnd,
@@ -74,7 +75,7 @@ from .competition_store import CompetitionStore
 from .competition_transport_verification import TransferProgress
 from .competition_verification_reuse import VerificationReuse, verification_owner_operation
 from .competition_verification_snapshot import VerifiedPackageSnapshot, verified_package_digest
-from .concurrency import run_owned_thread
+from .concurrency import await_owned_task, run_owned_thread
 from .mortal_receipts import MortalReceiptQuery
 from .open_competition import ModelBundle, digest, identity
 from .private_files import MAX_CONFIGURED_PRIVATE_BYTES
@@ -122,10 +123,11 @@ class StandingRewardPreparation:
     """Reuse completed native replay while every projection checks fresh proofs.
 
     The caller retains private packages and promotion assets with the existing
-    stores. Restart reuses an owner-restored completed coverage endpoint or the
-    retained native package verification; a serialized success flag cannot
-    populate this process-local cache. One compact result per
-    authenticated activation revision is retained here. Original package
+    stores. Restart reuses an owner-retained native completion or a restored
+    completed coverage endpoint after checking the original dependencies. A
+    caller-supplied success flag cannot populate this process-local cache.
+    Results retain their reviewed block for each authenticated activation.
+    Original package
     verification remains reusable when only authenticated reward parameters change.
     """
 
@@ -175,6 +177,14 @@ class StandingRewardPreparation:
         self._prepared: dict[str, PreparedStandingReward] = {}
         self._baseline_models: dict[str, dict[str, ModelBundle]] = {}
         self._transport_qualifications = None
+        self._preparation_reuse = None
+
+    @property
+    def preparation_reuse(self):
+        self._authority()
+        if self._preparation_reuse is None:
+            self._preparation_reuse = PreparationReuse(self)
+        return self._preparation_reuse
 
     @property
     def transport_qualifications(self):
@@ -213,21 +223,9 @@ class StandingRewardPreparation:
         history: OwnedRewardControlHistory,
         source: DecisionSource,
     ) -> PreparedStandingReward:
-        async with self._lock, self._reference_scope(package):
-            await self._ensure_model_artifacts(package)
-            return await run_owned_thread(partial(self._prepare, package, control, history, source))
-
-    def _prepare(
-        self,
-        package: CohortRewardPackage,
-        control: OwnedRewardControlObservation,
-        history: OwnedRewardControlHistory,
-        source: DecisionSource,
-    ) -> PreparedStandingReward:
-        selected = self._selected(control, history, source).selection
-        activation = selected.activation
-        assert activation is not None
-        return self._prepare_allocation(package, activation, control.snapshot.block_number)
+        return await await_owned_task(
+            asyncio.create_task(self._prepare_owned(package, control, history, source, "current"))
+        )
 
     @verification_owner_operation
     async def prepare_historical(
@@ -243,18 +241,11 @@ class StandingRewardPreparation:
         This may be the preceding cohort during a successor's drain. It does not
         project a row, credit an interval or grant authority to submit today.
         """
-        async with self._lock, self._reference_scope(package):
-            await self._ensure_model_artifacts(package)
-            return await run_owned_thread(
-                partial(self._prepare_historical, package, control, history, source)
+        return await await_owned_task(
+            asyncio.create_task(
+                self._prepare_owned(package, control, history, source, "historical")
             )
-
-    def _prepare_historical(self, package, control, history, source):
-        self._authority()
-        selected = self.reader.review_history(control, source, history).effective_selection
-        if selected is None or selected.state != "selected" or selected.activation is None:
-            raise ValueError("historical control has no effective reward package")
-        return self._prepare_allocation(package, selected.activation, control.snapshot.block_number)
+        )
 
     @verification_owner_operation
     async def prepare_initial(
@@ -271,29 +262,58 @@ class StandingRewardPreparation:
         package from complete native history without selecting it for weights.
         Projection still requires fresh control and the current activation.
         """
-        async with self._lock, self._reference_scope(package):
-            await self._ensure_model_artifacts(package)
-            return await run_owned_thread(
-                partial(self._prepare_initial, package, control, history, source)
-            )
+        return await await_owned_task(
+            asyncio.create_task(self._prepare_owned(package, control, history, source, "initial"))
+        )
 
-    def _prepare_initial(self, package, control, history, source):
+    def _activation(self, control, history, source, mode):
         self._authority()
-        initial = self.reader.review_history(control, source, history).initial_selection
-        if (
-            initial is None
-            or initial.sequence != 1
-            or initial.activation is None
-            or initial.activation.cohort_sha256 != digest(self.reader.series.cohorts[0])
-        ):
-            raise ValueError("standing history has no initial activation")
-        return self._prepare_allocation(package, initial.activation, control.snapshot.block_number)
+        if mode == "current":
+            selected = self._selected(control, history, source).selection
+        else:
+            review = self.reader.review_history(control, source, history)
+            selected = review.initial_selection if mode == "initial" else review.effective_selection
+            if mode == "initial" and (
+                selected is None
+                or selected.sequence != 1
+                or selected.activation is None
+                or selected.activation.cohort_sha256 != digest(self.reader.series.cohorts[0])
+            ):
+                raise ValueError("standing history has no initial activation")
+            if mode != "initial" and (
+                selected is None or selected.state != "selected" or selected.activation is None
+            ):
+                raise ValueError("historical control has no effective reward package")
+        assert selected.activation is not None
+        return selected.activation
+
+    async def _prepare_owned(self, package, control, history, source, mode):
+        # Own the entire operation through dependency completion. Cancellation
+        # cannot release the preparation lock between native success and its
+        # durable completion; a process crash resumes that second phase only.
+        async with self._lock:
+            activation = await run_owned_thread(self._activation, control, history, source, mode)
+            package = await run_owned_thread(
+                _validated_reward_snapshot, package, self.maximum_package_bytes
+            )
+            reuse = self.preparation_reuse
+            prepared = await reuse.restore(package, activation, control.snapshot.block_number)
+            if prepared is not None:
+                return await reuse.finish(package, prepared)
+            # A completed preparation needs no resident frozen model. Its
+            # independent model receipts are refreshed above; materialize the
+            # reference only for unfinished native replay or legacy asset checks.
+            async with self._reference_scope(package):
+                await self._ensure_model_artifacts(package)
+                prepared = await run_owned_thread(
+                    self._prepare_allocation, package, activation, control.snapshot.block_number
+                )
+                return await reuse.finish(package, prepared, native_completed_here=True)
 
     def _prepare_allocation(
         self, package: CohortRewardPackage, activation: RewardActivation, block: int
     ) -> PreparedStandingReward:
         requirement = self.manifest.requirement(activation.cohort_sha256)
-        package = _validated_reward_snapshot(package, self.maximum_package_bytes)
         if (
             verified_package_digest(package) != activation.package_sha256
             or digest(package.allocation) != activation.allocation_sha256
@@ -321,17 +341,6 @@ class StandingRewardPreparation:
                 include_effective_allocation=True,
             )
         )
-        retained = self._prepared.get(digest(activation))
-        if retained is not None:
-            self._check_prepared(retained)
-            if retained.activation != activation:
-                raise ValueError("standing activation changed its retained revision")
-            # Replay at an earlier root must recheck that the original cohort
-            # certification and artifacts were valid by that block. A later
-            # successful review cannot backdate their validity.
-            if block >= retained.reviewed_at_block:
-                self._export_allocations(package.allocation, retained.allocation)
-                return retained
         allocation = _replay_detached_reward_package(
             package,
             self.reader.policy,
@@ -434,13 +443,12 @@ class StandingRewardPreparation:
                 or allocation.round_sha256 != package.allocation.round_sha256
             ):
                 raise ValueError("completed coverage differs from selected reward preparation")
-            retained = self._prepared.get(digest(activation))
+            retained = self.preparation_reuse._restore(package, activation, point.block)
             if retained is not None:
-                self._check_prepared(retained)
-                if point.block >= retained.reviewed_at_block:
-                    self._export_allocations(package.allocation, retained.allocation)
-                    progress.advance(1)
-                    return retained
+                self._prepared[digest(activation)] = retained
+                self._export_allocations(package.allocation, retained.allocation)
+                progress.advance(1)
+                return retained
             if activation.reward_adoption_sha256 is not None:
                 verify_reward_adoption(
                     getattr(self.reader, "reward_adoptions", None),
@@ -450,13 +458,31 @@ class StandingRewardPreparation:
                     activation=activation,
                     current_block=point.block,
                 )
+            self.transport_qualifications.qualify(
+                package,
+                package_sha256=activation.package_sha256,
+                cohort_sha256=activation.cohort_sha256,
+            )
             restored = self._retain_prepared(
                 package, activation, allocation, point.block, digest(requirement)
             )
+            self._export_allocations(package.allocation, restored.allocation)
             progress.advance(1)
             return restored
 
     def _retain_prepared(self, package, activation, allocation, block, requirement_sha256):
+        prepared = self._issue_prepared(package, activation, allocation, block, requirement_sha256)
+        self.preparation_reuse.retain(package, prepared)
+        self._prepared[digest(activation)] = prepared
+        return prepared
+
+    def _issue_prepared(self, package, activation, allocation, block, requirement_sha256):
+        retained = self._prepared.get(digest(activation))
+        if retained is not None and retained.reviewed_at_block == block:
+            self._check_prepared(retained)
+            if retained.activation != activation or retained.allocation != allocation:
+                raise ValueError("completed preparation changed its owned result")
+            return retained
         prepared = PreparedStandingReward(
             self.series_sha256,
             activation,
@@ -473,10 +499,7 @@ class StandingRewardPreparation:
                 if (sub := participant.record.request.signed_submission.submission).track == "model"
                 and sub.model_bundle is not None
             }
-        # Retain completion inside the owned thread, even if its waiter was
-        # cancelled. Proof expiry during replay never discards immutable work.
-        self._prepared[digest(activation)] = prepared
-        self._export_allocations(package.allocation, prepared.allocation)
+        self._check_prepared(prepared)
         return prepared
 
     def _export_allocations(self, original, effective):

@@ -456,10 +456,11 @@ class RewardControlHistoryReader:
                 elif self.export_archive is None and not remote_capture:
                     encoded = encode_evidence(part, kind="proof")
                 else:
-                    encoding = encode_evidence_for_reuse(
-                        part, kind="proof", single_object=remote_capture
-                    )
-                    encoded = encoding.for_bytes(part, kind="proof")
+                    encoding = encode_evidence_for_reuse(part, kind="proof")
+                    # Keep large immutable runtime/proof nodes shared between
+                    # blocks. Coalesce only small literals so R2 request count
+                    # stays bounded without republishing the complete envelope.
+                    encoded = encoding.for_bytes(part, kind="proof", coalesce_small=remote_capture)
                     prepared[name].append(encoding)
                 records.extend(
                     ("control_history_object", sha, {"hex": value.hex()})

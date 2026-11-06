@@ -533,7 +533,7 @@ async def test_historical_preparation_rechecks_manifest_and_package_identity(
 ):
     p, _, _, args = historical_preparation_case
     await p.preparation.prepare_historical(p.package, **args)
-    with pytest.raises(ValueError, match="differs from current standing activation"):
+    with pytest.raises(ValueError, match="retained preparation changes the selected package"):
         await p.preparation.prepare_historical(
             p.package.model_copy(update={"policy_sha256": "ee" * 32}), **args
         )
@@ -613,12 +613,12 @@ async def test_native_package_replay_is_reused_but_projection_needs_fresh_contro
         await p.reopen().project(ready, **fresh)
     with pytest.raises(ValueError, match="native replay owner"):
         await p.preparation.project(replace(ready, reviewed_at_block=1), **fresh)
-    # A replacement preparation owner reconstructs the review from retained
-    # package/model bytes; it cannot import the old owner's success token.
+    # A replacement owner restores the native completion and dependencies,
+    # issuing its own token without repeating package or model payload work.
     restarted = p.reopen()
     restored = await restarted.prepare(p.package, **replay_args(await p.observations()))
     assert restored is not ready and restored.allocation == ready.allocation
-    assert calls == [1, 1]
+    assert calls == [1]
     assert (
         await restarted.project(restored, **(await p.observations()))
     ).projection == result.projection
@@ -665,6 +665,9 @@ async def test_cancellation_retains_completed_native_replay(preparation_case, mo
         await task
     ready = await p.preparation.prepare(p.package, **replay_args(await p.observations()))
     assert ready.allocation == p.allocation and calls == [1]
+    restarted = p.reopen()
+    restored = await restarted.prepare(p.package, **replay_args(await p.observations()))
+    assert restored.allocation == ready.allocation and calls == [1]
 
 
 async def test_pending_activation_can_prepare_but_cannot_project(preparation_case):
@@ -729,7 +732,7 @@ async def test_failed_replay_retries_and_independent_bindings_are_enforced(
         )
         with pytest.raises(ValueError, match="manifest differs"):
             StandingRewardPreparation(p.reader, p.store, changed, maximum_promotion_bytes=1_000_000)
-    with pytest.raises(ValueError, match="differs from current standing activation"):
+    with pytest.raises(ValueError, match="retained preparation changes the selected package"):
         await p.preparation.prepare(
             p.package.model_copy(update={"policy_sha256": "ff" * 32}),
             **replay_args(await p.observations()),
@@ -861,7 +864,13 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
     elif variant == "permit_missing":
         item.rpc.values[("SubtensorModule", "ValidatorPermit", (78,))] = [False] * len(members)
     item.rpc.values[("SubtensorModule", "Weights", (78, 3))] = row
-    item.rpc.values[("SubtensorModule", "LastUpdate", (78,))] = [0, 0, 0, first]
+    last_update = (
+        end
+        if "coverage_test_live_row" in request.fixturenames
+        and request.getfixturevalue("coverage_test_live_row")
+        else first
+    )
+    item.rpc.values[("SubtensorModule", "LastUpdate", (78,))] = [0, 0, 0, last_update]
     if scale:
         item.rpc.values[("SubtensorModule", "Weights", (78, 1))] = row
         item.rpc.values[("SubtensorModule", "LastUpdate", (78,))] = [0, first, 0, first]
@@ -6231,6 +6240,17 @@ async def test_remote_coverage_reuses_native_facts_after_eviction_restart_and_re
     qualifications.marker.rename(qualifications.marker.with_suffix(".fixture"))
     owner._transport_qualifications = None
 
+    # Native preparation checkpoints were added after the transport domain.
+    # This older installation cannot also retain a newer checkpoint bound to
+    # the removed transport owner. Keep both fixture journals as evidence;
+    # the original coverage endpoints and proof completions stay selected.
+    preparation_checkpoints = owner.preparation_reuse.store
+    preparation_checkpoints.root.rename(
+        preparation_checkpoints.root.with_name("prior-preparation-fixture")
+    )
+    preparation_checkpoints.marker.rename(preparation_checkpoints.marker.with_suffix(".fixture"))
+    owner._preparation_reuse = None
+
     def original_package_metadata():
         loads.append(True)
         return p.package
@@ -6487,7 +6507,7 @@ async def test_durable_snapshot_preparation_reuses_native_work_across_all_consum
     again = await restored.prepare(snapshot, **replay_args(await p.observations()))
     assert again.allocation == p.allocation
     assert counts == cold
-    assert reads.check()["objects"] > 0
+    assert reads.check()["objects"] == 0
     predecessor = await p.reopen().prepare_historical(snapshot, **historical_args)
     reads.check()
     chosen.current = replace(chosen.current, initial_selection=chosen.current.selection)
@@ -7047,3 +7067,114 @@ async def test_completed_native_interval_credit_restores_with_shared_dependency_
         **terms,
     )
     assert checked.certificate == certificate and not checked.chain_submission_authorized
+
+
+async def test_completed_preparation_snapshot_restart_never_reads_payload(
+    preparation_case, tmp_path, monkeypatch
+):
+    from umi.competition_reward_files import StandingRewardFiles
+    from umi.competition_verification_snapshot import VerifiedPackageSnapshot
+
+    p = preparation_case
+    files = StandingRewardFiles(
+        tmp_path / "native-preparation-inputs",
+        maximum_package_bytes=p.preparation.maximum_package_bytes,
+        maximum_witness_bytes=1024**2,
+    )
+    files.retain_package(p.package)
+    package = files.verified_package(digest(p.package))
+    ready = await p.preparation.prepare(package, **replay_args(await p.observations()))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("completed preparation repeated payload or native allocation replay")
+
+    monkeypatch.setattr(preparation, "_replay_detached_reward_package", forbidden)
+    monkeypatch.setattr(VerifiedPackageSnapshot, "read", forbidden)
+    restarted = p.reopen()
+    monkeypatch.setattr(restarted, "_reference_scope", forbidden)
+    restored = await restarted.prepare(package, **replay_args(await p.observations()))
+    assert restored.allocation == ready.allocation
+    assert restored is not ready and not restored.chain_submission_authorized
+    projected = await restarted.project(restored, **(await p.observations()))
+    assert sum(projected.projection.weights) == 65535
+
+
+async def test_native_completion_resumes_interrupted_dependencies_without_replay(
+    preparation_case, monkeypatch
+):
+    from umi import competition_reward_coverage_models as models
+
+    p = preparation_case
+    capture = models.capture_coverage_model_dependencies
+    attempts = []
+
+    async def interrupted(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise OSError("dependency metadata interrupted")
+        return await capture(*args, **kwargs)
+
+    monkeypatch.setattr(models, "capture_coverage_model_dependencies", interrupted)
+    with pytest.raises(OSError, match="dependency metadata interrupted"):
+        await p.preparation.prepare(p.package, **replay_args(await p.observations()))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("dependency resumption repeated completed native allocation")
+
+    monkeypatch.setattr(preparation, "_replay_detached_reward_package", forbidden)
+    restarted = p.reopen()
+    ready = await restarted.prepare(p.package, **replay_args(await p.observations()))
+    assert ready.allocation == p.allocation and attempts == [1, 1]
+    final = p.reopen()
+    assert (
+        await final.prepare(p.package, **replay_args(await p.observations()))
+    ).allocation == ready.allocation
+    assert attempts == [1, 1]
+
+
+async def test_completed_preparation_owner_loss_is_not_first_work(
+    preparation_case, monkeypatch, caplog
+):
+    from umi.competition_reward_preparation_checkpoint import PreparationCheckpointRepairRequired
+
+    p = preparation_case
+    caplog.set_level(logging.INFO)
+    await p.preparation.prepare(p.package, **replay_args(await p.observations()))
+    p.preparation.preparation_reuse.store.marker.unlink()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("lost completed metadata was treated as new native work")
+
+    monkeypatch.setattr(preparation, "_replay_detached_reward_package", forbidden)
+    with pytest.raises(PreparationCheckpointRepairRequired, match="marker was lost"):
+        await p.reopen().prepare(p.package, **replay_args(await p.observations()))
+    events = json_progress_payloads(
+        caplog.records, logger="umi.competition.progress", schema="umi-transport-work-progress/1"
+    )
+    opened = [event for event in events if event["stage"] == "reward_preparation_checkpoint_open"]
+    assert opened[-1]["status"] == "repair_required"
+    assert opened[-1]["reason_code"] == "preparation_checkpoint_owner_changed"
+
+
+async def test_interrupted_allocation_export_restores_native_completion(
+    preparation_case, monkeypatch
+):
+    p = preparation_case
+    calls = []
+
+    def interrupted(allocation):
+        calls.append(allocation)
+        if len(calls) == 1:
+            raise OSError("export interrupted")
+
+    first = p.reopen(allocation_sink=interrupted)
+    with pytest.raises(OSError, match="export interrupted"):
+        await first.prepare(p.package, **replay_args(await p.observations()))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("export resumption repeated completed native allocation")
+
+    monkeypatch.setattr(preparation, "_replay_detached_reward_package", forbidden)
+    restarted = p.reopen(allocation_sink=interrupted)
+    ready = await restarted.prepare(p.package, **replay_args(await p.observations()))
+    assert calls == [ready.allocation, ready.allocation]

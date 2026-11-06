@@ -1677,11 +1677,14 @@ budgets are preserved. Proof graph progress reports both transferred bytes and
 completed objects, with a scoped ETA. Measure sustained export throughput on the
 selected owner before claiming that additional upload lanes improve production.
 
-New R2 source captures and fresh archive frames use one bounded byte object per
-ordinary evidence chunk. This uses the existing `/1` literal recipe; original
-expanded hashes and decoder limits stay unchanged. Local captures keep their
-deduplicated encoding. Existing chunks and frames retain their exact prior
-recipes, including interrupted captures and decoder-valid legacy encodings.
+New R2 history source captures retain large shared runtime and proof objects
+separately, while coalescing adjacent small literals to reduce request overhead.
+Archive export reuses the same prepared objects. Other fresh archive frames use
+one bounded byte object per ordinary evidence chunk unless a prepared encoding
+is available. These use existing `/1` recipes; original expanded hashes and
+decoder limits stay unchanged. Local captures keep their deduplicated encoding.
+Existing chunks and frames retain their exact prior recipes, including
+interrupted captures and decoder-valid legacy encodings.
 Compact copying batches missing objects within the same proof-object byte bound
 through those workers. It reuses intact durable object receipts without fetching
 unchanged source payloads.

@@ -447,7 +447,8 @@ async def test_native_preparation_preserves_package_and_isolates_adopted_revisio
     )
     assert adopted.activation.allocation_sha256 == digest(original.allocation)
     assert adopted.activation.package_sha256 == original.activation.package_sha256
-    with pytest.raises(ValueError, match="reward package differs from current standing activation"):
+    # The durable preparation reader rejects a changed package before replay.
+    with pytest.raises(ValueError, match="retained preparation changes the selected package"):
         await p.preparation.prepare(
             p.package.model_copy(update={"policy_sha256": "ee" * 32}),
             **replay_args(observations),
