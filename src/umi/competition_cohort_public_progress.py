@@ -48,6 +48,8 @@ _FIELDS = (
     "total",
     "percent",
     "elapsed_seconds",
+    "indexed_events",
+    "archived_events",
     "eta_seconds",
     "planning_eta_seconds",
     "eta_basis",
@@ -241,6 +243,7 @@ class CohortProgressSnapshots:
             "request_start",
             "execution",
             "execution_workers",
+            "forecast_accounting",
             "storage_retirement",
             "settlement",
         }:
@@ -344,6 +347,7 @@ class CohortProgressSnapshots:
             "request_start",
             "execution",
             "execution_workers",
+            "forecast_accounting",
             "storage_retirement",
             "settlement",
         ):

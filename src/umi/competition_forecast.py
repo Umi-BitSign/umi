@@ -31,8 +31,18 @@ from .competition_forecast_health import (
     write_health,
     write_initialization,
 )
+from .competition_forecast_io import encode_forecast_json as _encode
 from .competition_forecast_io import stream_file
+from .competition_forecast_retention import ForecastRetention
 from .competition_forecast_scoring import empirical_report, retained_forecast, score_forecast
+from .competition_forecast_snapshot import (
+    INTENT,
+    restore_bundle,
+    snapshot_bundle,
+)
+from .competition_forecast_snapshot import (
+    SCHEMA as SNAPSHOT_SCHEMA,
+)
 from .competition_forecast_summary import ForecastSummary
 
 _CONTEXT = ContextVar("competition_forecast_scope", default=None)
@@ -40,10 +50,6 @@ _INVOCATION = uuid.uuid4().hex
 _MAXIMUM_BYTES = 32 * 1024**2
 _MAXIMUM_EVENT_BYTES = 16 * 1024
 _ZERO = "0" * 64
-
-
-def _encode(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
 def _digest(value):
@@ -73,10 +79,23 @@ class ForecastLedger:
     cache. Capacity exhaustion affects diagnostics only at the consuming boundary.
     """
 
-    def __init__(self, directory: Path, *, maximum_bytes=_MAXIMUM_BYTES):
+    def __init__(
+        self,
+        directory: Path,
+        *,
+        maximum_bytes=_MAXIMUM_BYTES,
+        remote_store=None,
+        ledger_sha256=None,
+        maximum_index_bytes=512 * 1024**2,
+    ):
         if type(maximum_bytes) is not int or not 64 * 1024 <= maximum_bytes <= 1024**3:
             raise ValueError("forecast accounting capacity must be 64 KiB to 1 GiB")
+        if (remote_store is None) != (ledger_sha256 is None):
+            raise ValueError("forecast archive requires both remote store and owner identity")
+        self.retention = None
         self.directory = Path(directory)
+        if (self.directory / INTENT).exists() or (self.directory / INTENT).is_symlink():
+            raise ForecastRepairRequired("forecast snapshot restoration is unfinished")
         self.path = self.directory / "forecasts.sqlite3"
         self.marker = self.directory.with_name(self.directory.name + ".initialized")
         self.health_path = self.directory.with_name(self.directory.name + ".health")
@@ -150,7 +169,13 @@ class ForecastLedger:
                     self.db.execute("CREATE TABLE head (digest TEXT, sequence INTEGER)")
                     self.db.execute("INSERT INTO head VALUES(?,0)", (_ZERO,))
                     self.db.execute("PRAGMA user_version=1")
-            self._verify()
+            if remote_store is None:
+                self._verify()
+            else:
+                self.retention = ForecastRetention(
+                    self, remote_store, ledger_sha256, maximum_index_bytes=maximum_index_bytes
+                )
+                self.summaries = self.retention.summaries
             if unclean:
                 self.health = record_gap(
                     self.health, reason="unclean_accounting_session", head=self.head
@@ -196,6 +221,9 @@ class ForecastLedger:
                         os.fsync(fd)
                     finally:
                         os.close(fd)
+            if self.retention is not None:
+                with suppress(Exception):
+                    self.retention.close()
             if self.db is not None:
                 with suppress(Exception):
                     self.db.close()
@@ -209,7 +237,13 @@ class ForecastLedger:
         """Pending forecasts do not vanish when no worker is currently observing them."""
         now = time.time_ns() // 1_000_000 if observed_unix_ms is None else observed_unix_ms
         with self.lock:
-            result = self.summaries[scope].status(scope, now)
+            if self.retention is not None:
+                self.retention.ensure_ready()
+            result = (
+                self.summaries[scope].status(scope, now)
+                if self.retention is None
+                else self.retention.index.status(scope, now)
+            )
             comparisons = {
                 metric: self.summaries[scope].comparison(
                     metric,
@@ -282,11 +316,20 @@ class ForecastLedger:
         with self.lock:
             summary = self.summaries[scope]
             regressed = summary.status(scope, now)["clock_regression"]
-            rows = self.db.execute(
-                "SELECT sequence,body,previous,digest FROM events "
-                "WHERE scope=? AND sequence>? ORDER BY sequence LIMIT ?",
-                (scope, after_sequence, limit),
-            ).fetchall()
+            rows = (
+                self.db.execute(
+                    "SELECT sequence,body,previous,digest FROM events "
+                    "WHERE scope=? AND sequence>? ORDER BY sequence LIMIT ?",
+                    (scope, after_sequence, limit),
+                ).fetchall()
+                if self.retention is None
+                else [
+                    (row[0], row[3], row[4], row[5])
+                    for row in self.retention.rows(
+                        scope, after_sequence=after_sequence, limit=limit
+                    )
+                ]
+            )
             values = []
             for sequence, body, previous, checksum in rows:
                 if hashlib.sha256(previous.encode() + body).hexdigest() != checksum:
@@ -324,6 +367,16 @@ class ForecastLedger:
         if not 1 <= limit <= 1000:
             raise ValueError("forecast scope page limit is invalid")
         with self.lock:
+            if self.retention is not None:
+                self.retention.ensure_ready()
+                with self.retention.index.lock:
+                    return [
+                        row[0]
+                        for row in self.retention.index.db.execute(
+                            "SELECT scope FROM summaries WHERE scope>? ORDER BY scope LIMIT ?",
+                            (after, limit),
+                        )
+                    ]
             return [
                 r[0]
                 for r in self.db.execute(
@@ -382,7 +435,15 @@ class ForecastLedger:
             with suppress(Exception):
                 write_health(self.health_path, self.health)
 
+    def maintain_retention(self):
+        """One bounded archive page; run through the owner's background worker."""
+        return False if self.retention is None else self.retention.advance()
+
     def append(self, identity, scope, kind, values):
+        if self.retention is not None:
+            if self.capacity_required:
+                raise ForecastCapacityRequired("forecast accounting capacity exhausted")
+            return self.retention.append(identity, scope, kind, values)
         if self.capacity_required:
             raise ForecastCapacityRequired("forecast accounting capacity exhausted")
         with self.lock:
@@ -455,6 +516,11 @@ class ForecastLedger:
 
     def records(self, scope):
         with self.lock:
+            if self.retention is not None:
+                rows = self.retention.rows(scope, limit=1001)
+                if len(rows) > 1000:
+                    raise ValueError("archived forecast history requires bounded score pages")
+                return [json.loads(row[3]) for row in rows]
             records = []
             for body, parent, digest in self.db.execute(
                 "SELECT body,previous,digest FROM events WHERE scope=? ORDER BY sequence", (scope,)
@@ -466,6 +532,8 @@ class ForecastLedger:
 
     def snapshot(self, destination: Path):
         """Produce a bounded consistent backup for durable retention and repair."""
+        if self.retention is not None:
+            return snapshot_bundle(self, destination)
         if destination.exists():
             raise ValueError("forecast snapshot destination already exists")
         with self.lock:
@@ -490,6 +558,9 @@ class ForecastLedger:
 
     def close(self):
         with self.lock:
+            if self.retention is not None:
+                self.retention.close()
+                self.retention = None
             if self.db is not None:
                 try:
                     self.db.close()
@@ -516,6 +587,11 @@ def restore_forecast_snapshot(
     maximum_bytes=_MAXIMUM_BYTES,
     damaged_health_sha256: str | None = None,
     damaged_initialized_sha256: str | None = None,
+    damaged_index_sha256: str | None = None,
+    damaged_binding_sha256: str | None = None,
+    remote_store=None,
+    ledger_sha256=None,
+    maximum_index_bytes=512 * 1024**2,
 ):
     """Explicit offline repair; retain damaged bytes and verify the selected backup.
 
@@ -523,6 +599,23 @@ def restore_forecast_snapshot(
     backup cannot reconstruct later unarchived forecasts; that loss stays explicit.
     No protocol journal, service state, signed bytes or payload cache is touched.
     """
+    if receipt.get("schema") == SNAPSHOT_SCHEMA:
+        return restore_bundle(
+            directory,
+            snapshot,
+            receipt,
+            remote_store=remote_store,
+            ledger_sha256=ledger_sha256,
+            damaged_files={
+                "forecasts.sqlite3": damaged_sha256,
+                "index.sqlite3": damaged_index_sha256,
+                "binding.json": damaged_binding_sha256,
+            },
+            maximum_bytes=maximum_bytes,
+            maximum_index_bytes=maximum_index_bytes,
+            damaged_health_sha256=damaged_health_sha256,
+            damaged_initialized_sha256=damaged_initialized_sha256,
+        )
     if snapshot.is_symlink() or not 0 < snapshot.stat().st_size <= maximum_bytes:
         raise ForecastRepairRequired("forecast repair snapshot is not bounded")
     # Validate a separate bounded copy before changing any retained accounting.

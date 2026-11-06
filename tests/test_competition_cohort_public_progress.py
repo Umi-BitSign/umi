@@ -764,3 +764,48 @@ async def test_awaited_transfer_inherits_cohort_and_restores_scope_on_failure():
     with pytest.raises(RuntimeError, match="provider unavailable"):
         await await_progress(transfer(), stage="promotion", cohort=C)
     assert PUBLIC_COHORT_SCOPE.get() is None
+
+
+def test_forecast_retention_cached_counts_and_repair_state_do_not_fetch(monkeypatch):
+    state = CohortProgressSnapshots()
+    now = [10.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    state.record(
+        "forecast_accounting",
+        dict(
+            cohort_sha256=C,
+            stage="forecast_history_retention",
+            status="migrating",
+            indexed_events=256,
+            archived_events=128,
+            completed=128,
+            total=1024,
+            elapsed_seconds=2.0,
+            eta_seconds=14.0,
+            eta_basis="current_run_events_per_elapsed_second_including_publication",
+            eta_scope="forecast_retention_only_not_cohort_completion",
+            private_archive_key="must remain private",
+        ),
+    )
+    for _ in range(3):
+        component = state.snapshot(C)["components"]["forecast_accounting"]
+        assert (component["indexed_events"], component["archived_events"]) == (256, 128)
+        assert "private_archive_key" not in component
+    state.record(
+        "forecast_accounting",
+        dict(
+            cohort_sha256=C,
+            stage="forecast_history_retention",
+            status="repair_required",
+            completed=128,
+            total=1024,
+            eta_seconds=None,
+            planning_eta_seconds=None,
+            eta_basis="forecast_retention_metadata_requires_repair",
+            stalled_or_retrying=True,
+        ),
+    )
+    component = state.snapshot(C)["components"]["forecast_accounting"]
+    assert component["status"] == "repair_required"
+    assert component["eta_seconds"] is None
+    assert component["stalled_or_retrying"]

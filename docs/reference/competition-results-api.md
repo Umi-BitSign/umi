@@ -102,6 +102,13 @@ slots. It remains available under the request-certification memory guard; that
 exception grants no admission, native-read or submission authority. Unknown
 cohorts still return 404.
 
+`components.forecast_accounting` reports diagnostic history retention when a
+writable archive is selected. `indexed_events` counts compact indexed originals;
+`archived_events` counts originals with retained remote publication receipts.
+Its elapsed time, ETA basis and retry/repair state cover forecast retention only.
+They do not estimate model scoring or reward activation. The component is cached
+by the service; polling performs no archival or verification work.
+
 During intake, `components.intake_certification` is sampled by bounded native
 inventory owners (up to 16), with one per cohort in the selected C5–C10 series.
 A slow read of an older cohort, model review or remote upload check does not postpone a successor's

@@ -639,6 +639,47 @@ backup/repair copy require additional temporary space. Older lifecycle configs
 retain their original canonical bytes when the default is selected. This
 separate database changes no authorization journal, signed term or payload
 cache, and upgrades keep its directory in place.
+When a writable R2 proof store is already selected, forecast maintenance reuses
+that transport. A host with local native proofs can instead select
+`forecast_archive`, using the writable `umi-r2-proof-archive/2` configuration
+with a dedicated prefix and credential file. This creates its receipt owner at
+`<series-state>/forecast-archive`; it does not migrate or change native proofs.
+The forecast selection refuses read-only or legacy proof-migration settings.
+Both options use the same retention implementation. An absent selection retains
+the legacy local accounting backend.
+
+The service archives exact original events in bounded compressed segments.
+Segment bytes, identities and compact summaries commit together under
+`forecast-accounting/retention/index/`. The separate
+`forecast_retention_index_bytes` budget defaults to 512 MiB and preserves old
+configuration bytes at that default. Maintenance indexes at most 256 events per
+page, retains completed R2 receipts, then removes archived originals from the
+hot database. Small final batches flush after 30 seconds. Reclaimed SQLite pages
+are reused without growing the original file; this does not shrink its physical
+size. At most 512 exact nonforecast originals remain cached for active retries.
+Older originals restore from the retained segment when explicitly needed.
+Restart and ordinary score/status queries use compact retained metadata without
+replaying archived events. Missing identities, summaries or archive state require
+explicit repair.
+
+Timed host workers also forward bounded, nonblocking transfer-progress packets
+to their owning evaluator. Packets bind the selected request, job and child PID;
+only counted child work refreshes the parent activity marker. Heartbeats do not
+conceal stalled work, and a completed preparation substage does not complete the
+invocation. The verified worker response remains authoritative for completion.
+Invalid packets, queue loss and unavailable diagnostic sockets remain diagnostic
+conditions. Cancellation still drains container cleanup before parent leases are
+released. This reports existing child transfer stages; it does not invent a
+within-model inference percentage when the runtime supplies no counted work.
+
+Maintenance runs in a service-owned I/O thread and drains before shutdown closes
+the ledger. The cached public `forecast_accounting` component reports indexed and
+archived counts, elapsed time, a scoped estimate and retry/repair state; polling
+does not initiate uploads or verification. A retention or reporting failure cannot
+stop native cohort work. The first upgrade retains every original row until its
+archive publication completes. Archived ledgers use SQLite schema 2, which older
+local-only readers refuse; do not roll them back to an incompatible reader.
+
 The sibling `forecast-accounting.initialized` marker distinguishes a missing
 previously installed accounting directory from a legacy installation. The fixed
 4 KiB `forecast-accounting.health` sibling preserves accounting coverage gaps
@@ -751,11 +792,20 @@ only a previously validated initialization marker for explicit repair; already
 damaged marker bytes remain unchanged until pinned repair. Graceful close keeps
 any known gap instead of resetting coverage. Missing, changed or damaged records report `repair_required` instead of becoming a fresh cache. The owning service
 must be offline for repair. `ForecastLedger.snapshot(destination)` creates a
-consistent SQLite backup with a digest, exact head and byte-count receipt;
-retain that receipt and backup independently. `restore_forecast_snapshot` requires
-the exact selected backup/receipt and current damaged-file digest (or explicit
-missing-file state), verifies the complete record chain, preserves the damaged
-file, and atomically restores the snapshot. A missing health marker is repaired
+consistent SQLite backup for the local backend. For an archived ledger it creates
+a directory bundle containing the hot database, compact index, owner binding and
+a manifest with exact hashes, sizes, head and accounting health. Remote segment
+receipts remain in the index; retain their original remote receipt owner and R2
+objects as well as the bundle. The bundle does not duplicate archived payloads.
+
+`restore_forecast_snapshot` requires the selected backup/receipt and exact current
+file digests, or explicit missing-file state. Archived repair also selects the
+original remote owner and accepts `damaged_index_sha256` and
+`damaged_binding_sha256`. It validates hot originals, compact metadata and remote
+receipts without replaying archived events. Durable restoration intent blocks
+normal startup until every file is installed; interrupted retries reuse completed
+copies and preserve replaced originals. A later repair can reuse the same snapshot
+with newly pinned damaged files. A missing health marker is repaired
 with unknown coverage. For a torn marker, supply its exact
 `damaged_health_sha256`; repair preserves those marker bytes separately before
 replacement. A damaged initialization marker similarly requires its exact
@@ -778,9 +828,12 @@ history forecasts separately under
 `forecast_accounting_bytes` defaults to 512 MiB (supported range 64 KiB–1 GiB)
 and is omitted at its default to preserve older canonical configuration bytes.
 Forced per-checkpoint reports can retain far more observations than the usual
-heartbeat rate; size this separate budget for the expected run and watch
-accounting health. Exhaustion preserves earlier forecasts and stops diagnostic
-recording without stopping native history work. Main and predecessor
+heartbeat rate; select the same writable archive or independent `forecast_archive`
+for these owners. Main and predecessor readers own separate maintenance tasks and
+ledgers under their existing roots. The tasks drain before those ledgers close.
+The index budget and default serialization rules match the lifecycle owner.
+Without remote selection, exhaustion preserves earlier forecasts and stops
+diagnostic recording without stopping native history work. Main and predecessor
 readers retain the exact issued fixed-target estimates, planning ranges, native
 and restored work counts, verified-ahead counts, errors, invocation and target
 resets, and the first actual completed interval. Nested ancestry and restoration
@@ -788,7 +841,7 @@ estimates remain diagnostic observations when the owner does not expose their
 completion; they do not become invented calibration samples. These fixed-interval
 estimates exclude subsequent chain growth and reward activation.
 
-Automatic R2 retention, prospective estimator/range calibration, original whole-cohort
+Prospective estimator/range calibration, original whole-cohort
 elapsed accounting, dispatch outcomes, miner/client and standalone repair,
 preparation or history-migration adapters, and the end-to-end rewards forecast
 remain separate qualification work. Source qualification does not establish

@@ -1,6 +1,7 @@
 """The actual native owner emits accounting without changing retained verdicts."""
 
-from contextlib import ExitStack
+import asyncio
+from contextlib import AsyncExitStack
 from types import SimpleNamespace
 
 import pytest
@@ -9,8 +10,10 @@ from umi import competition_history_forecast as forecast_module
 from umi import competition_reward_history_progress as progress_module
 from umi.competition_forecast import ForecastLedger
 from umi.competition_history_forecast import HistoryForecast
+from umi.competition_reward_service import StandingRewardServiceLimits
 from umi.open_competition import digest
 
+from .test_competition_forecast_segments import Remote
 from .test_competition_reward_history import chain as chain
 from .test_competition_reward_history import chain_config as chain_config
 from .test_competition_reward_history import control as control
@@ -103,8 +106,9 @@ async def test_native_error_is_retained_without_replacing_owner_error(
         ledger.close()
 
 
+@pytest.mark.parametrize("archived", [False, True])
 async def test_selected_native_owner_emits_qualified_originals_across_restart(
-    history_case, tmp_path, monkeypatch
+    history_case, tmp_path, monkeypatch, archived
 ):
     h = history_case
     now = [100.0]
@@ -115,12 +119,16 @@ async def test_selected_native_owner_emits_qualified_originals_across_restart(
     config = SimpleNamespace(
         series=h.c.series,
         policy=h.item.policy,
-        service={"fixture": "native-control-history"},
+        service=StandingRewardServiceLimits(
+            maximum_journal_bytes=1024**2, mortality_period=64, poll_seconds=0.01
+        ),
         eligibility=None,
         runtime_adoptions=(),
         runtime_proof_reads=True,
         forecast_accounting_bytes=1024**2,
     )
+
+    remote, stop = (Remote() if archived else None), asyncio.Event()
 
     def select(resources):
         forecast_module.select_history_forecasts(
@@ -129,6 +137,8 @@ async def test_selected_native_owner_emits_qualified_originals_across_restart(
             config=config,
             resources=resources,
             role="reward_writer",
+            remote_store=remote,
+            stop=stop,
         )
         native_finished = h.reader.progress.native_finished
 
@@ -139,7 +149,7 @@ async def test_selected_native_owner_emits_qualified_originals_across_restart(
         monkeypatch.setattr(h.reader.progress, "native_finished", counted)
         return h.reader.progress.forecast.ledger
 
-    with ExitStack() as resources:
+    async with AsyncExitStack() as resources:
         ledger = select(resources)
         partial = await h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=3)
         scope = h.reader.progress.forecast.scope
@@ -150,6 +160,15 @@ async def test_selected_native_owner_emits_qualified_originals_across_restart(
         assert original["population_qualified"] is True
         assert original["outcome_unit_identity"] == scope
         assert original["correlation_group_identity"] == digest(h.c.series)
+        if archived:
+            ledger.retention.last_archive -= 31
+
+            async def archived_originals():
+                while ledger.db.execute("SELECT COUNT(*) FROM events").fetchone()[0]:
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(archived_originals(), 5)
+            assert remote.uploads > 0
         population = original["comparison_population_sha256"]
         assert original["comparison_population"]["policy_sha256"] == digest(h.item.policy)
         assert (
@@ -159,7 +178,7 @@ async def test_selected_native_owner_emits_qualified_originals_across_restart(
     h.offline_through = partial.next_block - 1
     h.reader = await h.restart()
     now[0] += 100  # Downtime is part of the realized error, never erased by restart.
-    with ExitStack() as resources:
+    async with AsyncExitStack() as resources:
         ledger = select(resources)
         load = h.reader._load
 

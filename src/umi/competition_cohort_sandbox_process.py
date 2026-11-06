@@ -13,6 +13,7 @@ from pydantic import Field, model_validator
 
 from .competition_cohort_execution import RecoverableExecutionJob
 from .competition_cohort_execution_journal import CohortExecutionAttempt
+from .competition_cohort_sandbox_progress import ParentProgress
 from .competition_cohort_suite_adoption_candidate import EvaluationSuiteAdoptionCandidates
 from .competition_cpu_efficiency_policy import prepared_cpu_efficiency_authorization
 from .competition_cpu_timing import CpuTimingInfrastructureError
@@ -95,7 +96,16 @@ async def run_timed_sandbox(request: TimedSandboxRequest) -> OfflineCaseExecutio
         unit="cases",
         planning_unit_seconds=(1, 660 + request.policy.maximum_inference_ms / 1000),
     ) as progress:
+        telemetry = None
         try:
+            telemetry = ParentProgress(progress, digest(request), request.attempt.job_sha256)
+        except OSError:
+            progress.emit("retrying", reason="timed_child_progress_unavailable")
+        try:
+            telemetry_args = (
+                () if telemetry is None else ("--progress-fd", str(telemetry.writer.fileno()))
+            )
+            telemetry_fds = () if telemetry is None else (telemetry.writer.fileno(),)
             spawning = asyncio.create_task(
                 asyncio.create_subprocess_exec(
                     sys.executable,
@@ -105,11 +115,20 @@ async def run_timed_sandbox(request: TimedSandboxRequest) -> OfflineCaseExecutio
                     launch,
                     "--parent-pid",
                     str(os.getpid()),
+                    *telemetry_args,
+                    pass_fds=telemetry_fds,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                 )
             )
             process = await await_owned_task(spawning)
+            if telemetry is not None:
+                try:
+                    telemetry.start(process.pid)
+                except (OSError, RuntimeError):
+                    telemetry.close()
+                    telemetry = None
+                    progress.emit("retrying", reason="timed_child_progress_unavailable")
 
             async def communicate():
                 async def send():
@@ -161,4 +180,8 @@ async def run_timed_sandbox(request: TimedSandboxRequest) -> OfflineCaseExecutio
                         exchange.cancel()
                     await asyncio.gather(exchange, return_exceptions=True)
 
-            await await_owned_task(asyncio.create_task(drain()))
+            try:
+                await await_owned_task(asyncio.create_task(drain()))
+            finally:
+                if telemetry is not None:
+                    telemetry.close()
