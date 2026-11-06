@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from umi import competition_reward_history_workers as workers
 from umi import competition_reward_history_parallel as parallel
+from umi import competition_reward_history_workers as workers
 from umi.competition_reward_history import RewardControlHistoryReader
 from umi.competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
 from umi.competition_reward_history_workers import (
