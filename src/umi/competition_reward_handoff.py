@@ -8,15 +8,22 @@ No old attempt, signed history or original process lock is replaced or deleted.
 import hashlib
 import json
 import logging
+import os
+import sqlite3
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from .competition_evidence_reader import evidence_reader
-from .competition_host_activation import selected_weight_state_root
+from .competition_host_activation import (
+    selected_weight_state_root,
+    validate_authenticated_successor_installation,
+)
 from .competition_recovery_packages import RecoveryPackageReplay
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_handoff_models import (
+    MAX_HANDOFF_BYTES,
     LegacyRewardHandoffIntent,
     LegacyRewardHandoffPlan,
     VerifiedLegacyRewardHandoff,
@@ -32,12 +39,17 @@ from .competition_reward_legacy_recovery import (
     validate_legacy_weight_expiry,
 )
 from .competition_reward_preparation import PreparedStandingReward, StandingRewardPreparation
+from .competition_supervisor import MAX_SUCCESSOR_DOCUMENT_BYTES
 from .competition_supervisor_adapters import (
     _MAX_ATTEMPT_BYTES,
     ProductionSuccessorRuntimeAdapter,
     _read_worker_database,
 )
-from .competition_supervisor_runtime import SuccessorSupervisorRuntime
+from .competition_supervisor_runtime import (
+    SuccessorRuntimeLimits,
+    SuccessorSupervisorRuntime,
+    retained_runtime_binding,
+)
 from .competition_weights import (
     _recovery_journal_snapshot,
     _recovery_package_snapshot,
@@ -45,11 +57,77 @@ from .competition_weights import (
     competition_weight_authorization_digest,
 )
 from .competition_work_progress import WorkProgress, work_heartbeats
+from .competition_worker import _open_private_regular_file
 from .encoding import account_id32
 from .open_competition import digest, identity
 from .protocol import canonical_json_bytes
 
 _LOG = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class RetainedLegacyHandoffIntent:
+    """Original private intent metadata, without any process or writer lease."""
+
+    path: Path
+    snapshot: tuple
+    runtime_binding: bytes
+    intent: LegacyRewardHandoffIntent
+
+
+def read_retained_handoff_intent(installation, limits: SuccessorRuntimeLimits):
+    """Read an existing native intent while the original supervisor keeps running.
+
+    Preparation cannot create or replace the intent, replay history, or acquire
+    writer ownership. The eventual handoff must match this source identity and
+    perform the native selection checks under its original process locks.
+    """
+    validate_authenticated_successor_installation(installation)
+    if type(limits) is not SuccessorRuntimeLimits:
+        raise TypeError("native runtime limits required")
+    limits = SuccessorRuntimeLimits.model_validate_json(canonical_json_bytes(limits))
+    binding = retained_runtime_binding(installation, limits)
+    path = Path(installation.config.state_root) / "successor-v4/runtime/supervisor.sqlite3"
+    with WorkProgress("legacy_handoff_intent_preparation", 1, unit="intents") as meter:
+        snapshot = _recovery_journal_snapshot(path)
+        if any(value is not None for suffix, value in snapshot[1] if suffix):
+            raise ValueError("read-only intent preparation requires a stable DELETE journal")
+        descriptor = _open_private_regular_file(path, "retained handoff intent")
+        try:
+            header = os.read(descriptor, 20)
+        finally:
+            os.close(descriptor)
+        if header[:16] != b"SQLite format 3\x00" or header[18:20] != b"\x01\x01":
+            raise ValueError("read-only intent preparation requires a stable DELETE journal")
+        db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)
+        try:
+            db.execute("PRAGMA query_only=ON")
+            db.execute("BEGIN")
+            bounded = SuccessorSupervisorRuntime._bounded_row
+            if bounded(db, "binding", MAX_SUCCESSOR_DOCUMENT_BYTES) != (binding,):
+                raise ValueError("retained handoff runtime binding changed")
+            if not db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='standing_handoff'"
+            ).fetchone():
+                raise ValueError("preparation requires the original retained handoff intent")
+            row = bounded(db, "standing_handoff", MAX_HANDOFF_BYTES)
+            if row is None:
+                raise ValueError("retained handoff intent is incomplete")
+            intent = LegacyRewardHandoffIntent.model_validate_json(row[0])
+            if canonical_json_bytes(intent) != row[0] or (
+                intent.installation_receipt_sha256 != installation.receipt_sha256
+                or identity(intent.validator_hotkey)
+                != identity(installation.config.validator_hotkey)
+            ):
+                raise ValueError("retained handoff intent differs from its installation")
+            if _recovery_journal_snapshot(path) != snapshot:
+                raise ValueError("retained handoff intent changed during preparation")
+        finally:
+            db.close()
+        if _recovery_journal_snapshot(path) != snapshot:
+            raise ValueError("retained handoff intent changed during preparation")
+        meter.advance()
+        return RetainedLegacyHandoffIntent(path, snapshot, binding, intent)
 
 
 def _attempts(db, adapter, *, audit_evidence=True):

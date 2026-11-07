@@ -1543,6 +1543,15 @@ bindings and changed file identities require explicit repair. The reader does
 not convert them or create a missing database. Its progress scope is registry
 preparation, separate from package/expiry verification and writer handoff.
 
+`read_retained_handoff_intent(installation, runtime_limits)` reads the original
+private intent under the installed runtime binding without acquiring its process
+lock. It requires an existing stable DELETE-mode journal and refuses missing,
+changed or noncanonical intent state. It reads no history or weight evidence and
+cannot create an intent or grant writer ownership. Retain its source identity
+alongside preparation; the final native handoff still checks selection and fresh
+ownership. These metadata readers are components of preparation, not a complete
+pre-stop preparation command.
+
 During initial history/package replay, the original supervisor continues
 predecessor reconciliation. The durable handoff intent stops that continuation
 before successor signing, including after restart. A failed old feed does not

@@ -499,7 +499,7 @@
     "competition_reward_exchange_delivery.py": "e3a1c994b1d4e07ec0e93dd21f8a4ef3ad5a8ad4f87399a580f50483378d2ec6",
     "competition_reward_executor.py": "771e799642ed5f86cd0f2cdae314cea2e0d5c95a03ac716ba5bb93c4a3bfe311",
     "competition_reward_files.py": "e593c0b87e178a9ead8bcef34c188c2c2df9e52f6e0d660543ec17f11d056b32",
-    "competition_reward_handoff.py": "f573c0597eeaf453df75859657b88b825da2d1270996263295ff40dec5a67a06",
+    "competition_reward_handoff.py": "82fb67d6e0f63ab272d7a5807389b7882c238572f34bdaaa8b88ad4059c46423",
     "competition_reward_handoff_models.py": "cbae14533f5b5d71a8ef479320e76d12979c0145a5a21f5966cdd8ce902f81fe",
     "competition_reward_handoff_reuse.py": "d810dc191a57c42656e2f02786a81364c0c4d35494149d4610651b6d25d6ccfd",
     "competition_reward_history.py": "33b4f6f25f1adf9b9ec5fc74d9ab0a0e816ad4d8188f28929148e708d9932e8b",
