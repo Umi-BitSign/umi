@@ -143,7 +143,10 @@ inspected namespace. It retains installed user/group, mount mappings and the
 verification/RPC configuration paths, replaces only the signed maintenance mount,
 and adds the selected source, root control and disjoint provider directory.
 The service enforces the selected memory cap, zero swap and CPU placement, and
-owns its RuntimeDirectory and private temporary files. It inherits no writer
+owns its RuntimeDirectory and private temporary files. Native pinned executables
+stage in the service's private `/tmp`; `/run` may be mounted `noexec`. Verify
+copy-and-execute in the selected temporary namespace during host qualification.
+It inherits no writer
 cleanup commands or dependencies that could stop the writer. Its controller must
 verify the published unit, namespace and admission before starting it. Bind mount
 source and target paths are quoted separately; `RootDirectory` is emitted as its

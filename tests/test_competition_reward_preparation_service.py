@@ -80,6 +80,7 @@ def test_render_preserves_namespace_selects_signed_command_and_owns_scratch(sele
         "RuntimeDirectory=umi-fixture-preparation",
         "RuntimeDirectoryMode=0700",
         "PrivateTmp=yes",
+        'Environment="TMPDIR=/tmp"',
         "SendSIGKILL=no",
         "TimeoutStopSec=infinity",
         "Restart=on-failure",

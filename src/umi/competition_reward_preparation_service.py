@@ -206,7 +206,9 @@ def render_legacy_preparation_service(
         "BindReadOnlyPaths=" + " ".join(m.systemd() for m in readonly),
         "Environment="
         + " ".join(_literal(k + "=" + v) for k, v in sorted(namespace.environment.items())),
-        "Environment=" + _literal("TMPDIR=/run/" + unit_name.removesuffix(".service")),
+        # Native pinned artifacts execute from private temporary copies. /run
+        # may be mounted noexec; systemd owns and cleans this service's /tmp.
+        "Environment=" + _literal("TMPDIR=/tmp"),
         "ExecStart=" + " ".join(_literal(arg) for arg in argv),
         "MemoryMax=" + str(selection.maximum_memory_bytes),
         "MemorySwapMax=0",
