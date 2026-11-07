@@ -868,6 +868,58 @@ class ChunkedModelBackupReader:
         maximum_document_bytes,
         completed_only,
     ):
+        source, prior, reused, document = await run_owned_thread(
+            partial(
+                self._reuse_file,
+                saved,
+                shared,
+                record,
+                item,
+                heads,
+                progress,
+                wants_document=wants_document,
+                maximum_document_bytes=maximum_document_bytes,
+            )
+        )
+        if reused:
+            return document
+        if completed_only:
+            progress.emit(
+                "repair_required", reason="shared_file_seed_requires_completed_native_bytes"
+            )
+            raise OSError("shared file migration requires completed native bytes and documents")
+        if prior is not None and prior != record.sha256:
+            progress.emit("repair_required", reason="chunked_model_file_receipt_changed")
+        hasher = hashlib.sha256()
+        content = bytearray() if wants_document else None
+        for chunk in item.chunks:
+            raw = await self._chunk(chunk, heads)
+            hasher.update(raw)
+            if content is not None:
+                content.extend(raw)
+            progress.advance(len(raw))
+            progress.advance_operations(2)
+        if hasher.hexdigest() != record.sha256:
+            raise ValueError("chunked model file differs from its signed manifest")
+        document = None if content is None else bytes(content)
+        await run_owned_thread(self._remember_file, saved, shared, record, source, document)
+        return document
+
+    def _reuse_file(
+        self,
+        saved,
+        shared,
+        record,
+        item,
+        heads,
+        progress,
+        *,
+        wants_document,
+        maximum_document_bytes,
+    ):
+        # Receipt reads, document restoration and durable publication may block
+        # on filesystem metadata. The caller keeps both byte leases until this
+        # owned worker drains, including when its async task is cancelled.
         source = self._source(item, heads)
         prior = saved.load(record.path, source)
         shared_prior = shared.load()
@@ -905,31 +957,16 @@ class ChunkedModelBackupReader:
             shared.remember_verified(document)
             progress.advance(record.size_bytes, restored=True)
             progress.advance_operations(2 * len(item.chunks), restored=True)
-            return document
-        if completed_only:
-            progress.emit(
-                "repair_required", reason="shared_file_seed_requires_completed_native_bytes"
-            )
-            raise OSError("shared file migration requires completed native bytes and documents")
-        if prior is not None and prior != record.sha256:
-            progress.emit("repair_required", reason="chunked_model_file_receipt_changed")
-        hasher = hashlib.sha256()
-        content = bytearray() if wants_document else None
-        for chunk in item.chunks:
-            raw = await self._chunk(chunk, heads)
-            hasher.update(raw)
-            if content is not None:
-                content.extend(raw)
-            progress.advance(len(raw))
-            progress.advance_operations(2)
-        if hasher.hexdigest() != record.sha256:
-            raise ValueError("chunked model file differs from its signed manifest")
-        document = None if content is None else bytes(content)
+            return source, prior, True, document
+        return source, prior, False, document
+
+    @staticmethod
+    def _remember_file(saved, shared, record, source, document):
         if document is not None:
+            path = saved.root / (sha256_hex(record.path.encode()) + ".document")
             saved._write(path, document)
         saved.remember(record.path, source, record.sha256)
         shared.remember_verified(document)
-        return document
 
     async def available(self):
         """Check selected remote objects; this is no byte-integrity certificate."""

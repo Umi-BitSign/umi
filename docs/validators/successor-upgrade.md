@@ -715,6 +715,21 @@ wait without increasing concurrent reads, submissions or registration captures.
 Queued requests perform their normal admission checks after acquiring a slot;
 waiting does not create a receipt or bypass freshness, proof or capacity checks.
 
+Private phase-review clients retry the exact request when the selected owner
+returns an explicit pre-admission request-capacity or queue-timeout rejection.
+The retry closes the rejected response, waits one second, and shares the original
+exchange deadline. A fresh-challenge collision therefore preserves the caller's
+completed proof review. Other HTTP failures still return to the native recovery
+path; signatures, response bounds and authority checks remain required. Counted
+retry telemetry reports elapsed time and remaining budget, with the delay ETA
+scoped to the next attempt rather than completion of the review.
+
+Carry this shared transport source through the supported owner, phase-reviewer
+and settlement maintenance selections, preserving their actual configurations,
+service caps, journals and signed inputs. Older configurations require no schema
+migration. Miner upload requests and the standalone upload-client selection are
+unchanged. Retained completed votes continue to use their existing journal path.
+
 HTTP services allow five minutes for request shutdown before cancellation and
 retain ownership until durable cleanup finishes. Original provider/task failures
 are reported before cleanup begins and survive a shutdown grace timeout, without
@@ -3761,6 +3776,17 @@ errors still refuse; mutex waiting never grants admission, rights or release
 authority. Synchronous commit checks remain nonblocking. Select the qualified
 native owner/reviewer source through the existing cooperative maintenance update;
 no miner protocol change or new public client manifest is needed.
+
+Chunked verification runs per-file receipt lookup, document restoration and
+durable receipt publication in owned workers so filesystem delays yield the
+service event loop. Cancellation drains the active worker before releasing its
+byte-checkpoint leases. Completed checks retain their original byte identities
+and are reused without reading model payloads. Apply the compatible source to
+intake, independent reviewers and settlement through their supported immutable
+source/host maintenance selections, retaining it in subsequent release and
+recovery selections. Native model readers receive the change with that source;
+upload-only miners keep the existing client protocol. Existing receipts and
+signed submissions require no migration.
 
 Direct-upload polling records successful private review-file shape checks in its
 existing metadata journal. Unchanged owned file identities reuse those checks

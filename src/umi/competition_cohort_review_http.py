@@ -12,6 +12,7 @@ import hmac
 import json
 import logging
 import sqlite3
+import time
 import traceback
 from collections.abc import Callable
 from typing import Annotated, Generic, Literal, Protocol, TypeVar
@@ -46,8 +47,9 @@ logger = logging.getLogger(__name__)
 class PhaseReviewHTTPUnavailable(OSError):
     """Retain the HTTP boundary without exposing a private response or URL."""
 
-    def __init__(self, status_code: int):
+    def __init__(self, status_code: int, *, admission_reason: str | None = None):
         self.reason_code = f"phase_owner_http_{status_code}"
+        self.admission_reason = admission_reason
         super().__init__("phase owner has not supplied a review export")
 
 
@@ -315,7 +317,7 @@ class PhaseReviewHTTPClient(Generic[RequestT]):
 
     async def __call__(self, request: RequestT) -> bytes:
         try:
-            return await self._receive(request)
+            return await wait_for_owned(self._receive(request), timeout=self.timeout_seconds)
         except httpx.TransportError as error:
             raise OSError("phase review transport unavailable; retry unchanged") from error
 
@@ -323,6 +325,54 @@ class PhaseReviewHTTPClient(Generic[RequestT]):
         raw = canonical_json_bytes(request)
         if len(raw) > self.maximum_request_bytes:
             raise ValueError("phase review request exceeds its byte bound")
+        started, last_report, retries = time.monotonic(), None, 0
+        while True:
+            try:
+                result = await self._exchange(raw)
+            except PhaseReviewHTTPUnavailable as error:
+                # These admission responses precede body consumption and native
+                # work. Preserve the exact challenge and the caller's completed
+                # review while waiting within the original exchange deadline.
+                if error.admission_reason not in {"http_request_capacity", "http_queue_timeout"}:
+                    raise
+                retries += 1
+                now = time.monotonic()
+                if last_report is None or now - last_report >= 30:
+                    self._admission_progress(started, retries, error.admission_reason, False)
+                    last_report = now
+                await asyncio.sleep(1)
+            else:
+                if retries:
+                    self._admission_progress(started, retries, "capacity_available", True)
+                return result
+
+    def _admission_progress(self, started, retries, reason, completed):
+        elapsed = time.monotonic() - started
+        logger.info(
+            "phase_review_admission_progress %s",
+            json.dumps(
+                {
+                    "schema": "umi-phase-review-admission-progress/1",
+                    "stage": "phase_review_http_admission",
+                    "status": "completed" if completed else "retrying",
+                    "completed": int(completed),
+                    "total": 1,
+                    "unit": "exchanges",
+                    "retries": retries,
+                    "elapsed_seconds": elapsed,
+                    "eta_seconds": 0 if completed else 1,
+                    "eta_basis": "completed" if completed else "scheduled_retry_delay",
+                    "eta_scope": "retry_delay_only_not_review_completion",
+                    "remaining_budget_seconds": max(0, self.timeout_seconds - elapsed),
+                    "reason_code": reason,
+                    "stalled_or_retrying": not completed,
+                    "certification_authority": False,
+                },
+                separators=(",", ":"),
+            ),
+        )
+
+    async def _exchange(self, raw: bytes) -> bytes:
         async with self.client.stream(
             "POST",
             self.url,
@@ -332,7 +382,12 @@ class PhaseReviewHTTPClient(Generic[RequestT]):
             timeout=self.timeout_seconds,
         ) as response:
             if response.status_code != 200:
-                raise PhaseReviewHTTPUnavailable(response.status_code)
+                raise PhaseReviewHTTPUnavailable(
+                    response.status_code,
+                    admission_reason=response.headers.get("x-umi-reason-code")
+                    if response.status_code == 503
+                    else None,
+                )
             if (
                 response.headers.get("content-type", "").split(";", 1)[0].strip()
                 != "application/json"

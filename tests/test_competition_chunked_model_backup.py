@@ -246,6 +246,49 @@ async def test_bulk_receipt_worker_drains_before_cancellation_releases_byte_leas
         pass
 
 
+@pytest.mark.parametrize("operation", ["load", "remember_verified"])
+@pytest.mark.parametrize("reuse", [False, True])
+async def test_file_receipt_io_yields_and_drains_before_releasing_byte_lease(
+    backup, tmp_path, monkeypatch, operation, reuse
+):
+    from umi.private_files import PrivateStateBusyError
+
+    instance = reader(backup, tmp_path)
+    if reuse:
+        await instance.verify()
+    backup.remote.reads.clear()
+    loop = asyncio.get_running_loop()
+    entered, release = asyncio.Event(), threading.Event()
+    original = getattr(chunked.SharedRemoteFileBytes, operation)
+    owner_thread = threading.get_ident()
+
+    def blocked_receipt_io(*args, **kwargs):
+        assert threading.get_ident() != owner_thread, "receipt I/O blocked the service loop"
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5), "receipt worker did not yield to the service loop"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(chunked.SharedRemoteFileBytes, operation, blocked_receipt_io)
+    task = asyncio.create_task(instance.verify(completed_only=reuse))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=3)
+        reads = list(backup.remote.reads)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done(), "cancellation abandoned an active receipt worker"
+        with pytest.raises(PrivateStateBusyError), instance._store(None):
+            pass
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert backup.remote.reads == reads
+    if reuse or operation == "load":
+        assert reads == []
+    with instance._store(None):
+        pass
+
+
 def test_exact_legacy_metadata_retains_original_manifest_and_non_authority(backup):
     actual = selection(backup)
     assert canonical_json_bytes(actual.bundle) == backup.raw_manifest
