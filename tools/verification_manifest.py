@@ -85,6 +85,10 @@ seeds = [
     "host_cpu_probe",
     # Timed invocations launch this selected-source module through runpy.
     "competition_cohort_sandbox_worker",
+    # Native preparation rendering and peer memory inspection are selected by
+    # external owned controllers; retain their previously guarded source pins.
+    "competition_reward_preparation_service",
+    "host_memory_peer",
 ]
 modules = set()
 external_imports = set()

@@ -95,6 +95,71 @@ prepared; retained orders keep their original bytes and observations on retry.
 
 ## Supervisor maintenance for an installed successor
 
+The native `hold_legacy_preparation_providers` assembly uses the same provider
+constructor as the standing writer. Its caller must supply authenticated boot
+and host inputs, an independently admitted private state directory and supervised
+shutdown. It relocates only writable finality and historical-header state;
+original chain configurations, native binaries and proof rules remain selected.
+Protected service stores, wallets and executable inputs cannot overlap that root.
+Constructor failures and cancellation drain before owned providers close. Retain
+the private state for retries. Use the installed supervisor command with `--prepare-legacy-provider-root` and
+the exact admitted private directory. This mode selects the approved standing
+boot, loads the existing immutable installation mounts and checks the retained
+handoff intent before opening providers. It uses the same adapter/runtime limits
+as final handoff, takes no startup lease and does not stop the worker. Its JSON
+result reports `legacy_prepared` with `writer_authority: false`; an interrupted
+run drains owned work and retains successful checkpoints. The updater must run
+and verify this preparation under supervised resource admission before taking
+ServiceHold. CLI availability alone does not establish installed preparation,
+finality startup reuse or completed handoff qualification.
+Before constructing providers, the command checks complete retained preparation
+against the exact authenticated chain configurations and original source/package
+metadata. An unchanged completion returns without opening the weight database or
+starting independent finality observers. Missing or changed retained completion
+requires repair; an unfinished first preparation continues through native providers.
+This reuse does not replace fresh writer locks, finality or transaction checks.
+
+Supervised preparation can additionally select `--legacy-preparation-selection`
+and `--legacy-preparation-selection-sha256`. The canonical root-owned mode-0444
+selection binds the native maintenance transition ID, retained intent, installed
+configuration and receipt, standing boot, signed source revision, independent
+provider directory and admitted memory/CPU settings. The enclosing maintenance
+request references this selection; the selection does not hash that request.
+The controller must enforce the selected resource settings in the service.
+After native completion and input rechecks, the command atomically retains a
+bounded `completed-<selection-digest>.json` report in the private provider directory.
+Exact retries preserve that report; changed results require repair. Existing
+commands without a selection retain their original behavior.
+
+The root controller reads this report with the installed service UID and an
+explicitly verified namespace mapping. It must also verify the exact successful
+service invocation and run a fresh native completion check before handoff. A
+retained report or zero exit status alone does not authorize ServiceHold. This
+interface supplies a completion channel; the separate supervised launcher,
+resource qualification and pre-hold integration remain required.
+
+`render_legacy_preparation_service` renders that separate service from a typed,
+inspected namespace. It retains installed user/group, mount mappings and the
+verification/RPC configuration paths, replaces only the signed maintenance mount,
+and adds the selected source, root control and disjoint provider directory.
+The service enforces the selected memory cap, zero swap and CPU placement, and
+owns its RuntimeDirectory and private temporary files. Native pinned executables
+stage in the service's private `/tmp`; `/run` may be mounted `noexec`. Verify
+copy-and-execute in the selected temporary namespace during host qualification.
+It inherits no writer
+cleanup commands or dependencies that could stop the writer. Its controller must
+verify the published unit, namespace and admission before starting it. Bind mount
+source and target paths are quoted separately; `RootDirectory` is emitted as its
+validated single path. Check the loaded mappings, not only the unit text.
+The service becomes inactive on completion so systemd releases its scratch.
+Retain the unit through a service-manager reference while reading its successful
+invocation and empty cgroup; inactive unit metadata can otherwise be collected.
+The controller must explicitly invoke preparation again for a fresh native check
+before a later handoff attempt. Include the preparation's remaining memory cap
+alongside writer growth and host reserves, then recheck native startup admission
+and finalized renewal before the hold. Rendering and unit validation alone do
+not establish deployment.
+
 ### Challenge execution lanes
 
 The host's model lane ceiling comes from the available CPU affinity and cgroup
@@ -112,6 +177,71 @@ model-only lane-expansion command below refuses this selection; change it only
 through the supported whole-host configuration handoff. See
 [host memory admission](../operators/settlement.md#host-memory-admission) for
 orphan cleanup, restart and capacity requirements.
+
+The `/2` joint execution policy supports multiple equally reserved transient
+slots. `expanded_execution_policy` preserves every original slot, settlement
+signal, reserve and workload binding, and charges the complete added reservation.
+Older readers continue to accept the unchanged `/1` policy; they must be upgraded
+before selecting `/2`. The model-only command below still refuses joint policies.
+All consumers of the shared pool must adopt the same qualified generation together.
+
+On supported Linux x86-64 and arm64 hosts, `/2` binds each running container to
+its existing native slot through a kernel OFD read-lock witness. The witness
+uses the same open file description as the slot's exclusive flock; it changes
+neither the slot file bytes nor permissions. The runner holds the exact cgroup
+directory descriptor until clearing the witness. Independent isolated workers
+can recognize that container without relying on process IDs or durable claims.
+The full busy-slot reservation remains charged. Expired leases, unknown
+containers, changed cgroup identities and excess ceilings retain their existing
+cleanup or capacity holds. `/1` policies keep local-only accounting.
+
+Upgrade every shared-pool reader before selecting `/2`, including qualification
+workers. Supported interpreters must pass actual kernel OFD-lock and cgroup
+readback checks; an omitted Python header constant does not imply missing Linux
+kernel support. Keep native slot files and descriptors outside model sandboxes.
+Qualify staggered admissions while other workers already run, worker death and
+restart, alongside simultaneous timing and resource limits. These witnesses
+resolve live peer identity; they do not lower startup reserves, qualify physical
+core exclusivity or establish the memory headroom for a larger pool.
+
+Qualify admission after earlier models have allocated memory, as well as before
+allocation. Every grant charges busy reservations above the current available
+memory sample. A configured slot count or an initial group grant therefore does
+not establish sustained concurrency. Closing a lease removes its reservation;
+only a fresh memory sample establishes returned space. Startup also constructs
+providers and retained metadata outside individual model leases, so a lower
+startup envelope needs separate qualification of those allocations.
+
+Supported cohort hosts can select `host_memory_admission.startup_memory_bytes`
+after measuring startup peaks under their enforced service cap. The value must
+cover that cap, fit one native transient slot and use zero swap. The updated
+intake, phase-review and settlement bootstrap readers acquire a construction
+lease, preserve it through failure cleanup, and release it before normal work.
+Benchmark construction shares this startup reservation; subsequent inference
+still acquires its own checked grant. Old selection bytes omit the new field and
+retain the full idle-slot startup check. Qualify the actual retained configuration
+and namespace before handoff; do not add this field to an older installed reader.
+
+Timed inference also requires a matching qualified CPU slot for every admitted
+model slot. More benchmark tasks or unused memory slots do not add timed capacity.
+Shared-slot graph and inference readers use the same 100 ms capacity retry
+interval. Carry both readers through the supported source update; this scheduling
+change preserves existing policies, resource limits and retained timing evidence.
+Keep completed baseline observations only when their measurement profile remains
+identical. Qualify simultaneous load, cold-cache isolation and cancellation/orphan
+cleanup under the actual service limits before selecting additional CPU slots.
+The original single-slot installation controls do not perform a live timed-pool
+expansion; do not rerun them against an active challenge cohort.
+
+`expanded_cpu_timing_profile` prepares an additive profile: it preserves original
+slot locks and account parents, takes extra CPUs from the existing background
+partition, and retains the measurement identity used by completed baselines.
+It requires equal runtime CPU allowances and service accounts, distinct native
+locks and nonoverlapping account parents. This constructor performs no kernel
+change and supplies no qualification verdict. The expansion controller must
+retain actual overlapping model intervals for each account on every slot, plus
+native timing comparability, memory admission and cleanup evidence. Concurrent
+helper launches alone do not demonstrate simultaneous model execution.
 
 Prepare a prospective policy using the qualified host interpreter:
 
@@ -243,6 +373,13 @@ Retain the historical systemd reader for untimed execution and orphan recovery.
 Qualify actual rootless migration, bounded probe cancellation, cache ownership,
 restart cleanup and the intended concurrent lane/load profile before selection.
 Restoration completion alone records neither qualification nor contract selection.
+For a timed-pool expansion, update the restorer and all five shared admission
+consumers through the supported source/configuration paths. The restorer's
+predecessor-bound reload can add slots or restore the old layout while the
+resident owner remains alive. Its current startup template orders restoration
+before the owner, evaluators and settlement services. Preserve the historical
+startup command for unchanged installations; reload support alone does not
+establish managed recovery, concurrent qualification or installed adoption.
 
 CPU-work timing v3 runs the fixed calibration workload in separate processes,
 so Python interpreter-lock contention does not dominate the calibration. Each
@@ -1453,6 +1590,119 @@ row is content-addressed; after 64 series, the oldest audit-only row is pruned
 while the immediate predecessor is always retained. Leaving the handoff context
 invalidates the process-local authorization.
 
+Legacy C4 handoff verification is retained separately from the process lease.
+The first pass checkpoints the evidence audit, each checked package and each
+proved transaction expiry, then records the complete inventory. Both supported
+inline and content-addressed SQLite evidence layouts use this path. An older
+installation without these receipts completes one native pass; interruption
+resumes at unfinished items. Existing signed bytes and the approved row remain
+unchanged.
+
+On restart, the host reacquires the original locks and checks the exact journal
+and sealed-package file identities, installation/plan, provider configuration and
+verification ABI. Matching completion skips payload reads, package replay and
+expiry proofs. It still performs current transaction ownership, nonce, finalized
+chain and rate-limit checks before a new submission. Leaving the context ends
+its fresh ownership capability. Keep `legacy-handoff-verification.json` and its
+selected private receipt directory with the supervisor's durable state; missing,
+damaged or changed records report repair instead of silently repeating approval
+work. Do not delete this retained state while a selected boot still consumes its
+legacy handoff plan. Supported source upgrades preserve the verification ABI for
+unchanged native semantics and select this reader without changing journal paths.
+
+Pre-stop preparation can read the installed adapter registry through
+`read_retained_adapter_inventory(installation, limits)` without constructing a
+writable adapter, acquiring writer locks or opening packages. Both inline and
+shared-history records use the live adapter's bounded decoder. The returned
+source identity must still match when preparation is consumed. This metadata
+inventory grants no verification or transaction authority. Existing adapter
+registries use DELETE journals; active journals, other SQLite modes, changed
+bindings and changed file identities require explicit repair. The reader does
+not convert them or create a missing database. Its progress scope is registry
+preparation, separate from package/expiry verification and writer handoff.
+
+`read_retained_handoff_intent(installation, runtime_limits)` reads the original
+private intent under the installed runtime binding without acquiring its process
+lock. It requires an existing stable DELETE-mode journal and refuses missing,
+changed or noncanonical intent state. It reads no history or weight evidence and
+cannot create an intent or grant writer ownership. Retain its source identity
+alongside preparation; the final native handoff still checks selection and fresh
+ownership. These metadata readers are components of preparation, not a complete
+pre-stop preparation command.
+
+The native `prepare_retained_legacy_handoff` API uses these readers and the same
+package, evidence and transaction-expiry verification as final handoff. It accepts
+the authenticated installation, original runtime/adapter limits and independently
+owned, started native providers. It preserves the existing intent and writer
+locks, opens the source journals read-only, and checkpoints successful work under
+the final handoff's original verification owner. Its returned progress summary is
+not a writer capability. Repeated preparation and final handoff reuse completed
+verification after checking unchanged source identities; changed or damaged
+completion needs explicit repair. The supported service command must still own
+provider assembly, resource admission, cancellation and preparation before stopping
+the current writer. Do not construct another provider against its live writable
+cache or treat this library API as an installed supervised update path.
+The initial evidence audit checkpoints after each verified legacy payload, CAS
+object, expanded record and continuity record. Each inventory has one atomic
+ordered-prefix receipt bound to the unchanged journal, native limits and verifier
+semantics. Resume checks the retained prefix against ordered metadata and reads
+only unfinished audit payloads. This keeps receipt-file counts bounded even for
+large object inventories. Missing or damaged completion requires explicit repair.
+The database integrity check has its own retained completion. Both checks use
+owned thread work so heartbeat reporting stays active; cancellation drains the
+current operation before releasing the database. Package and expiry completion
+remain individually reusable. Existing complete inventory receipts continue to
+work without generating new item checkpoints or repeating their audits.
+
+The native finality store retains a private `.audit-frontier` directory beside
+its SQLite database. Preserve that directory with the database and WAL during
+supported restoration. Its completion binds the observer/configuration and
+audit semantics to the actual database and WAL identities; an internal SQLite
+flag alone cannot authorize reuse. Native appends serialize completion checking,
+validated insertion and publication. A read-only keeper prevents close-time
+checkpointing from changing the retained identity. SQLite `data_version` and
+file-identity checks reject unrelated writes during publication. A successfully
+rolled-back native attempt retains the original completed audit.
+
+Weight-cache accounting includes these private metadata files in both legacy and
+namespaced layouts. Unknown entries, unsafe ownership, links and oversized records
+still refuse admission. The native owner removes unpublished atomic-write temporary
+files under its exclusive lock; committed audit records remain intact. Older cache
+readers do not recognize this directory, so qualify cache accounting with the
+frontier capability before selecting it for a historical reward provider.
+
+Unchanged startup reuses the retained conclusion without replaying evidence.
+Missing, damaged or changed completion enters a reported repair audit; failed
+audits cannot publish completion. Original schema-2 accounting migration and
+approved policy/capacity transitions retain their existing semantic checks.
+Initial and repair audits checkpoint integrity/count results and each verified
+row in a bounded `audit-progress.json` file. An unchanged interrupted audit resumes
+after its retained prefix without rereading completed evidence or repeating its
+integrity scan. The checkpoint binds the exact database/WAL identities, audit
+semantics, configuration and accounting layout. Missing, damaged or changed state
+reports repair; it cannot authorize skipping evidence. Progress separates reused
+rows from new work when calculating the remaining audit rate. Explicit operator
+audits still inspect the whole snapshot. The native owner holds its write lock
+through an initial or repair audit; other writers must wait or retry their normal
+bounded lock acquisition. Qualify the actual installed namespace and supported
+adoption path before production selection. No signed evidence,
+chain observation, current nonce or transaction-finality check is replaced.
+
+Historical header-hint import uses the existing bounded native importer. Hints
+remain untrusted until the active provider checks each parent link from its owned
+anchor. Readers tolerate a temporary SQLite sidecar disappearing when another
+supported owner commits; missing main databases, unsafe modes and symlinks still
+fail. On older readers without this compatibility fix, finish the import before
+retrying the original provider against its retained directory.
+
+Header recovery and online hint import use the same payload-capacity check under
+their insertion transaction. When SQLite's total page bytes plus the pending
+headers fit the payload ceiling, that conservative bound avoids a full hint scan.
+Near the ceiling, they compute exact payload usage before accepting or refusing
+the insertion. Unrelated tables, indexes and free pages cannot cause a false
+capacity refusal. Existing hint databases and concurrently opened older writers
+remain compatible; no new accounting schema or trusted ancestry is introduced.
+
 During initial history/package replay, the original supervisor continues
 predecessor reconciliation. The durable handoff intent stops that continuation
 before successor signing, including after restart. A failed old feed does not
@@ -1777,15 +2027,24 @@ not cause a second payload hash pass solely to delete those bytes; a present but
 mismatched receipt still requires explicit repair. Signed manifests, requests,
 admissions, journals and remote objects remain retained.
 
-Benchmark evaluator owners also retire completed direct-model cache candidates
+Benchmark evaluator owners also retire completed direct and legacy chunked-model cache candidates
 incrementally from the existing execution worker's idle pass. A candidate needs
 its authenticated `complete` cohort history, completed local execution, intact
 remote byte-completion records and unchanged local materialization identities.
 The original `archive` and `standby` slots are included. Current and acknowledged
 frozen incumbents, unfinished transfers and live readers remain protected.
 An intent in the existing benchmark journal precedes eviction; restart finishes
-an interrupted removal without reading or hashing model payloads again. Unknown
-legacy sources retain their existing cleanup path and report a hold. Cohort
+an interrupted removal without reading or hashing model payloads again. Chunked
+sources accept their original and current byte-receipt layouts. Missing or damaged
+receipts refuse cleanup without migrating records, repairing markers or contacting
+R2. When a generation owner is selected, its completed scope and damage fence
+must remain intact. The retirement owner holds a native DELETE-mode read lease
+through eviction, ordering release before later damage commits. Unrelated scope
+completion does not invalidate a pending retirement. Cancellation drains the lease
+worker before releasing ownership. Hot-journal recovery belongs to the original
+owner; cleanup refuses it without repair. WAL mode requires an explicit supported
+transition before retirement. Unknown sources retain their existing cleanup path
+and report a hold. Cohort
 history discovery uses the existing owner history port at most once per minute
 per pending cohort, then reuses retained terminal verification.
 
@@ -2097,6 +2356,14 @@ decision retries select the phase recorded in the original intent. Preparation
 and request result publications must finish before the next phase starts. The
 preparation publisher's `publish_history` port restores the original round file
 from the owning journal after a lost acknowledgement or a missing derived file.
+Lifecycle observations mark history and result publication complete before later
+waits begin. Phase startup, sampling-lock acquisition, preparation, finality
+capture and progress sampling expose separate wait stages through the cached
+public progress projection. Their work counters measure one awaited operation;
+heartbeats report elapsed time and an unknown ETA when no duration estimate is
+available. These observations neither change signed phase clocks nor authorize
+completion. Cancellation retains the original lock and preparation cleanup.
+
 After request publication succeeds, the lifecycle returns
 `settlement_handoff_published` and the recurring settlement service takes over.
 Request publication reviews each exact closure once during initial delivery.
@@ -2487,6 +2754,18 @@ still permits only the valid earlier links to checkpoint; repair and retry retai
 their original authority and clocks. Recovery telemetry continues to measure
 verified links. An isolated hint-read benchmark is not a whole-startup or reward
 activation forecast; qualify the installed owner transition separately.
+Persistent registration transports also support four bounded concurrent header
+retrievals during long missing intervals. The native ancestry owner authenticates
+and persists them in order; no stored-hint format or signed evidence changes.
+Generic serial callbacks remain supported. Failover keeps a single probe for a
+cold or failed provider, retains shared retry cooldowns, and drains all owned
+reads during cancellation and close. Update the common runtime through the
+supported release path; changing a local connection count alone does not adopt
+the complete recovery behavior.
+The same runtime retries unfinished preparation RPC reads without rebuilding
+providers or repeating completed package verification. It rechecks retained input
+identity and observer health before resuming. Finality and expiry validation still
+run before any completion record; final writer ownership is unchanged.
 The window's current-head check uses the owned observer directly; it does not
 repeat subnet membership collection. Admission and service review still perform
 their required registration and authority checks.

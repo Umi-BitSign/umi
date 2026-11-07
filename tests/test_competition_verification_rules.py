@@ -17,6 +17,8 @@ def test_selected_dependency_manifest_is_complete_and_qualified():
         == hashlib.sha256(rules.VERIFICATION_SEMANTICS.encode()).hexdigest()
     )
     for module in (
+        "grandpa_finality_frontier.py",
+        "competition_chunked_model_retirement.py",
         "competition_verification_reuse.py",
         "competition_reward_allocation_export.py",
         "competition_reward_cutover.py",
@@ -40,6 +42,7 @@ def test_selected_dependency_manifest_is_complete_and_qualified():
         "competition_reward_writer_resources.py",
         "competition_chain_resource_preflight.py",
         "historical_header_hint_import.py",
+        "historical_header_capacity.py",
         "competition_cohort_request_closure.py",
         "competition_cohort_request_publication.py",
         "competition_cohort_publication_objects.py",

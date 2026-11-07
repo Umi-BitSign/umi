@@ -48,6 +48,7 @@ from .host_memory_runtime import (
     WorkloadASGIBinding,
     memory_runtime,
 )
+from .host_memory_startup import synchronous_memory_startup
 from .open_competition import CompetitionPolicy, Hex32, RegistrationSnapshot, digest
 from .policy import umi_source_tree_sha256
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -195,7 +196,8 @@ def create_intake_app(config, policy, *, provider_factory=None) -> FastAPI:
             owner.request_replay_bytes,
         ),
     ) as controller:
-        app = _create_intake_app(config, policy, provider_factory=provider_factory)
+        with synchronous_memory_startup(controller):
+            app = _create_intake_app(config, policy, provider_factory=provider_factory)
         if controller.requests_stage:
             app.add_middleware(RequestsStageASGIBinding, controller=controller)
         if controller.joint_execution_stage:

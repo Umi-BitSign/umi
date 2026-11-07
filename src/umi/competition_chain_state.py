@@ -45,6 +45,7 @@ from .competition_worker import (
 from .concurrency import wait_for_owned
 from .encoding import account_id32
 from .grandpa_finality import FINNEY_GENESIS_HASH
+from .grandpa_finality_frontier import audit_frontier_disk_usage
 from .grandpa_finality_supervisor import (
     GrandpaFinalitySupervisorError,
     GrandpaFinalitySupervisorLimits,
@@ -167,6 +168,8 @@ def _cache_usage(
                 name = entry.name
                 if name in _CACHE_DATABASE_FILES or name == _CACHE_LOCK_FILE:
                     usage["legacy"] += _cache_file_info(root_fd, name)
+                elif name == "finality.sqlite3.audit-frontier":
+                    usage["legacy"] += audit_frontier_disk_usage(root_fd, name)
                 elif _CACHE_NAMESPACE.fullmatch(name):
                     if len(usage) > _MAX_CACHE_NAMESPACES:
                         raise ValueError("weight cache namespace count is exhausted")
@@ -182,6 +185,9 @@ def _cache_usage(
                         subtotal, names = 0, set()
                         with os.scandir(directory) as children:
                             for child in children:
+                                if child.name == "finality.sqlite3.audit-frontier":
+                                    subtotal += audit_frontier_disk_usage(directory, child.name)
+                                    continue
                                 allowed = _CACHE_DATABASE_FILES | {_CACHE_BUDGET_FILE}
                                 if capacity_transition is not None and name in capacity_transition:
                                     allowed = allowed | {_CACHE_BUDGET_FILE + ".pending"}

@@ -52,7 +52,8 @@ from .competition_supervisor_runtime import (
     hold_successor_startup_lease,
 )
 from .competition_upgrade import _fingerprint, _open_without_links
-from .concurrency import run_until_stopped
+from .competition_work_progress import WorkProgress, work_heartbeats
+from .concurrency import run_owned_thread, run_until_stopped
 from .protocol import canonical_json_bytes
 from .rpc_transport import transport_config_path
 from .validator_supervisor import (
@@ -324,6 +325,22 @@ def _worker_source_overlay(installation):
     return None
 
 
+def _adapter_limits():
+    from .competition_supervisor_adapters import SuccessorAdapterLimits
+
+    return SuccessorAdapterLimits(
+        maximum_retained_runs=65536,
+        maximum_registry_bytes=64 * 1024**2,
+        maximum_staged_selections=4,
+    )
+
+
+def _runtime_limits():
+    from .competition_supervisor_runtime import SuccessorRuntimeLimits
+
+    return SuccessorRuntimeLimits(maximum_history_records=65536, maximum_history_bytes=64 * 1024**2)
+
+
 def _build_runtime(installation, config_path, *, startup_lease):
     # These are fixed host-code imports, not operator-selectable plugins.
     from .competition_delivery import (
@@ -334,10 +351,8 @@ def _build_runtime(installation, config_path, *, startup_lease):
     from .competition_materializer import AuthenticatedSuccessorArtifactMaterializer
     from .competition_supervisor_adapters import (
         ProductionSuccessorRuntimeAdapter,
-        SuccessorAdapterLimits,
     )
     from .competition_supervisor_observer import OwnedSuccessorHostObserver
-    from .competition_supervisor_runtime import SuccessorRuntimeLimits
 
     config = installation.config
     observer = OwnedSuccessorHostObserver(installation=installation)
@@ -373,11 +388,7 @@ def _build_runtime(installation, config_path, *, startup_lease):
             materializer=materializer,
             observer=observer,
             container=container,
-            limits=SuccessorAdapterLimits(
-                maximum_retained_runs=65536,
-                maximum_registry_bytes=64 * 1024**2,
-                maximum_staged_selections=4,
-            ),
+            limits=_adapter_limits(),
         )
 
     runtime = SuccessorSupervisorRuntime(
@@ -385,9 +396,7 @@ def _build_runtime(installation, config_path, *, startup_lease):
         worker_adapter=_DeferredAdapter(adapter),
         directive_fetcher=HTTPSSuccessorDirectiveFetcher(config, client=client),
         observation_reader=observer,
-        limits=SuccessorRuntimeLimits(
-            maximum_history_records=65536, maximum_history_bytes=64 * 1024**2
-        ),
+        limits=_runtime_limits(),
         startup_lease=startup_lease,
     )
     return runtime, observer
@@ -443,9 +452,19 @@ async def run_supervisor(
     standing_config: Path | None = None,
     history_repair: dict | None = None,
     credit_repair: dict | None = None,
+    legacy_preparation_directory: Path | None = None,
+    legacy_preparation_selection: tuple[Path, str] | None = None,
 ):
-    if history_repair is not None and credit_repair is not None:
-        raise ValueError("select one explicit repair operation")
+    if legacy_preparation_selection is not None and legacy_preparation_directory is None:
+        raise ValueError("preparation selection requires the independent provider directory")
+    if (
+        sum(
+            value is not None
+            for value in (history_repair, credit_repair, legacy_preparation_directory)
+        )
+        > 1
+    ):
+        raise ValueError("select one explicit repair or preparation operation")
     if sys.platform != "linux" or os.geteuid() == 0:
         raise ValueError("successor supervisor requires the installed non-root Linux service")
     config_bytes = _root_control(config_path, MAX_SUPERVISOR_DOCUMENT_BYTES)
@@ -458,6 +477,114 @@ async def run_supervisor(
     from .competition_reward_boot import select_standing_boot
 
     standing = select_standing_boot(config_path, anchor, explicit_path=standing_config)
+    if legacy_preparation_directory is not None:
+        if standing is None:
+            raise ValueError("preparation requires the approved standing reward configuration")
+        from .competition_reward_boot import (
+            hold_legacy_preparation_providers,
+            run_legacy_preparation_with_providers,
+        )
+        from .competition_reward_handoff import read_retained_handoff_intent
+        from .competition_reward_handoff_preparation import (
+            prepare_retained_legacy_handoff,
+            read_prepared_legacy_handoff,
+        )
+        from .competition_reward_preparation_selection import (
+            check_legacy_preparation_selection,
+            load_legacy_preparation_selection,
+            publish_legacy_preparation_outcome,
+        )
+        from .open_competition import digest
+
+        selection = (
+            load_legacy_preparation_selection(*legacy_preparation_selection)
+            if legacy_preparation_selection is not None
+            else None
+        )
+        stop = stop_event if stop_event is not None else asyncio.Event()
+        loop, handlers = asyncio.get_running_loop(), []
+        try:
+            if stop_event is None:
+                for signum in (signal.SIGTERM, signal.SIGINT):
+                    loop.add_signal_handler(signum, stop.set)
+                    handlers.append(signum)
+            with (
+                _standing_logs(),
+                package_verification_session(
+                    directory=Path(config.state_root) / "successor-package-verification"
+                ),
+            ):
+                # Existing immutable mounts supply the real installation. This
+                # branch never takes the startup lease or stops its worker.
+                with (
+                    work_heartbeats(),
+                    WorkProgress(
+                        "legacy_preparation_inputs",
+                        1,
+                        unit="installations",
+                        planning_range_seconds=(1, 300),
+                        planning_basis="existing_immutable_mounts_and_reusable_package_receipts_no_repair",
+                    ) as progress,
+                ):
+                    installation = await run_owned_thread(load_successor_worker_inputs)
+                    progress.advance()
+                if (
+                    config_bytes != canonical_json_bytes(installation.config)
+                    or installation.receipt_sha256 != anchor.receipt_sha256
+                    or installation.host_manifest_sha256 != anchor.receipt.host_manifest_sha256
+                ):
+                    raise ValueError("preparation differs from the authenticated installation")
+                _verify_running_host(installation)
+                runtime_limits, adapter_limits = _runtime_limits(), _adapter_limits()
+                retained = read_retained_handoff_intent(installation, runtime_limits)
+                if selection is not None:
+                    check_legacy_preparation_selection(
+                        selection,
+                        installation,
+                        standing,
+                        Path(__file__).parents[2],
+                        legacy_preparation_directory,
+                        digest(retained.intent),
+                    )
+                anchor.recheck()
+
+                async def prepare():
+                    result = await read_prepared_legacy_handoff(
+                        installation,
+                        runtime_limits=runtime_limits,
+                        adapter_limits=adapter_limits,
+                        provider_configs={digest(c.chain): c.chain for c in standing.legacy_chains},
+                    )
+                    if result is None:
+                        async with hold_legacy_preparation_providers(
+                            standing, config, legacy_preparation_directory
+                        ) as providers:
+                            result = await run_legacy_preparation_with_providers(
+                                providers,
+                                prepare_retained_legacy_handoff(
+                                    installation,
+                                    runtime_limits=runtime_limits,
+                                    adapter_limits=adapter_limits,
+                                    providers=providers,
+                                ),
+                            )
+                    anchor.recheck()
+                    installation.recheck()
+                    if selection is not None:
+                        # The outcome is an immutable report. A retry still runs
+                        # the native completion check above before republishing.
+                        load_legacy_preparation_selection(*legacy_preparation_selection)
+                        publish_legacy_preparation_outcome(selection, result)
+                    return {
+                        "status": "legacy_prepared",
+                        "writer_authority": False,
+                        **asdict(result),
+                    }
+
+                return await run_until_stopped(prepare(), stop)
+        finally:
+            for signum in handlers:
+                loop.remove_signal_handler(signum)
     if history_repair is not None or credit_repair is not None:
         from .competition_reward_boot import BOOT_FILENAME, run_installed_credit_repair
         from .competition_reward_history_repair import run_installed_history_repair
@@ -558,11 +685,33 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     repairs.add_argument(
         "--repair-credit", action="store_true", help="Repair one retained native coverage credit"
     )
+    repairs.add_argument(
+        "--prepare-legacy-provider-root",
+        type=Path,
+        help="Prepare retained legacy handoff with independent providers before service hold",
+    )
+    parser.add_argument("--legacy-preparation-selection", type=Path)
+    parser.add_argument("--legacy-preparation-selection-sha256")
     parser.add_argument("--interval", help="Exact retained coverage interval digest")
     parser.add_argument("--through-block", type=int, help="Inclusive history repair target")
     parser.add_argument("--reason", help="Explicit operator repair reason")
     parser.add_argument("--history", choices=("current", "predecessor"))
     args = parser.parse_args(argv)
+    preparation_selection = (
+        args.legacy_preparation_selection,
+        args.legacy_preparation_selection_sha256,
+    )
+    if any(value is not None for value in preparation_selection):
+        if args.prepare_legacy_provider_root is None or any(
+            value is None for value in preparation_selection
+        ):
+            parser.error("preparation selection requires its digest and provider root")
+        from .competition_evidence_codec import checked_digest
+
+        try:
+            checked_digest(args.legacy_preparation_selection_sha256)
+        except (TypeError, ValueError):
+            parser.error("preparation selection requires an exact digest")
     if args.repair_credit:
         from .competition_evidence_codec import checked_digest
 
@@ -597,13 +746,27 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
             options["credit_repair"] = dict(
                 key=args.interval, reason=args.reason, history=args.history or "current"
             )
+        elif args.prepare_legacy_provider_root is not None:
+            options["legacy_preparation_directory"] = args.prepare_legacy_provider_root
+            if args.legacy_preparation_selection is not None:
+                options["legacy_preparation_selection"] = preparation_selection
         result = asyncio.run(run_supervisor(args.config, **options))
-        if args.repair_history or args.repair_credit:
+        if (
+            args.repair_history
+            or args.repair_credit
+            or args.prepare_legacy_provider_root is not None
+        ):
             print(json.dumps(result or {"status": "interrupted"}), flush=True)
+            if args.prepare_legacy_provider_root is not None and result is None:
+                return 130
     except KeyboardInterrupt:
         return 130
     except Exception as error:
-        if args.repair_history or args.repair_credit:
+        if (
+            args.repair_history
+            or args.repair_credit
+            or args.prepare_legacy_provider_root is not None
+        ):
             from .competition_reward_coverage_checkpoint import CoverageCheckpointRepairRequired
             from .competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
             from .competition_round_journal import RoundCapacityRepairRequired

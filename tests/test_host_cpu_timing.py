@@ -314,6 +314,98 @@ def test_cpu_work_profile_binds_independent_probe_executor(selected_host, monkey
     assert captured[2]["probe_executor"] == "independent_processes_parent_bound/1"
 
 
+@pytest.fixture
+def expansion(selected_host):
+    fixture = selected_host
+    previous = fixture.profile.model_copy(update={"background_cpu_ids": (2, 3, 4, 5)})
+    original = previous.slots[0]
+    added = original.model_copy(
+        update={
+            "lock_name": "model-b.slot",
+            "lock_inode": original.lock_inode + 1,
+            "cpu_ids": (2, 3),
+            "parents": tuple(
+                parent.model_copy(update={"path": previous.partition.path + "/model-b"})
+                for parent in original.parents
+            ),
+        }
+    )
+    return fixture, previous, added
+
+
+def test_expansion_preserves_original_slots_and_completed_measurement_identity(expansion):
+    fixture, previous, added = expansion
+    before = canonical_json_bytes(previous)
+    expanded = host.expanded_cpu_timing_profile(
+        previous, [added], qualification_sha256="e" * 64, runtime=fixture.runtime
+    )
+    assert canonical_json_bytes(previous) == before
+    assert expanded.slots == (*previous.slots, added)
+    assert expanded.reserved_cpu_ids == (0, 1, 2, 3)
+    assert expanded.background_cpu_ids == (4, 5)
+    assert expanded.qualification_sha256 == "e" * 64
+    for version in (1, 2, 3):
+        semantics = f"umi-exclusive-cold-model-cpu-timing/{version}"
+        assert host.measurement_profile_sha256(
+            expanded, fixture.runtime, measurement_semantics=semantics
+        ) == host.measurement_profile_sha256(
+            previous, fixture.runtime, measurement_semantics=semantics
+        )
+    session = fixture.start()
+    try:
+        baseline = evidence(ctx=session.context)
+        candidate = evidence(ctx=session.context.model_copy(update={"cpu_ids": added.cpu_ids}))
+        comparable_cpu_timings(candidate, baseline)
+        comparable_cpu_timings(baseline, candidate)
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "empty",
+        "same_lock",
+        "same_parent",
+        "same_name",
+        "cpu_overlap",
+        "size",
+        "uid",
+        "outside",
+        "no_background",
+    ],
+)
+def test_expansion_refuses_changed_or_aliased_native_resources(expansion, change):
+    fixture, previous, added = expansion
+    original = previous.slots[0]
+    if change == "empty":
+        additions = []
+    else:
+        if change == "same_lock":
+            added = added.model_copy(update={"lock_inode": original.lock_inode})
+        elif change == "same_parent":
+            added = added.model_copy(update={"parents": original.parents})
+        elif change == "same_name":
+            added = added.model_copy(update={"lock_name": original.lock_name})
+        elif change == "cpu_overlap":
+            added = added.model_copy(update={"cpu_ids": (1, 2)})
+        elif change == "size":
+            added = added.model_copy(update={"cpu_ids": (2,)})
+        elif change == "uid":
+            added = added.model_copy(
+                update={"parents": (added.parents[0].model_copy(update={"uid": 10001}),)}
+            )
+        elif change == "outside":
+            added = added.model_copy(update={"cpu_ids": (6, 7)})
+        elif change == "no_background":
+            previous = previous.model_copy(update={"background_cpu_ids": (2, 3)})
+        additions = [added]
+    with pytest.raises(ValueError):
+        host.expanded_cpu_timing_profile(
+            previous, additions, qualification_sha256="e" * 64, runtime=fixture.runtime
+        )
+
+
 @pytest.mark.parametrize(
     "change,reason",
     [

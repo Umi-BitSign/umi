@@ -194,6 +194,23 @@ def sandbox(installed):
     )
 
 
+def test_retirement_cannot_create_a_missing_selected_verification_root(installed):
+    cache = LegacyCohortModelCache(installed.artifacts, installed.sources)
+    source = cache.execution_source(
+        installed.job,
+        "candidate",
+        installed.request.record.request.signed_submission.submission.model_bundle,
+        request=installed.request,
+    )
+    missing = installed.root / "missing-selected-byte-store"
+    installed.sources.byte_stores[installed.case.cohort] = SimpleNamespace(
+        directory=str(missing), imports=(), generation_owner=None
+    )
+    with pytest.raises(FileNotFoundError):
+        cache.completed_cache_retirement(source, installed.root / "unused-cache")
+    assert not missing.exists()
+
+
 def attempt(job, step=0, number=1):
     return CohortExecutionAttempt(
         schema="umi-cohort-execution-attempt/1",

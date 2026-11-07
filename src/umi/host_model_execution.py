@@ -14,6 +14,7 @@ from pydantic import Field, model_serializer, model_validator
 from .competition_transport_verification import TransferProgress
 from .host_cpu_timing import CpuTimingHostSelection, CpuTimingSession, load_cpu_timing_profile
 from .host_memory_admission import (
+    CAPACITY_RETRY_SECONDS,
     AdmissionBindingError,
     HostMemoryAdmission,
     HostMemoryFile,
@@ -202,6 +203,9 @@ class ModelExecutionMemoryPolicy(StrictProtocolModel):
 
 class ModelExecutionAdmission:
     def __init__(self, selection, policy, *, reattach_worker=False):
+        from .host_memory_startup import current_startup_reservation
+
+        startup = current_startup_reservation()
         self.selection = {
             "policy_path": str(selection.policy_path),
             "policy_sha256": selection.policy_sha256,
@@ -211,8 +215,10 @@ class ModelExecutionAdmission:
             policy_path=_absolute(selection.policy_path),
             expected_sha256=selection.policy_sha256,
             host_identity_path=_absolute(selection.host_identity_path),
-            _reattach_model_worker=reattach_worker,
+            _reattach_model_worker=reattach_worker or startup is not None,
         )
+        if startup is not None:
+            startup.compatible_model_controller(self.controller)
         selected = self.controller.policy
         if not self.controller.model_execution_stage or (
             selected.protocol_policy_sha256 != digest(policy)
@@ -318,7 +324,10 @@ class ModelExecutionAdmission:
                         self.controller, lane=lane, count=count, started=started, state="waiting"
                     )
                     last_wait = now
-                await asyncio.sleep(0.5)
+                # Model and graph work compete for the same native slot. Use
+                # the same retry cadence so inference does not sample each
+                # released slot five times less often than graph consumers.
+                await asyncio.sleep(CAPACITY_RETRY_SECONDS)
             progress.advance(count)
         try:
             token = (

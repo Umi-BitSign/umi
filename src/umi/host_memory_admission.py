@@ -25,10 +25,12 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
+from . import host_memory_peer
 from .protocol import StrictProtocolModel
 
 Lane = Literal["owner_export", "transient", "settlement_retained"]
 MINIMUM_AVAILABLE_BYTES = 24 * 1024**3
+CAPACITY_RETRY_SECONDS = 0.1
 _MAX_POLICY_BYTES = 64 * 1024
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -289,6 +291,7 @@ class HostMemoryLease:
         self._creator_pid = os.getpid()
         self._generation = object()
         self._model_container = None
+        self._peer_witness = False
 
     @property
     def closed(self) -> bool:
@@ -304,6 +307,11 @@ class HostMemoryLease:
             os.close(descriptor)
 
     def clear_model_container(self) -> None:
+        # Clear before releasing the directory whose inode the witness names.
+        # A forked copy must not clear its parent's shared open-description lock.
+        if self._peer_witness and self._creator_pid == os.getpid():
+            host_memory_peer.clear(self._descriptor)
+        self._peer_witness = False
         binding, self._model_container = self._model_container, None
         if binding is not None:
             os.close(binding[2])
@@ -335,6 +343,7 @@ class HostMemoryAdmission:
         expected_sha256: str,
         host_identity_path: Path = Path("/etc/machine-id"),
         _reattach_model_worker: bool = False,
+        _startup_reservation_bytes: int | None = None,
     ):
         started = time.monotonic()
         self.startup_observation = None
@@ -350,7 +359,10 @@ class HostMemoryAdmission:
             from .host_model_execution import ModelExecutionMemoryPolicy
 
             self.policy = ModelExecutionMemoryPolicy.model_validate_json(raw)
-        elif schema == "umi-host-execution-memory-admission/1":
+        elif schema in {
+            "umi-host-execution-memory-admission/1",
+            "umi-host-execution-memory-admission/2",
+        }:
             from .host_execution_memory import ExecutionMemoryPolicy
 
             self.policy = ExecutionMemoryPolicy.model_validate_json(raw)
@@ -362,6 +374,15 @@ class HostMemoryAdmission:
         if self.policy.host_identity_sha256 != _host_identity(host_identity_path):
             raise AdmissionBindingError("host admission policy belongs to another host")
         self._validate_all()
+        self.startup_reservation_bytes = _startup_reservation_bytes
+        if _startup_reservation_bytes is not None and (
+            not self.joint_execution_stage
+            or type(_startup_reservation_bytes) is not int
+            or not 0
+            < _startup_reservation_bytes
+            <= min(slot.reservation_bytes for slot in self.policy.slots if slot.lane == "transient")
+        ):
+            raise AdmissionBindingError("startup reservation requires bounded joint execution")
         if _reattach_model_worker and not self.model_execution_stage:
             raise AdmissionBindingError("worker reattachment requires model execution admission")
         # Startup and every later grant remeasure current memory. Idle Python
@@ -370,8 +391,10 @@ class HostMemoryAdmission:
         # all idle startup slots again would block it behind unrelated active
         # work. Reattachment grants nothing: every invocation still takes the
         # native locks and remeasures the full current reservation envelope.
-        if not _reattach_model_worker and (
-            not self.model_execution_stage or self.joint_execution_stage
+        if (
+            _startup_reservation_bytes is None
+            and not _reattach_model_worker
+            and (not self.model_execution_stage or self.joint_execution_stage)
         ):
             available = _available_memory()
             required = (
@@ -422,11 +445,19 @@ class HostMemoryAdmission:
         return self.policy.schema_ in {
             "umi-host-model-execution-admission/1",
             "umi-host-execution-memory-admission/1",
+            "umi-host-execution-memory-admission/2",
         }
 
     @property
     def joint_execution_stage(self) -> bool:
-        return self.policy.schema_ == "umi-host-execution-memory-admission/1"
+        return self.policy.schema_ in {
+            "umi-host-execution-memory-admission/1",
+            "umi-host-execution-memory-admission/2",
+        }
+
+    @property
+    def peer_execution_stage(self) -> bool:
+        return self.policy.schema_ == "umi-host-execution-memory-admission/2"
 
     @property
     def requests_stage(self) -> bool:
@@ -495,7 +526,14 @@ class HostMemoryAdmission:
             ):
                 files += (self.policy.settlement_gate, *self.policy.settlement_signals)
             for slot in files:
-                os.close(self._open_slot(parent, slot))
+                descriptor = self._open_slot(parent, slot)
+                try:
+                    if self.peer_execution_stage and getattr(slot, "lane", None) == "transient":
+                        # Read-only startup/pre-stop probes must reject an
+                        # unsupported kernel before a handoff can stop readers.
+                        host_memory_peer.observed_inode(descriptor)
+                finally:
+                    os.close(descriptor)
         finally:
             os.close(parent)
 
@@ -518,6 +556,12 @@ class HostMemoryAdmission:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 return None
+            if (
+                self.peer_execution_stage
+                and selected.lane == "transient"
+                and host_memory_peer.observed_inode(descriptor) is not None
+            ):
+                raise AdmissionBindingError("unowned peer witness remains on a free native slot")
             # Busy operations may not have allocated yet. Charge their full
             # reservation in addition to current RSS rather than racing grants
             # against a stale memory sample. Measurements must qualify this
@@ -635,6 +679,11 @@ class HostMemoryAdmission:
                 raise AdmissionBindingError(
                     "container already belongs to another model acquisition"
                 )
+            if self.peer_execution_stage:
+                # Same open description as the held flock, not an independently
+                # opened file or a durable receipt that can outlive ownership.
+                host_memory_peer.bind(lease._descriptor, details.st_ino)
+                lease._peer_witness = True
             lease._model_container = (str(path), identity, descriptor, lease._generation)
             descriptor = None
             return True
@@ -644,16 +693,49 @@ class HostMemoryAdmission:
             if descriptor is not None:
                 os.close(descriptor)
 
-    def _model_container_reservations(self, busy=()) -> int:
-        """Charge every ceiling; credit only a live local lease already counted.
+    def _peer_container_bindings(self, busy):
+        """Read witnesses only for exact busy slots already charged this pass."""
+        if not self.peer_execution_stage or not busy:
+            return {}
+        result = {}
+        parent = self._open_root()
+        try:
+            for slot in self.policy.slots:
+                if slot.lane != "transient" or (slot.device, slot.inode) not in busy:
+                    continue
+                descriptor = self._open_slot(parent, slot)
+                try:
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        inode = host_memory_peer.observed_inode(descriptor)
+                        if inode is not None:
+                            if inode in result:
+                                raise AdmissionBindingError(
+                                    "multiple native slots bind one cgroup"
+                                ) from None
+                            result[inode] = slot
+                    # A released lease receives no peer credit. This descriptor
+                    # closes before the serialized grant can resume another owner.
+                finally:
+                    os.close(descriptor)
+        finally:
+            os.close(parent)
+        return result
 
-        Bindings disappear with their process and acquisition. Other processes,
-        old acquisitions and orphaned containers therefore remain fully charged.
-        A pending lease is never credited before its exact native binding exists.
+    def _model_container_reservations(self, busy=()) -> int:
+        """Charge every ceiling; credit only a verified busy native lease.
+
+        Legacy bindings are local. Joint /2 also recognizes exact kernel OFD
+        witnesses on already charged busy slots. Expired acquisitions, unknown
+        containers and unbound pending leases receive no credit.
         """
         if not self.model_execution_stage:
             return 0
         total = credit_total = count = 0
+        peer_credit_total = 0
+        peers = self._peer_container_bindings(busy)
+        peer_credited = set()
         credited = set()
         layouts = [(path, "systemd") for path in self.policy.container_cgroup_roots]
         layouts += [(path, "cgroupfs") for path in self.policy.container_cgroupfs_roots]
@@ -724,6 +806,16 @@ class HostMemoryAdmission:
                                     credit = min(ceiling, lease.slot.reservation_bytes)
                                     credited.add(lease)
                                     break
+                        if credit == 0 and identity[1] in peers:
+                            slot = peers[identity[1]]
+                            if slot.name in peer_credited:
+                                raise AdmissionBindingError("native peer cgroup appears twice")
+                            # _require_cgroup2 above binds the device to the one
+                            # kernel cgroup mount. Its held directory inode is
+                            # unique within that mount for the witness lifetime.
+                            credit = min(ceiling, slot.reservation_bytes)
+                            peer_credit_total += credit
+                            peer_credited.add(slot.name)
                         total += ceiling - credit
                         credit_total += credit
                         count += 1
@@ -744,9 +836,11 @@ class HostMemoryAdmission:
         self.last_model_admission = dict(
             populated_containers=count,
             container_ceiling_bytes=total + credit_total,
-            owned_container_credit_bytes=credit_total,
+            owned_container_credit_bytes=credit_total - peer_credit_total,
             unreserved_container_bytes=total,
         )
+        if self.peer_execution_stage:
+            self.last_model_admission["peer_container_credit_bytes"] = peer_credit_total
         return total
 
     def try_acquire(
@@ -909,7 +1003,7 @@ class HostMemoryAdmission:
                     last_report = now
             if lease is not None:
                 return lease
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(CAPACITY_RETRY_SECONDS)
 
     @asynccontextmanager
     async def hold(self, lane: Lane):

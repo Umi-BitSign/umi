@@ -97,6 +97,12 @@ class LegacyCohortModelCache:
         """Check the authenticated source without filling the execution cache."""
         await self.sources.reader(source).available()
 
+    def completed_cache_retirement(self, source, archive):
+        """Supply retained byte facts; the execution owner still authorizes release."""
+        from .competition_chunked_model_retirement import completed_cache_retirement
+
+        return completed_cache_retirement(self.sources.reader(source, read_only=True), archive)
+
     async def resumable(self, source, archive):
         try:
             retained = await run_owned_thread(

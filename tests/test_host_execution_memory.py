@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -682,3 +683,149 @@ def test_startup_reporting_failure_preserves_native_stop(joint, monkeypatch):
     with pytest.raises(native.HostMemoryStartupPending, match="qualified headroom") as caught:
         joint.graph()
     assert caught.value.observation["shortfall_bytes"] == 20 * GIB
+
+
+@pytest.fixture
+def parallel_joint(joint, provisioned):
+    from umi.host_execution_memory import expanded_execution_policy
+
+    root, _, _, write, _ = provisioned
+    path = root / "parallel-model.slot"
+    path.write_bytes(b"")
+    path.chmod(0o440)
+    info = path.stat()
+    added = native.HostMemorySlot(
+        name=path.name,
+        lane="transient",
+        device=info.st_dev,
+        inode=info.st_ino,
+        reservation_bytes=8 * GIB,
+    )
+    before = ExecutionMemoryPolicy.model_validate_json(json.dumps(joint.body))
+    after = expanded_execution_policy(before, [added], qualification_sha256="b" * 64)
+    joint.selection = joint.selection.model_copy(
+        update={"policy_sha256": write(after.model_dump(mode="json", by_alias=True))}
+    )
+    joint.body = after.model_dump(mode="json", by_alias=True)
+    joint.graph = lambda: native.HostMemoryAdmission(
+        Path(joint.selection.policy_path), expected_sha256=joint.selection.policy_sha256
+    )
+    joint.model = lambda: ModelExecutionAdmission(joint.selection, joint.policy)
+    return joint, before, after
+
+
+def test_parallel_joint_preserves_original_locks_and_old_schema(parallel_joint):
+    _, before, after = parallel_joint
+    assert after.slots[:-1] == before.slots
+    for field in type(before).model_fields:
+        if field not in {"schema_", "slots", "incremental_budget_bytes", "qualification_sha256"}:
+            assert getattr(before, field) == getattr(after, field)
+    assert after.incremental_budget_bytes == after.reserved_bytes == 23 * GIB
+    raw = after.model_dump(mode="json", by_alias=True)
+    raw["schema"] = "umi-host-execution-memory-admission/1"
+    with pytest.raises(ValueError, match="legacy joint execution"):
+        ExecutionMemoryPolicy.model_validate_json(json.dumps(raw))
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="joint /2 uses native Linux OFD witnesses")
+def test_parallel_joint_reconstructed_controllers_share_all_slots(parallel_joint):
+    joint, _, _ = parallel_joint
+    first, second, third = joint.graph(), joint.model(), joint.graph()
+    assert len(second.slots) == 2
+    graph_job = first.try_acquire("transient")
+    assert graph_job is not None
+    model_job = second.controller.try_acquire_group("transient", 1)
+    assert model_job is not None
+    assert third.try_acquire("transient") is None
+    owner = third.try_acquire("owner_export")
+    assert owner is not None
+    owner.close()
+    model_job.close()
+    resumed = third.try_acquire("transient")
+    assert resumed is not None
+    resumed.close()
+    graph_job.close()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="joint /2 uses native Linux OFD witnesses")
+def test_parallel_joint_charges_startup_and_pending_work(parallel_joint, monkeypatch):
+    joint, _, _ = parallel_joint
+    monkeypatch.setattr(native, "_available_memory", lambda: 28 * GIB - 1)
+    with pytest.raises(native.HostMemoryStartupPending):
+        joint.graph()
+    monkeypatch.setattr(native, "_available_memory", lambda: 28 * GIB)
+    first, second = joint.graph(), joint.graph()
+    held = first.try_acquire("transient")
+    assert held is not None
+    monkeypatch.setattr(native, "_available_memory", lambda: 21 * GIB - 1)
+    assert second.try_acquire("transient") is None
+    assert second.last_model_admission["pending_reservation_bytes"] == 16 * GIB
+    monkeypatch.setattr(native, "_available_memory", lambda: 21 * GIB)
+    another = second.try_acquire("transient")
+    assert another is not None
+    another.close()
+    held.close()
+
+
+@pytest.mark.parametrize("change", ["reservation", "lane", "duplicate", "budget"])
+def test_parallel_joint_refuses_invalid_expansion(parallel_joint, change):
+    joint, _, _ = parallel_joint
+    raw = json.loads(json.dumps(joint.body))
+    if change == "reservation":
+        raw["slots"][-1]["reservation_bytes"] -= 1
+    elif change == "lane":
+        raw["slots"][-1]["lane"] = "owner_export"
+    elif change == "duplicate":
+        raw["slots"][-1] = raw["slots"][1]
+    else:
+        raw["incremental_budget_bytes"] -= 1
+    with pytest.raises(ValueError):
+        ExecutionMemoryPolicy.model_validate_json(json.dumps(raw))
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="joint /2 uses native Linux OFD witnesses")
+def test_parallel_joint_keeps_orphan_stop_even_with_another_free_slot(parallel_joint, monkeypatch):
+    joint, _, _ = parallel_joint
+    controller = joint.graph()
+
+    original_scan = controller._model_container_reservations
+
+    def retained_orphan(busy):
+        assert not busy
+        controller.last_model_admission = dict(populated_containers=1)
+        return 8 * GIB
+
+    monkeypatch.setattr(controller, "_model_container_reservations", retained_orphan)
+    assert controller.try_acquire("transient") is None
+    assert controller.last_model_admission["exclusive_orphan_hold"] is True
+    assert controller.last_model_admission["orphan_container_count"] == 1
+    monkeypatch.setattr(controller, "_model_container_reservations", original_scan)
+    jobs = [controller.try_acquire("transient") for _ in range(2)]
+    assert all(jobs)
+    for job in jobs:
+        job.close()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="joint /2 uses native Linux OFD witnesses")
+async def test_parallel_joint_cancellation_releases_only_its_own_slot(parallel_joint):
+    joint, _, _ = parallel_joint
+    controller, other = joint.graph(), joint.graph()
+    held = controller.try_acquire("transient")
+    entered = asyncio.Event()
+
+    async def second():
+        async with other.hold("transient"):
+            entered.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(second())
+    await asyncio.wait_for(entered.wait(), 2)
+    assert controller.try_acquire("transient") is None
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    resumed = controller.try_acquire("transient")
+    assert resumed is not None
+    assert controller.try_acquire("transient") is None
+    resumed.close()
+    held.close()

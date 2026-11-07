@@ -633,3 +633,18 @@ async def test_baseline_restore_boot_owns_existing_state_without_signing_or_coll
         await boot.run_reward_coordinator(
             config, asyncio.Event(), baseline_review=request, credit_repair={}
         )
+
+
+def test_compaction_selection_retains_legacy_bytes_and_shared_namespace(config_case, tmp_path):
+    original = canonical_json_bytes(config_case.config)
+    assert b'"forecast_compaction"' not in original
+    selection = dict(reserve_bytes=123456, lock_file=str(tmp_path / "shared-compaction.lock"))
+    selected = boot.RewardCoordinatorConfig.model_validate(
+        config_case.config.model_dump(by_alias=True) | {"forecast_compaction": selection}
+    )
+    assert selected.forecast_compaction.reserve_bytes == 123456
+    assert Path(selection["lock_file"]) in selected.stores()
+    assert Path(selection["lock_file"]) not in selected.stores(include_shared=False)
+    assert (
+        canonical_json_bytes(selected.model_copy(update={"forecast_compaction": None})) == original
+    )

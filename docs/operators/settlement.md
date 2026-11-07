@@ -657,8 +657,28 @@ inside each page transaction to bound database calls during shared-process work.
 Maintenance indexes at most 256 events per
 page, retains completed R2 receipts, then removes archived originals from the
 hot database. Small final batches flush after 30 seconds. Reclaimed SQLite pages
-are reused without growing the original file; this does not shrink its physical
-size. At most 512 exact nonforecast originals remain cached for active retries.
+are reused without growing the original file. To return physical space, select
+`forecast_compaction` in the lifecycle host or standing reward/coordinator boot
+configuration. Its `reserve_bytes` must preserve the deployment's operating,
+startup and growth reserves. Its `lock_file` must name one durable, protected,
+regular admission file shared by every forecast owner on that filesystem;
+provision access for each selected service account and preserve its inode through
+handoffs. Include that file in each service's supported namespace bindings.
+An absent selection preserves legacy behavior and serialized configuration bytes.
+Do not run an independent VACUUM against an active ledger.
+
+The existing maintenance owner takes the shared admission lock and its ledger
+lock before compacting. It requires at least 16 MiB of free database pages, at
+most 16 MiB of live pages, and available storage exceeding the selected reserve
+plus twice the current database size for SQLite working files. Keep that envelope
+in aggregate admission and qualify the actual service cap before selection.
+Concurrent appends wait on the same owner lock, avoiding independent-connection
+SQLite timeouts. SQLite handles atomic interruption recovery. Schema, original
+row bytes, retained archive receipts and native proof verdicts do not change;
+restart uses page metadata and does not repeat completed archival or compaction.
+The nested `compaction` diagnostic reports reclaimed file bytes, elapsed time,
+scoped planning estimates and admission waits. This selection does not compact
+the retained archive index. At most 512 exact nonforecast originals remain cached for active retries.
 Older originals restore from the retained segment when explicitly needed.
 Restart and ordinary score/status queries use compact retained metadata without
 replaying archived events. Missing identities, summaries or archive state require
@@ -1827,12 +1847,37 @@ and applied counts retain their ordinary meanings.
 Owned ancestry walks also emit `historical_header_recovery_progress`: anchor,
 target and current block, completed/remaining links, percent, elapsed time and a
 measured ETA after enough new checks. Retained hints, RPC-fetched hints and reused
-process-local ancestry are counted separately; reused links do not inflate the
-measured rate. A 30-second heartbeat identifies stalled RPC or persistence work
+process-local ancestry are counted separately. `links_per_second` describes the
+whole invocation; `eta_links_per_second` measures the current source, including
+retrieval and durable persistence. Switching from retained hints to archive RPC
+withdraws the earlier estimate until three new links and one second have been
+measured. The ETA assumes the remaining links have the current source's cost;
+it cannot predict the amount of cached work ahead. Process-local reuse contributes
+no rate samples. A 30-second heartbeat identifies stalled RPC or persistence work
 and withdraws unsupported estimates. A completed bounded pass remains running,
 while actual retry, repair or cancellation states withdraw its ETA. History logs
 include this separate ancestry substage and its ETA without counting ancestry
 links as completed block proofs or estimating reward activation.
+Long missing-header intervals use up to four concurrent retrievals on supported
+persistent transports after four consecutive cache misses. Height lookups only
+schedule untrusted hints. The owned walk still checks every header hash and
+height against its current parent commitment, then checkpoints in order. A
+different canonical fork or unavailable speculative lookup falls back to that
+exact parent hash; a malformed matching header remains a native rejection.
+Retained hints take precedence, and a cache hit, bounded-pass exit, error or
+cancellation drains outstanding fetches before releasing the owner.
+
+Failover starts with one request per provider until a transport succeeds. Only
+header and block-hash reads can then share four permits. Metadata, block bodies,
+proofs and other operations retain exclusive access. Waiting requests observe
+the shared cooldown; a late success cannot erase a concurrent failure, and a
+shorter timeout cannot shorten a longer Retry-After. These limits concern
+retrieval, not challenge slots or finality authority.
+Independent legacy preparation keeps the same provider open during transient RPC
+failures in an unfinished expiry review. It retains native cooldowns and completed
+work, withdraws the retry ETA, and reports the retry count. Observer exit, changed
+source bindings, invalid proofs and cancellation still terminate that attempt.
+The final writer handoff keeps its existing failure behavior.
 The coordinator CLI enables both ancestry and history progress logging. Each
 bounded ancestry continuation emits its current cursor and substage ETA before
 the next pass resets the displayed stage, even within the heartbeat interval.
@@ -2732,6 +2777,30 @@ leaf so systemd retains the delegated cgroup between model invocations. An
 even with `RemainAfterExit=yes`. Check the live resident PID and kernel partition,
 as well as the completion receipt. The receipt's total is the actual active-slot
 count, not a fixed lane count.
+
+For additive expansion of an already timed pool, the managed controller must
+hold the owner, both evaluators and both settlement consumers together, while
+preserving reward renewal. Keep the original slot's CPU, lock, account and
+resource bindings. Qualify the added slots concurrently against the retained
+baseline before selecting them in all five consumers. Startup restoration must
+precede all five services; the current partition template declares that order.
+
+The restorer supports a bounded reconfiguration command in the existing service's
+`setup` leaf, using `--previous-config` and `--previous-sha256` with the target
+`--config`. Run it through the controller's retained `ExecReload` selection,
+without `--resident`; the existing notify owner keeps the delegated tree alive.
+Both generations' native locks remain held during the change. A failed
+qualification can restore the exact predecessor plan through the same path.
+Rollback removes only obsolete empty slot, reviewer and probe directories named
+by those plans. Unexpected descendants, active consumers or changed reservations
+require repair before any retirement. Preserve signed inputs and completed
+measurement identities throughout.
+
+This native operation does not provide the managed handoff or its qualification.
+The controller must retain recovery intent before changing the partition, arrange
+automatic restoration after interruption, verify kernel placement and select the
+matching durable startup plan. Never use the original prelaunch controller for a
+live timed-pool transition or infer rollout from source tests.
 
 For an installed oneshot, drain all consumers of its admission slots, including
 settlement verification, before replacing the service with the notify template.
@@ -5965,6 +6034,19 @@ With the ordinary `/2` host memory policy enabled, startup requires current
 available memory above the 24 GiB floor plus all slot reservations and background
 allowance. The explicitly qualified joint policy uses its selected floor and the
 same full startup accounting.
+For cohort intake, phase reviewers and settlement services, an explicit
+`host_memory_admission.startup_memory_bytes` selection uses a bounded construction
+reservation instead. Set it from observed startup peaks with headroom, at least
+the service's enforced `MemoryMax` and no larger than a transient slot. The service
+must enforce zero swap. Startup acquires a native transient lease before legacy
+source authentication and provider/store construction, then releases it before
+normal workers run. Concurrent startups compete through the same reservation
+accounting as other work; they cannot all allocate from one free-memory sample.
+The intake app factory and its later admission-owner startup use separate scopes.
+Older configurations omit this field and preserve their original startup gate.
+Update every selected bootstrap reader before adopting the field. The pre-stop
+capacity probe is advisory; actual construction still requires its own lease.
+
 Each serialized grant rechecks
 current available memory against the floor, background allowance, candidate
 reservation and the full reservations of all occupied slots. This deliberately
@@ -5974,6 +6056,12 @@ configured concurrent consumers and downstream owner work. A policy fitting only
 the sum of isolated peaks can block its own dependencies. Verify startup, steady
 state, replica restart and recovery under the actual account/mount/cgroup limits
 before cutover; do not infer these bounds from aggregate file sizes alone.
+
+Graph work and model inference sharing a transient slot retry admission at the
+same 100 ms interval. This avoids giving graph consumers a faster polling cadence;
+it does not provide FIFO scheduling or reserve a slot for inference. When diagnosing
+evaluation throughput, separate model subprocess time, capacity waits and authority
+work. An idle model CPU can still be waiting for another consumer's memory lease.
 
 
 ### Retained request owner repair diagnostics

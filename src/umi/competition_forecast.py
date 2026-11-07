@@ -22,6 +22,7 @@ from contextvars import ContextVar
 from pathlib import Path
 from threading import RLock
 
+from .competition_forecast_compaction import ForecastCompactionConfig
 from .competition_forecast_health import (
     health_for_restore,
     initialization_for_restore,
@@ -87,11 +88,15 @@ class ForecastLedger:
         remote_store=None,
         ledger_sha256=None,
         maximum_index_bytes=512 * 1024**2,
+        compaction=None,
     ):
         if type(maximum_bytes) is not int or not 64 * 1024 <= maximum_bytes <= 1024**3:
             raise ValueError("forecast accounting capacity must be 64 KiB to 1 GiB")
         if (remote_store is None) != (ledger_sha256 is None):
             raise ValueError("forecast archive requires both remote store and owner identity")
+        self.compaction = (
+            None if compaction is None else ForecastCompactionConfig.model_validate(compaction)
+        )
         self.retention = None
         self.directory = Path(directory)
         if (self.directory / INTENT).exists() or (self.directory / INTENT).is_symlink():

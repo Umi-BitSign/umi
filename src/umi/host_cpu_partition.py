@@ -1,6 +1,6 @@
-"""Startup restoration for qualified exclusive CPU execution. Drain C7 first.
+"""Restore exclusive CPU execution while its selected consumers are quiescent.
 
-The root-owned plan is produced only after native runtime/profile qualification.
+The root-owned plan binds the exact admission pool and resource layout.
 This script restores kernel placement; it does not sign or select a cohort,
 alter journals, create another admission pool, or qualify model-cache conditions.
 """
@@ -28,6 +28,12 @@ ROLES = {
     "umi-c5-primary-reviewer-uid54.service": "umi-validator-uid54",
     "umi-c5-optional-reviewer-uid0.service": "umi-validator-uid0",
 }
+POOL_CONSUMERS = (
+    "umi-c5-primary-intake.service",
+    *ROLES,
+    "umi-c5-primary-settlement-uid54.service",
+    "umi-c5-optional-settlement-uid0.service",
+)
 
 
 def read(path, limit=131072):
@@ -92,6 +98,141 @@ def configure(path, *, allowed, nodes, controllers=True):
         write(path / "cgroup.subtree_control", "+cpu +cpuset +memory +io +pids")
 
 
+def previous_slots(plan, policy, previous):
+    """Bind expansion or rollback to exact predecessor capacity and placement.
+
+    The caller owns the native five-consumer hold. Both generations' native
+    locks remain held during restoration, including a slot being retired.
+    """
+    if previous.get("schema") != "umi-cpu-partition-restoration-plan/1":
+        raise RuntimeError("unsupported predecessor restoration plan")
+    raw = protected(Path(previous["existing_memory_policy_path"]))
+    if hashlib.sha256(raw).hexdigest() != previous["existing_memory_policy_sha256"]:
+        raise RuntimeError("predecessor memory policy changed")
+    before = json.loads(raw)
+    generation_fields = {
+        "schema",
+        "slots",
+        "incremental_budget_bytes",
+        "qualification_sha256",
+        "cpu_timing_profile",
+        "container_cgroupfs_roots",
+    }
+    if {key: value for key, value in before.items() if key not in generation_fields} != {
+        key: value for key, value in policy.items() if key not in generation_fields
+    }:
+        raise RuntimeError("CPU reconfiguration changed shared pool policy")
+    for field in (
+        "host_identity_sha256",
+        "directory",
+        "directory_device",
+        "directory_inode",
+        "group_id",
+        "protocol_policy_sha256",
+        "evaluation_runtime_sha256",
+    ):
+        if before[field] != policy[field]:
+            raise RuntimeError("CPU reconfiguration changed native pool identity: " + field)
+    for field in (
+        "runtime_cpus",
+        "runtime_memory_bytes",
+        "numa_nodes",
+        "role_identities",
+        "partition_mode",
+    ):
+        if previous[field] != plan[field]:
+            raise RuntimeError("CPU reconfiguration changed measured resources: " + field)
+    old = {slot["name"]: slot for slot in before["slots"]}
+    new = {slot["name"]: slot for slot in policy["slots"]}
+    if len(old) != len(before["slots"]) or len(new) != len(policy["slots"]):
+        raise RuntimeError("duplicate native capacity slot")
+    if any(old[name] != new[name] for name in old.keys() & new.keys()):
+        raise RuntimeError("CPU reconfiguration changed a retained native lock or reservation")
+    if any(
+        slot["lane"] != "transient"
+        for name, slot in {**old, **new}.items()
+        if name not in old or name not in new
+    ):
+        raise RuntimeError("CPU reconfiguration cannot change other native reservations")
+    old_names, new_names = set(previous["active_slots"]), set(plan["active_slots"])
+    if not (old_names <= new_names or new_names <= old_names) or not old_names & new_names:
+        raise RuntimeError("CPU reconfiguration must be an additive expansion or its rollback")
+    delta = sum(slot["reservation_bytes"] for name, slot in new.items() if name not in old)
+    delta -= sum(slot["reservation_bytes"] for name, slot in old.items() if name not in new)
+    if policy["incremental_budget_bytes"] != before["incremental_budget_bytes"] + delta:
+        raise RuntimeError("CPU reconfiguration changed the shared reservation budget")
+    if any(
+        slot["reservation_bytes"] != plan["runtime_memory_bytes"]
+        for name, slot in {**old, **new}.items()
+        if name not in old or name not in new
+    ):
+        raise RuntimeError("added timed slot must retain the exact model memory allowance")
+    for value, slots in ((previous, old), (plan, new)):
+        active = value["active_slots"]
+        timed = {name for name, slot in slots.items() if slot["lane"] == "transient"}
+        selected = [cpu for ids in active.values() for cpu in ids]
+        if (
+            not 1 <= len(active) <= 32
+            or set(active) != timed
+            or any(Path(name).name != name or name in {".", ".."} for name in timed)
+            or any(type(cpu) is not int or not 0 <= cpu <= 8191 for cpu in selected)
+            or len(selected) != len(set(selected))
+            or any(len(ids) != value["runtime_cpus"] for ids in active.values())
+            or set(selected) & cpus(value["background_cpus"])
+        ):
+            raise RuntimeError("reconfiguration must bind every distinct native timed slot")
+    for name in previous["active_slots"].keys() & plan["active_slots"].keys():
+        if previous["active_slots"][name] != plan["active_slots"][name]:
+            raise RuntimeError("reconfiguration cannot move an existing timed slot")
+    before_cpus = set(cpu for ids in previous["active_slots"].values() for cpu in ids)
+    after_cpus = set(cpu for ids in plan["active_slots"].values() for cpu in ids)
+    if before_cpus | cpus(previous["background_cpus"]) != after_cpus | cpus(
+        plan["background_cpus"]
+    ):
+        raise RuntimeError("reconfiguration changed the complete CPU inventory")
+    return {name: slot for name, slot in {**old, **new}.items() if slot["lane"] == "transient"}
+
+
+def retired_slot_directories(plan, previous):
+    """Validate the complete bounded retirement set before removing anything.
+
+    Only the exact predecessor's obsolete empty slot/UID/probe directories may
+    be retired. A remaining container or unexpected descendant needs repair.
+    Missing directories are compatible with interrupted completed retirement.
+    """
+    if not PARTITION.exists():
+        return ()
+    permitted = set(plan["active_slots"]) | set(previous["active_slots"])
+    existing = {path.name for path in PARTITION.iterdir() if path.is_dir()}
+    if not existing <= permitted:
+        raise RuntimeError("unexpected CPU slot outside the retained transition")
+    result = []
+    accounts = previous["role_identities"]
+    uids = {"uid" + str(value["uid"]) for value in accounts.values()}
+    for name in sorted(set(previous["active_slots"]) - set(plan["active_slots"])):
+        slot = PARTITION / name
+        if not slot.exists():
+            continue
+        nodes = [slot]
+        for uid in sorted(uids):
+            parent = slot / uid
+            if parent.exists():
+                nodes.append(parent)
+                probe = parent / "probe"
+                if probe.exists():
+                    nodes.append(probe)
+        allowed = set(nodes)
+        for path in nodes:
+            if path.resolve(strict=True) != path or not path.is_dir():
+                raise RuntimeError("retired CPU directory is aliased")
+            if "populated 1" in read(path / "cgroup.events", 4096).decode():
+                raise RuntimeError("retired CPU directory still owns a process")
+            if any(child.is_dir() and child not in allowed for child in path.iterdir()):
+                raise RuntimeError("retired CPU slot still owns an unexpected descendant")
+        result.extend(sorted(nodes, key=lambda path: (-len(path.parts), str(path))))
+    return tuple(result)
+
+
 def retain_partition_service():
     """Keep systemd's delegated cgroup alive after restoration finishes.
 
@@ -115,7 +256,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--resident", action="store_true")
+    parser.add_argument("--previous-config", type=Path)
+    parser.add_argument("--previous-sha256")
     args = parser.parse_args()
+    if bool(args.previous_config) != bool(args.previous_sha256):
+        parser.error("predecessor restoration requires its exact digest")
+    if args.previous_config is not None and args.resident:
+        parser.error("live reconfiguration must preserve the existing resident owner")
     if os.geteuid() != 0:
         raise RuntimeError("CPU restoration is root startup work")
     # Limit this metadata helper independently of the service cgroup, whose
@@ -141,23 +288,31 @@ def main():
             flush=True,
         )
 
-    plan = json.loads(protected(args.config))
+    plan_raw = protected(args.config)
+    plan = json.loads(plan_raw)
     if plan.get("schema") != "umi-cpu-partition-restoration-plan/1":
         raise RuntimeError("unsupported restoration plan")
+    previous = None
+    if args.previous_config is not None:
+        raw = protected(args.previous_config)
+        if hashlib.sha256(raw).hexdigest() != args.previous_sha256:
+            raise RuntimeError("predecessor restoration plan changed")
+        previous = json.loads(raw)
     # systemd must have placed this first root process in a separate leaf.
     own = read("/proc/self/cgroup", 4096).decode().strip()
     expected = "0::/" + str((UNIT / "setup").relative_to(ROOT))
     if own != expected:
         raise RuntimeError("restorer not in its supported delegated startup leaf")
     progress("preflight", 0, 1)
-    for unit in ROLES:
+    for unit in POOL_CONSUMERS if previous is not None else ROLES:
         state = subprocess.check_output(
             ["/usr/bin/systemctl", "show", unit, "--property=ActiveState", "--value"],
             text=True,
             timeout=5,
         ).strip()
         if state not in {"inactive", "failed"}:
-            raise RuntimeError("reviewer must be quiescent before CPU restoration: " + unit)
+            role = "reviewer" if previous is None else "shared-pool consumer"
+            raise RuntimeError(role + " must be quiescent before CPU restoration: " + unit)
     if PARTITION.exists() and "populated 1" in read(PARTITION / "cgroup.events", 4096).decode():
         raise RuntimeError("retained model consumers must drain before CPU restoration")
     policy_raw = protected(Path(plan["existing_memory_policy_path"]))
@@ -171,6 +326,7 @@ def main():
     ):
         raise RuntimeError("memory policy belongs to another host")
     existing = {slot["name"]: slot for slot in policy["slots"] if slot["lane"] == "transient"}
+    locking = existing if previous is None else previous_slots(plan, policy, previous)
     if any(Path(name).name != name or name in {".", ".."} for name in existing):
         raise RuntimeError("invalid existing admission slot path")
     directory_info = Path(policy["directory"]).stat(follow_symlinks=False)
@@ -202,7 +358,7 @@ def main():
     # slots. This is the existing pool, not another scheduler or a new lock file.
     held = []
     try:
-        for name, slot in sorted(existing.items()):
+        for name, slot in sorted(locking.items()):
             descriptor = os.open(
                 Path(policy["directory"]) / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
             )
@@ -218,6 +374,11 @@ def main():
             ):
                 raise RuntimeError("existing admission lock protection changed")
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if previous is not None:
+            retired = retired_slot_directories(plan, previous)
+            for index, path in enumerate(retired, 1):
+                path.rmdir()
+                progress("retire_empty_predecessor_directory", index, len(retired))
         gid = grp.getgrnam("umi-cpu-execution").gr_gid
         # This permission never reaches /sys/fs/cgroup/cgroup.procs or user.slice.
         os.chown(DOMAIN / "cgroup.procs", 0, gid, follow_symlinks=False)
@@ -307,6 +468,8 @@ def main():
                 eta_seconds=0,
                 qualified=False,
                 contract_selected=False,
+                plan_sha256=hashlib.sha256(plan_raw).hexdigest(),
+                previous_plan_sha256=args.previous_sha256,
             )
         ),
         flush=True,

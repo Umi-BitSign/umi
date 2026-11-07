@@ -2,7 +2,7 @@
 Description=Restore prospective UMI CPU slot partition
 Requires=umiexecution.slice
 After=umiexecution.slice
-Before=umi-c5-primary-reviewer-uid54.service umi-c5-optional-reviewer-uid0.service
+Before=umi-c5-primary-intake.service umi-c5-primary-reviewer-uid54.service umi-c5-optional-reviewer-uid0.service umi-c5-primary-settlement-uid54.service umi-c5-optional-settlement-uid0.service
 RefuseManualStop=yes
 
 [Service]

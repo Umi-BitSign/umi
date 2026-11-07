@@ -60,7 +60,12 @@ class HeaderRecoveryTelemetry:
             self.started = self.changed = now
             self.native_links = 0
             self.retained_links = self.rpc_links = self.supplied_links = 0
+            self.rate_source = None
+            self.source_links = 0
+            self.source_started = now
             self.last_emitted = 0.0
+        self.link_started = now
+        self.pending_source = None
         self.anchor, self.target, self.current = anchor_height, target_height, current_height
         self.active = self.prepared = True
         self.state, self.operation = "running", "load_retained_hint"
@@ -70,12 +75,25 @@ class HeaderRecoveryTelemetry:
     def phase(self, operation):
         if self.prepared:
             self.operation = operation
+            if operation == "load_retained_hint":
+                self.link_started = time.monotonic()
+                self.pending_source = None
+            elif operation in ("fetch_archive_header", "supplied_target_hint"):
+                self.pending_source = "rpc" if operation == "fetch_archive_header" else "supplied"
             self.report()
 
     @_diagnostic
     def advance(self, height, source):
         self.current = height
         self.changed = time.monotonic()
+        if source != self.rate_source:
+            # A local restart burst cannot forecast the following archive walk.
+            # Include load, fetch and durable persistence for the first new link.
+            self.rate_source = source
+            self.source_started = self.link_started
+            self.source_links = 0
+        self.source_links += 1
+        self.pending_source = source
         self.native_links += 1
         if source == "retained":
             self.retained_links += 1
@@ -107,13 +125,22 @@ class HeaderRecoveryTelemetry:
         )
         state = "stalled" if stalled else self.state
         rate = self.native_links / elapsed if elapsed > 0 and self.native_links else None
+        source_elapsed = now - self.source_started
+        source_rate = (
+            self.source_links / source_elapsed
+            if source_elapsed > 0
+            and self.source_links
+            and self.pending_source in (None, self.rate_source)
+            else None
+        )
         eta = planning = None
         if state == "completed":
             eta, basis = 0.0, "completed_owned_ancestry_interval"
         elif state != "running":
             basis = "withdrawn_" + state
-        elif rate and self.native_links >= 3 and elapsed >= 1:
-            eta, basis = remaining / rate, "measured_durable_ancestry_links_per_elapsed_second"
+        elif source_rate and self.source_links >= 3 and source_elapsed >= 1:
+            eta = remaining / source_rate
+            basis = f"measured_{self.rate_source}_ancestry_links_per_elapsed_second"
         else:
             low, high = self.planning_links_per_second
             planning = [remaining / high, remaining / low]
@@ -137,6 +164,17 @@ class HeaderRecoveryTelemetry:
             "supplied_target_hint_links": self.supplied_links,
             "elapsed_seconds": elapsed,
             "links_per_second": rate,
+            "eta_links_per_second": source_rate,
+            "eta_source": self.pending_source or self.rate_source,
+            "eta_source_completed_links": self.source_links
+            if self.pending_source in (None, self.rate_source)
+            else 0,
+            "eta_source_elapsed_seconds": source_elapsed
+            if self.pending_source in (None, self.rate_source)
+            else 0.0,
+            "eta_assumption": (
+                "remaining_links_match_current_source_cost; source_changes_reset_samples"
+            ),
             "eta_seconds": eta,
             "planning_eta_seconds": planning,
             "eta_basis": basis,
