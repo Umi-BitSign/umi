@@ -242,6 +242,12 @@ async def test_readonly_preparation_runs_under_original_locks_and_handoff_reuses
         args = await retain_preparation_intent(c, runtime, monkeypatch)
         events = list(c.container.events) if hasattr(c.container, "events") else None
         before = handoff._recovery_journal_snapshot(c.item.worker.path)
+        probe_args = {key: value for key, value in args.items() if key != "providers"}
+        probe_args["provider_configs"] = {key: value.config for key, value in c.providers.items()}
+        assert (
+            await preparation_module.read_prepared_legacy_handoff(c.installation, **probe_args)
+            is None
+        )
         with Path(c.item.worker.lock_path).open("rb") as lock, caplog.at_level("INFO"):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             result = await preparation_module.prepare_retained_legacy_handoff(
@@ -268,6 +274,13 @@ async def test_readonly_preparation_runs_under_original_locks_and_handoff_reuses
         monkeypatch.setattr(handoff, "review_legacy_weight_expiry", repeated)
         restored = await preparation_module.prepare_retained_legacy_handoff(c.installation, **args)
         assert restored == result
+        with monkeypatch.context() as patch:
+            patch.setattr(preparation_module, "_read_preparation_database", repeated)
+            assert (
+                await preparation_module.read_prepared_legacy_handoff(c.installation, **probe_args)
+                == result
+            )
+            assert_locked(Path(c.config.state_root) / "supervisor-process.lock")
         async with handoff.hold_legacy_reward_handoff(runtime, **c.args) as leased:
             c.validate(leased)
             assert leased.inventory_sha256 == result.inventory_sha256
@@ -278,6 +291,39 @@ async def test_readonly_preparation_runs_under_original_locks_and_handoff_reuses
             == result
         )
     assert len(c.reviews) == 1
+
+
+async def test_prepared_metadata_probe_requires_original_configurations_and_source(
+    migration, monkeypatch
+):
+    c = migration
+    await signed_attempt(c)
+    async with c.reopen() as runtime:
+        args = await retain_preparation_intent(c, runtime, monkeypatch)
+        result = await preparation_module.prepare_retained_legacy_handoff(c.installation, **args)
+        probe_args = {key: value for key, value in args.items() if key != "providers"}
+        configurations = {key: value.config for key, value in c.providers.items()}
+        with pytest.raises(ValueError, match="original chain configuration"):
+            await preparation_module.read_prepared_legacy_handoff(
+                c.installation, **probe_args, provider_configs={}
+            )
+        with pytest.raises(TypeError, match="original native"):
+            await preparation_module.read_prepared_legacy_handoff(
+                c.installation,
+                **probe_args,
+                provider_configs={"wrong": next(iter(configurations.values()))},
+            )
+        assert (
+            await preparation_module.read_prepared_legacy_handoff(
+                c.installation, **probe_args, provider_configs=configurations
+            )
+            == result
+        )
+        c.item.worker.path.touch()
+        with pytest.raises(OSError, match="completion_inputs_changed"):
+            await preparation_module.read_prepared_legacy_handoff(
+                c.installation, **probe_args, provider_configs=configurations
+            )
 
 
 @pytest.mark.parametrize("failure", [OSError, asyncio.CancelledError])

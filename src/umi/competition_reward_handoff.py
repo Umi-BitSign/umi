@@ -370,6 +370,16 @@ async def _verify_database_integrity(db, verification, context, recheck, *, alre
         meter.advance()
 
 
+def restore_prepared_inventory(completed, packages, recheck):
+    """Restore only source metadata after the caller checks provider bindings."""
+    with WorkProgress("legacy_handoff_restoration", 1, unit="inventories") as meter:
+        packages.update({Path(item["path"]): item["snapshot"] for item in completed["packages"]})
+        recheck()
+        meter.advance()
+    _LOG.info("legacy_handoff_inventory_restored attempts=%d", completed["attempts"])
+    return completed
+
+
 async def _verify_inventory(
     installation,
     providers,
@@ -389,21 +399,14 @@ async def _verify_inventory(
 ):
     """Checkpoint native verification without granting writer ownership."""
     if completed is not None:
-        with WorkProgress("legacy_handoff_restoration", 1, unit="inventories") as meter:
-            packages.update(
-                {Path(item["path"]): item["snapshot"] for item in completed["packages"]}
-            )
-            for identity in completed["providers"]:
-                provider = providers.get(identity)
-                if (
-                    not isinstance(provider, HistoricalRewardControlProvider)
-                    or digest(provider.config) != identity
-                ):
-                    raise ValueError("legacy handoff lacks the original chain provider")
-            recheck()
-            meter.advance()
-        _LOG.info("legacy_handoff_inventory_restored attempts=%d", completed["attempts"])
-        return completed
+        for identity in completed["providers"]:
+            provider = providers.get(identity)
+            if (
+                not isinstance(provider, HistoricalRewardControlProvider)
+                or digest(provider.config) != identity
+            ):
+                raise ValueError("legacy handoff lacks the original chain provider")
+        return restore_prepared_inventory(completed, packages, recheck)
     with (
         work_heartbeats(),
         WorkProgress("legacy_handoff_inventory_audit", 1, unit="inventories") as meter,

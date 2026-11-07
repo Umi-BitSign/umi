@@ -802,7 +802,7 @@ async def test_history_repair_refuses_missing_standing_selection(host, monkeypat
     assert host.events == ["read-config", "load-anchor", "verify-anchor-host"]
 
 
-@pytest.mark.parametrize("failure", [None, "audit", "cancel"])
+@pytest.mark.parametrize("failure", [None, "audit", "cancel", "completed"])
 async def test_legacy_preparation_loads_real_inputs_before_independent_providers(
     host, monkeypatch, tmp_path, failure
 ):
@@ -810,7 +810,7 @@ async def test_legacy_preparation_loads_real_inputs_before_independent_providers
     from umi import competition_reward_handoff as handoff
     from umi import competition_reward_handoff_preparation as preparation
 
-    standing, providers = object(), object()
+    standing, providers = SimpleNamespace(legacy_chains=()), object()
     directory = tmp_path / "independent-providers"
     host.inputs.receipt_sha256 = "ab" * 32
     host.inputs.host_manifest_sha256 = "cd" * 32
@@ -851,10 +851,20 @@ async def test_legacy_preparation_loads_real_inputs_before_independent_providers
             raise asyncio.CancelledError
         return preparation.LegacyHandoffPreparationResult("ab" * 32, "cd" * 32, 449, 170)
 
+    async def completed(installation, **kwargs):
+        assert installation is host.inputs and kwargs["provider_configs"] == {}
+        host.events.append("check-completion")
+        return (
+            preparation.LegacyHandoffPreparationResult("ab" * 32, "cd" * 32, 449, 170)
+            if failure == "completed"
+            else None
+        )
+
     monkeypatch.setattr(boot, "select_standing_boot", select)
     monkeypatch.setattr(boot, "hold_legacy_preparation_providers", owned)
     monkeypatch.setattr(handoff, "read_retained_handoff_intent", intent)
     monkeypatch.setattr(preparation, "prepare_retained_legacy_handoff", prepare)
+    monkeypatch.setattr(preparation, "read_prepared_legacy_handoff", completed)
 
     async def run():
         return await cli.run_supervisor(
@@ -863,7 +873,7 @@ async def test_legacy_preparation_loads_real_inputs_before_independent_providers
             legacy_preparation_directory=directory,
         )
 
-    if failure:
+    if failure in {"audit", "cancel"}:
         with pytest.raises(asyncio.CancelledError if failure == "cancel" else ValueError):
             await run()
     else:
@@ -885,10 +895,9 @@ async def test_legacy_preparation_loads_real_inputs_before_independent_providers
         "verify-host",
         "retained-intent",
         "recheck-anchor",
-        "providers",
-        "prepare",
-        *([] if failure else ["recheck-anchor", "recheck-installation"]),
-        "close-providers",
+        "check-completion",
+        *([] if failure == "completed" else ["providers", "prepare", "close-providers"]),
+        *([] if failure in {"audit", "cancel"} else ["recheck-anchor", "recheck-installation"]),
     ]
 
 

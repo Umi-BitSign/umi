@@ -482,7 +482,11 @@ async def run_supervisor(
             run_legacy_preparation_with_providers,
         )
         from .competition_reward_handoff import read_retained_handoff_intent
-        from .competition_reward_handoff_preparation import prepare_retained_legacy_handoff
+        from .competition_reward_handoff_preparation import (
+            prepare_retained_legacy_handoff,
+            read_prepared_legacy_handoff,
+        )
+        from .open_competition import digest
 
         stop = stop_event if stop_event is not None else asyncio.Event()
         loop, handlers = asyncio.get_running_loop(), []
@@ -523,25 +527,32 @@ async def run_supervisor(
                 anchor.recheck()
 
                 async def prepare():
-                    async with hold_legacy_preparation_providers(
-                        standing, config, legacy_preparation_directory
-                    ) as providers:
-                        result = await run_legacy_preparation_with_providers(
-                            providers,
-                            prepare_retained_legacy_handoff(
-                                installation,
-                                runtime_limits=runtime_limits,
-                                adapter_limits=adapter_limits,
-                                providers=providers,
-                            ),
-                        )
-                        anchor.recheck()
-                        installation.recheck()
-                        return {
-                            "status": "legacy_prepared",
-                            "writer_authority": False,
-                            **asdict(result),
-                        }
+                    result = await read_prepared_legacy_handoff(
+                        installation,
+                        runtime_limits=runtime_limits,
+                        adapter_limits=adapter_limits,
+                        provider_configs={digest(c.chain): c.chain for c in standing.legacy_chains},
+                    )
+                    if result is None:
+                        async with hold_legacy_preparation_providers(
+                            standing, config, legacy_preparation_directory
+                        ) as providers:
+                            result = await run_legacy_preparation_with_providers(
+                                providers,
+                                prepare_retained_legacy_handoff(
+                                    installation,
+                                    runtime_limits=runtime_limits,
+                                    adapter_limits=adapter_limits,
+                                    providers=providers,
+                                ),
+                            )
+                    anchor.recheck()
+                    installation.recheck()
+                    return {
+                        "status": "legacy_prepared",
+                        "writer_authority": False,
+                        **asdict(result),
+                    }
 
                 return await run_until_stopped(prepare(), stop)
         finally:

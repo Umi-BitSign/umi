@@ -112,6 +112,12 @@ run drains owned work and retains successful checkpoints. The updater must run
 and verify this preparation under supervised resource admission before taking
 ServiceHold. CLI availability alone does not establish installed preparation,
 finality startup reuse or completed handoff qualification.
+Before constructing providers, the command checks complete retained preparation
+against the exact authenticated chain configurations and original source/package
+metadata. An unchanged completion returns without opening the weight database or
+starting independent finality observers. Missing or changed retained completion
+requires repair; an unfinished first preparation continues through native providers.
+This reuse does not replace fresh writer locks, finality or transaction checks.
 
 ### Challenge execution lanes
 

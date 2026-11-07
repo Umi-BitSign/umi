@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
+from .competition_chain import CompetitionChainConfig
 from .competition_host_activation import (
     selected_weight_state_root,
     validate_authenticated_successor_installation,
@@ -21,6 +22,7 @@ from .competition_reward_handoff import (
     _verify_database_integrity,
     _verify_inventory,
     read_retained_handoff_intent,
+    restore_prepared_inventory,
 )
 from .competition_reward_handoff_reuse import (
     LegacyHandoffVerification,
@@ -91,6 +93,43 @@ async def prepare_retained_legacy_handoff(
     Providers must already be independently owned and started by the caller.
     This function does not provide provider construction or service supervision.
     """
+    return await _prepare_retained_legacy_handoff(
+        installation,
+        runtime_limits=runtime_limits,
+        adapter_limits=adapter_limits,
+        providers=providers,
+        completed_configs=None,
+    )
+
+
+async def read_prepared_legacy_handoff(
+    installation, *, runtime_limits, adapter_limits, provider_configs
+) -> LegacyHandoffPreparationResult | None:
+    """Reuse complete native verification before constructing independent readers.
+
+    Configurations come from the authenticated standing boot. This confirms only
+    unchanged completed preparation; fresh writer ownership and transaction
+    finality remain final-handoff responsibilities. Missing/damaged retained
+    receipts require repair. None means no full completion has been recorded.
+    The first check may initialize the derived verification-directory binding.
+    """
+    if type(provider_configs) is not dict or any(
+        type(value) is not CompetitionChainConfig or digest(value) != key
+        for key, value in provider_configs.items()
+    ):
+        raise TypeError("original native chain configuration identities required")
+    return await _prepare_retained_legacy_handoff(
+        installation,
+        runtime_limits=runtime_limits,
+        adapter_limits=adapter_limits,
+        providers=None,
+        completed_configs=provider_configs,
+    )
+
+
+async def _prepare_retained_legacy_handoff(
+    installation, *, runtime_limits, adapter_limits, providers, completed_configs
+):
     validate_authenticated_successor_installation(installation)
     if type(adapter_limits) is not SuccessorAdapterLimits:
         raise TypeError("native adapter limits required")
@@ -157,30 +196,38 @@ async def prepare_retained_legacy_handoff(
         database_checked = verification.load("database_check", "inventory", context)
         if completed is not None and audited is None:
             raise repair_required("inventory_audit_completion_missing")
-        with _read_preparation_database(path, maximum_bytes, weight_snapshot) as db:
-            await _verify_database_integrity(
-                db,
-                verification,
-                context,
-                recheck,
-                already_checked=audited is not None or database_checked is not None,
-            )
-            completed = await _verify_inventory(
-                installation,
-                providers,
-                verification,
-                context,
-                db,
-                recheck,
-                packages,
-                audited=audited,
-                completed=completed,
-                weight_snapshot=weight_snapshot,
-                registry_snapshot=registry_snapshot,
-                minimum_block=0,
-                read_records=records,
-                verify_package=partial(verify_retained_package, installation),
-            )
+        if completed_configs is not None:
+            if completed is None:
+                recheck()
+                return None
+            if any(identity not in completed_configs for identity in completed["providers"]):
+                raise ValueError("prepared handoff lacks the original chain configuration")
+            restore_prepared_inventory(completed, packages, recheck)
+        else:
+            with _read_preparation_database(path, maximum_bytes, weight_snapshot) as db:
+                await _verify_database_integrity(
+                    db,
+                    verification,
+                    context,
+                    recheck,
+                    already_checked=audited is not None or database_checked is not None,
+                )
+                completed = await _verify_inventory(
+                    installation,
+                    providers,
+                    verification,
+                    context,
+                    db,
+                    recheck,
+                    packages,
+                    audited=audited,
+                    completed=completed,
+                    weight_snapshot=weight_snapshot,
+                    registry_snapshot=registry_snapshot,
+                    minimum_block=0,
+                    read_records=records,
+                    verify_package=partial(verify_retained_package, installation),
+                )
         recheck()
     return LegacyHandoffPreparationResult(
         digest(retained.intent),
