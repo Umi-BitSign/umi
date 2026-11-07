@@ -1858,6 +1858,21 @@ and withdraws unsupported estimates. A completed bounded pass remains running,
 while actual retry, repair or cancellation states withdraw its ETA. History logs
 include this separate ancestry substage and its ETA without counting ancestry
 links as completed block proofs or estimating reward activation.
+Long missing-header intervals use up to four concurrent retrievals on supported
+persistent transports after four consecutive cache misses. Height lookups only
+schedule untrusted hints. The owned walk still checks every header hash and
+height against its current parent commitment, then checkpoints in order. A
+different canonical fork or unavailable speculative lookup falls back to that
+exact parent hash; a malformed matching header remains a native rejection.
+Retained hints take precedence, and a cache hit, bounded-pass exit, error or
+cancellation drains outstanding fetches before releasing the owner.
+
+Failover starts with one request per provider until a transport succeeds. Only
+header and block-hash reads can then share four permits. Metadata, block bodies,
+proofs and other operations retain exclusive access. Waiting requests observe
+the shared cooldown; a late success cannot erase a concurrent failure, and a
+shorter timeout cannot shorten a longer Retry-After. These limits concern
+retrieval, not challenge slots or finality authority.
 The coordinator CLI enables both ancestry and history progress logging. Each
 bounded ancestry continuation emits its current cursor and substage ETA before
 the next pass resets the displayed stage, even within the heartbeat interval.

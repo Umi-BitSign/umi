@@ -44,6 +44,7 @@ from .grandpa_finality_supervisor import (
     DurableGrandpaFinalityPort,
     GrandpaFinalitySupervisorError,
 )
+from .historical_header_prefetch import HEADER_FETCH_CONCURRENCY
 from .open_competition import (
     BurnDestination,
     CompetitionPolicy,
@@ -322,12 +323,19 @@ class _RegistrationRpc:
     ):
         self.config = config
         self.bulk_storage_reads = bulk_storage_reads
+        self.historical_header_prefetch_concurrency = HEADER_FETCH_CONCURRENCY if persistent else 1
         self._pool: _BatchConnections | None = None
         # Separate method pools preserve the websocket receive ceiling of each
         # request. A large metadata socket must not become a storage-value socket.
         self._persistent_pools = (
             {
-                method: _BatchConnections(8 if method == "state_getStorageAt" else 1)
+                method: _BatchConnections(
+                    8
+                    if method == "state_getStorageAt"
+                    else self.historical_header_prefetch_concurrency
+                    if method in {"chain_getHeader", "chain_getBlockHash"}
+                    else 1
+                )
                 for method in (
                     "state_getStorageAt",
                     "state_queryStorageAt",

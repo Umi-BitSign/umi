@@ -2741,6 +2741,14 @@ still permits only the valid earlier links to checkpoint; repair and retry retai
 their original authority and clocks. Recovery telemetry continues to measure
 verified links. An isolated hint-read benchmark is not a whole-startup or reward
 activation forecast; qualify the installed owner transition separately.
+Persistent registration transports also support four bounded concurrent header
+retrievals during long missing intervals. The native ancestry owner authenticates
+and persists them in order; no stored-hint format or signed evidence changes.
+Generic serial callbacks remain supported. Failover keeps a single probe for a
+cold or failed provider, retains shared retry cooldowns, and drains all owned
+reads during cancellation and close. Update the common runtime through the
+supported release path; changing a local connection count alone does not adopt
+the complete recovery behavior.
 The window's current-head check uses the owned observer directly; it does not
 repeat subnet membership collection. Admission and service review still perform
 their required registration and authority checks.

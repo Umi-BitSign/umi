@@ -16,6 +16,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from email.utils import parsedate_to_datetime
 
 from .concurrency import await_owned_task, wait_for_owned
+from .proof_rpc_concurrency import HEADER_FETCH_CONCURRENCY, ProviderReadGate
 from .protocol import canonical_json_bytes
 from .validator_chain import _RPC_RESPONSE_LIMITS, ValidatorChainError
 
@@ -40,6 +41,8 @@ def _failure(index, error):
 
 
 class FailoverProofRpc:
+    historical_header_prefetch_concurrency = HEADER_FETCH_CONCURRENCY
+
     def __init__(self, transports: tuple, *, timeout_seconds: float):
         if len(transports) != 3 or not 0 < timeout_seconds <= 600:
             raise ValueError("proof RPC failover requires bounded explicit transports")
@@ -47,7 +50,7 @@ class FailoverProofRpc:
         self.bulk_storage_reads = all(rpc.bulk_storage_reads for rpc in transports)
         self.timeout_seconds = timeout_seconds
         self._cooldown_until = [0.0] * len(transports)
-        self._provider_gates = [asyncio.Lock() for _ in transports]
+        self._provider_gates = [ProviderReadGate() for _ in transports]
         self._cooldown_reasons = [None] * len(transports)
         self._now = time.monotonic
         self._closed = False
@@ -79,14 +82,20 @@ class FailoverProofRpc:
         for index in eligible:
             if self._closed:
                 raise ValueError("registration RPC is closed")
-            # Serialize each provider's attempts. Bulk storage reads retain
-            # throughput without opening a burst of eight failed handshakes.
-            # A waiter rechecks the shared cooldown after acquiring this gate.
-            async with self._provider_gates[index]:
+            # Cold/failed providers get one probe. After transport success, only
+            # small header/hash reads share four permits; large reads remain
+            # exclusive. Queued work rechecks the same cooldown before any I/O.
+            gate = self._provider_gates[index]
+            small = operation == "request" and arguments[0] in {
+                "chain_getHeader",
+                "chain_getBlockHash",
+            }
+            async with gate.lease(small_read=small):
                 if self._closed:
                     raise ValueError("registration RPC is closed")
                 if self._cooldown_until[index] > self._now():
                     continue
+                generation = gate.generation
                 try:
                     result = await wait_for_owned(
                         getattr(self.transports[index], operation)(*arguments), timeout=timeout
@@ -102,8 +111,10 @@ class FailoverProofRpc:
                         and result is None
                     ):
                         raise ValidatorChainError("proof_rpc_error")
+                    gate.succeeded(generation)
                     return result
                 except asyncio.TimeoutError as error:
+                    gate.failed()
                     method, params = arguments if operation == "request" else (None, ())
                     last_error = ValidatorChainError(
                         "proof_rpc_failed",
@@ -113,17 +124,16 @@ class FailoverProofRpc:
                     )
                     last_error.__cause__ = error
                     failures.append(_failure(index, last_error))
-                    self._cooldown_until[index] = self._now() + 10.0
-                    self._cooldown_reasons[index] = "proof_rpc_failed"
+                    self._cool_down(index, 10.0, "proof_rpc_failed")
                 except ValidatorChainError as error:
+                    gate.failed()
                     if error.reason_code not in _RETRYABLE:
                         raise
                     last_error = error
                     failures.append(_failure(index, error))
                     if error.reason_code == "proof_rpc_rate_limited":
                         retry_after = _retry_after(error)
-                        self._cooldown_until[index] = self._now() + retry_after
-                        self._cooldown_reasons[index] = "proof_rpc_rate_limited"
+                        self._cool_down(index, retry_after, "proof_rpc_rate_limited")
                         _LOGGER.warning(
                             canonical_json_bytes(
                                 {
@@ -135,13 +145,21 @@ class FailoverProofRpc:
                             extra={"provider_index": index, "retry_after_seconds": retry_after},
                         )
                     elif error.reason_code == "proof_rpc_failed":
-                        self._cooldown_until[index] = self._now() + 10.0
-                        self._cooldown_reasons[index] = "proof_rpc_failed"
+                        self._cool_down(index, 10.0, "proof_rpc_failed")
                     # A JSON-RPC unavailable-state error is block specific, so
                     # historical failure does not quarantine current reads.
+                except BaseException:
+                    gate.failed()
+                    raise
         if last_error is not None:
             last_error.rpc_failures = tuple(failures)
         raise last_error or ValidatorChainError(self._cooldown_reason())
+
+    def _cool_down(self, index, seconds, reason):
+        until = self._now() + seconds
+        if until > self._cooldown_until[index]:
+            self._cooldown_until[index] = until
+            self._cooldown_reasons[index] = reason
 
     def _cooldown_reason(self):
         return (
@@ -171,7 +189,7 @@ class FailoverProofRpc:
     async def _close(self):
         async with AsyncExitStack() as stack:
             for gate in self._provider_gates:
-                await stack.enter_async_context(gate)
+                await stack.enter_async_context(gate.lease(small_read=False))
             results = await asyncio.gather(
                 *(rpc.aclose() for rpc in self.transports), return_exceptions=True
             )

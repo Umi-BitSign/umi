@@ -15,9 +15,10 @@ from dataclasses import dataclass
 
 from .chain_evidence import FinalizedSnapshotRef
 from .concurrency import run_owned_thread
-from .finalized_ancestry import MAXIMUM_HEADER_BYTES, MAXIMUM_PATH_BYTES, encode_rpc_header
+from .finalized_ancestry import MAXIMUM_HEADER_BYTES, MAXIMUM_PATH_BYTES
 from .grandpa_finality import EVIDENCE_CLASS, _decode_header
 from .historical_header_capacity import hint_payload_usage
+from .historical_header_prefetch import HistoricalHeaderPrefetch
 from .historical_header_progress import HeaderRecoveryTelemetry
 from .validator_plans import VerifiedFinalizedBlock
 
@@ -326,6 +327,7 @@ class HistoricalHeaderRecovery:
         )
         used = 0
         self._retained_hints = {}
+        prefetch = HistoricalHeaderPrefetch(request, height)
         try:
             for index in range(self.batch_size):
                 if current["number"] == height:
@@ -350,8 +352,10 @@ class HistoricalHeaderRecovery:
                     next_encoded = (
                         target_header
                         if supplied
-                        else encode_rpc_header(await request("chain_getHeader", (block_hash,)))
+                        else await prefetch.encoded(current["number"] - 1, block_hash)
                     )
+                else:
+                    await prefetch.retained()
                 next_header = _decode_header(next_encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
                 if (next_header["number"], next_header["hash"]) != (
                     current["number"] - 1,
@@ -372,8 +376,11 @@ class HistoricalHeaderRecovery:
                 if used >= MAXIMUM_PATH_BYTES:
                     break
         finally:
-            self._retained_hints = None
-            self._hint_read_limit = 0
+            try:
+                await prefetch.close()
+            finally:
+                self._retained_hints = None
+                self._hint_read_limit = 0
         if current["number"] != height:
             raise HistoricalHeaderRecoveryProgress("historical header recovery in progress")
         recovered = FinalizedSnapshotRef(
