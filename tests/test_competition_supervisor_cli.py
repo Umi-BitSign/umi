@@ -21,6 +21,19 @@ from .test_competition_host_artifacts import sign as sign_host_artifact
 from .test_competition_host_artifacts import staged as _staged_host_fixture
 
 
+def test_standing_logs_exposes_finality_audit_and_restores_logging(capsys):
+    loggers = [
+        logging.getLogger("umi." + name)
+        for name in ("grandpa_finality_supervisor", "grandpa_finality_frontier")
+    ]
+    before = [(x.level, x.propagate, tuple(x.handlers)) for x in loggers]
+    with cli._standing_logs():
+        for logger in loggers:
+            logger.info("finality_startup_audit completed=2 total=3")
+    assert capsys.readouterr().err.count("finality_startup_audit completed=2 total=3") == 2
+    assert [(x.level, x.propagate, tuple(x.handlers)) for x in loggers] == before
+
+
 @pytest.fixture(autouse=True)
 def restore_process_progress_logger():
     # run_cli configures process-lifetime stderr logging. Tests invoke several

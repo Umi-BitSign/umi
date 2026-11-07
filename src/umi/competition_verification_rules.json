@@ -628,7 +628,7 @@
     "competition_suite_selection.py": "e0fa286ad2da4e45a38016a8dc8a954ef4b2c51b9f7a249a4de213a9da3f68a1",
     "competition_supervisor.py": "d2d5be5a433b5352ad3e91dddb910608ecabf82f8f1602cc49898476e484a589",
     "competition_supervisor_adapters.py": "e56e3a4e8589e373f23d2cdab30b0862f8c2fdd368654ff1c47b0be895967b82",
-    "competition_supervisor_cli.py": "dff986c2b7692fcaa6283a16c355bb7e0d947cc99f745f10ae760fd1cdc6dc6a",
+    "competition_supervisor_cli.py": "a9da3ef3d4bc444bc3f36309076c887b81675025b5bda471b4d4007573ea47a6",
     "competition_supervisor_observer.py": "3c0dd72ab4a87d1a3e74fa499f1523ce663b77082abe7c6cd8ee792e31b3908f",
     "competition_supervisor_runtime.py": "9a4847ce582c7d26ef2a5aabba2ecc12dd94cd782abd748292702be27bf0e7c1",
     "competition_switch_recovery.py": "d9e0300cd9e05a3cb75c5a7520de294f62d7a10d2c046fa3e3d2c6ec1d1598a3",

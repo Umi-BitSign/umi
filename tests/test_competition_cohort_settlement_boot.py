@@ -145,7 +145,12 @@ def test_cli_exposes_background_preparation_and_restores_logging(selected, monke
 
     loggers = tuple(
         logging.getLogger(name)
-        for name in ("umi.competition_cohort_settlement_preparation", "umi.competition.progress")
+        for name in (
+            "umi.competition_cohort_settlement_preparation",
+            "umi.competition.progress",
+            "umi.grandpa_finality_supervisor",
+            "umi.grandpa_finality_frontier",
+        )
     )
     before = tuple((logger.level, logger.propagate, tuple(logger.handlers)) for logger in loggers)
 
@@ -153,12 +158,15 @@ def test_cli_exposes_background_preparation_and_restores_logging(selected, monke
         assert config == selected.config
         loggers[0].info("cohort_settlement_preparation entries_ready=2")
         loggers[1].info("work_progress entries_ready=2")
+        for logger in loggers[2:]:
+            logger.info("finality_startup_audit completed=2 total=3")
 
     monkeypatch.setattr(cli, "_run", running)
     cli.main(["run", "--config", str(selected.path)])
     output = capsys.readouterr().err
     assert "cohort_settlement_preparation entries_ready=2" in output
     assert output.count("work_progress entries_ready=2") == 1
+    assert output.count("finality_startup_audit completed=2 total=3") == 2
     assert (
         tuple((logger.level, logger.propagate, tuple(logger.handlers)) for logger in loggers)
         == before

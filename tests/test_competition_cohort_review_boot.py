@@ -493,6 +493,25 @@ def test_cli_reports_phase_failure_without_private_exception_text(selected, monk
     assert "PRIVATE_EXCEPTION_TEXT" not in captured.out + captured.err
 
 
+def test_cli_exposes_finality_audit_and_restores_logging(selected, monkeypatch, capsys):
+    import logging
+
+    loggers = [
+        logging.getLogger("umi." + name)
+        for name in ("grandpa_finality_supervisor", "grandpa_finality_frontier")
+    ]
+    before = [(x.level, x.propagate, tuple(x.handlers)) for x in loggers]
+
+    async def running(config):
+        for logger in loggers:
+            logger.info("finality_startup_audit completed=2 total=3")
+
+    monkeypatch.setattr(cli, "_run", running)
+    cli.main(["run", "--config", str(selected.path)])
+    assert capsys.readouterr().err.count("finality_startup_audit completed=2 total=3") == 2
+    assert [(x.level, x.propagate, tuple(x.handlers)) for x in loggers] == before
+
+
 def test_cli_reports_allowlisted_service_reason_without_private_cause(
     selected, monkeypatch, capsys
 ):

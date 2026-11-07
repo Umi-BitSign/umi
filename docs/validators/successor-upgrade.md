@@ -221,6 +221,9 @@ Benchmark construction shares this startup reservation; subsequent inference
 still acquires its own checked grant. Old selection bytes omit the new field and
 retain the full idle-slot startup check. Qualify the actual retained configuration
 and namespace before handoff; do not add this field to an older installed reader.
+Reviewer, settlement and supervisor CLI logs include native finality audit counts,
+repair reasons and ETAs. An initial frontier enrollment may precede readiness;
+later starts reuse its retained completion when its dependencies are unchanged.
 
 Timed inference also requires a matching qualified CPU slot for every admitted
 model slot. More benchmark tasks or unused memory slots do not add timed capacity.

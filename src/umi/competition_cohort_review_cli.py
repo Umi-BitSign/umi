@@ -64,6 +64,8 @@ def main(argv=None):
             )
             return
         for name in (
+            "umi.grandpa_finality_supervisor",
+            "umi.grandpa_finality_frontier",
             "umi.competition_cohort_review_boot",
             "umi.competition_cohort_benchmark_host",
             "umi.competition_cohort_endpoint_retirement",

@@ -417,6 +417,8 @@ def _standing_logs():
     handler = logging.StreamHandler()
     selected = []
     for name in (
+        "umi.grandpa_finality_supervisor",
+        "umi.grandpa_finality_frontier",
         "umi.competition_reward_service",
         "umi.competition_reward_handoff",
         "umi.historical_header_progress",
