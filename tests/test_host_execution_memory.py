@@ -586,3 +586,46 @@ async def test_forked_child_refuses_its_inherited_live_capacity_descriptor(joint
                 assert response == b"refused" and status == 0
             finally:
                 os.close(read_fd)
+
+
+def test_model_worker_reattaches_without_recharging_idle_startup_slots(joint, monkeypatch):
+    parent = joint.model()
+    monkeypatch.setattr(native, "_available_memory", lambda: 0)
+    worker = ModelExecutionAdmission(joint.selection, joint.policy, reattach_worker=True)
+    assert worker.controller.policy_sha256 == parent.controller.policy_sha256
+    assert worker.controller.policy.minimum_available_bytes == 4 * GIB
+    assert worker.controller.try_acquire_group("transient", 1) is None
+    # The selected per-invocation envelope still has its exact reserve floor.
+    monkeypatch.setattr(native, "_available_memory", lambda: 13 * GIB - 1)
+    assert worker.controller.try_acquire_group("transient", 1) is None
+    monkeypatch.setattr(native, "_available_memory", lambda: 13 * GIB)
+    lease = worker.controller.try_acquire_group("transient", 1)
+    assert lease is not None
+    try:
+        assert parent.controller.try_acquire_group("transient", 1) is None
+    finally:
+        lease.close()
+    # Ordinary startup retains its original complete-envelope requirement.
+    with pytest.raises(OSError, match="startup"):
+        joint.model()
+
+
+def test_worker_reattachment_preserves_selected_hash_and_busy_reservations(joint, monkeypatch):
+    parent = joint.model()
+    held = parent.controller.try_settlement("1".zfill(64), "coordinator")
+    assert held is not None
+    try:
+        monkeypatch.setattr(native, "_available_memory", lambda: 16 * GIB - 1)
+        worker = ModelExecutionAdmission(joint.selection, joint.policy, reattach_worker=True)
+        assert worker.controller.try_acquire_group("transient", 1) is None
+        changed = joint.selection.model_copy(update={"policy_sha256": "ab" * 32})
+        with pytest.raises(native.AdmissionBindingError, match="differs from selection"):
+            ModelExecutionAdmission(changed, joint.policy, reattach_worker=True)
+    finally:
+        held.close()
+
+
+def test_worker_reattachment_refuses_graph_only_policy(provisioned):
+    _, path, _, _, expected = provisioned
+    with pytest.raises(native.AdmissionBindingError, match="model execution admission"):
+        native.HostMemoryAdmission(path, expected_sha256=expected, _reattach_model_worker=True)

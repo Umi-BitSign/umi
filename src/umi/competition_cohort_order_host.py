@@ -22,6 +22,7 @@ from .competition_cohort_order_worker import CohortOrderWorker
 from .competition_cohort_orders import RecoverableEvaluationOrder
 from .competition_cohort_recovery import CohortRecoveryState, CohortRecoveryTransition
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
+from .competition_cohort_suite_adoption_candidate import EvaluationSuiteAdoptionCandidate
 from .competition_execution import ExecutionCase, execution_boundary
 from .competition_runner import OFFLINE_RUNTIME, OfflineCpuRuntime
 from .competition_verification_reuse import VerificationReuse, verified_replay
@@ -168,14 +169,44 @@ class CohortOrderHost:
                 raise ValueError("recovery history is ahead of the owned finalized observation")
             return reviewed
 
-    def _select(self, prepared, source, capture, reviewed):
+    def _suite(self, round_):
+        try:
+            return EvaluationSuite.model_validate_json(self.files(round_.suite_sha256))
+        except FileNotFoundError:
+            candidates = tuple(
+                candidate
+                for candidate in getattr(
+                    self.service.config.lifecycle, "evaluation_suite_adoption_candidates", ()
+                )
+                if candidate.cohort_sha256 == round_.cohort_sha256
+            )
+            if not candidates:
+                raise
+        if len(candidates) != 1:
+            raise ValueError("selected suite restoration requires one configured candidate")
+        # The retained certified round supplies the identity. Restore only its
+        # missing declaration; media and provenance qualification remain retained.
+        for candidate in progress_items(
+            candidates,
+            stage="selected_suite_metadata_restoration",
+            unit="objects",
+            cohort=round_.cohort_sha256,
+        ):
+            suite, _ = EvaluationSuiteAdoptionCandidate(candidate, self.queue.policy).selection()
+            if digest(suite) != round_.suite_sha256:
+                raise ValueError("suite candidate differs from the certified prepared round")
+            raw = canonical_json_bytes(suite)
+            self.files.publish(round_.suite_sha256, lambda _, raw=raw: raw)
+        return suite
+
+    def _orders(self, prepared, source, reviewed):
         round_ = prepared.roster.round
         cohort = round_.cohort_sha256
         policy = self.queue.policy
         preparation = reviewed.preparation
         if preparation is None:
             raise ValueError("cohort phase has no certified closure: preparation")
-        suite = EvaluationSuite.model_validate_json(self.files(round_.suite_sha256))
+        suite = self._suite(round_)
         validate_suite_profile(suite, policy)
         if suite.policy_sha256 != digest(policy):
             raise ValueError("benchmark suite belongs to another policy")
@@ -199,10 +230,10 @@ class CohortOrderHost:
             p.submission_sha256 for p in round_.participants
         ):
             raise ValueError("benchmark selection differs from the complete prepared roster")
-        slots = []
+        orders = []
         for member in progress_items(
             members,
-            stage="cohort_order_selection",
+            stage="cohort_order_preparation",
             unit="submissions",
             cohort=cohort,
         ):
@@ -247,11 +278,37 @@ class CohortOrderHost:
                 admission=member.admission,
                 admission_snapshot=record.snapshot,
             )
-            slots.append(self.queue.select(order, participant, source, capture))
+            orders.append((order, participant))
+        return tuple(orders)
+
+    async def _select(self, prepared, source, reviewed):
+        orders = await run_owned_thread(self._orders, prepared, source, reviewed)
+        round_ = prepared.roster.round
+        cohort = round_.cohort_sha256
+        finality = getattr(self.service, "finality", self.service.provider)
+        timeout = self.config.operation_timeout_seconds
+        slots = []
+        for order, participant in progress_items(
+            orders, stage="cohort_order_selection", unit="submissions", cohort=cohort
+        ):
+            # Delivery shares the journal's monotonic finalized watermark.
+            # One capture for a whole roster can age behind delivery before
+            # selection finishes. Retain the original order and refresh only
+            # current authority/finality for each native queue selection.
+            current = await wait_for_owned(self.service.history(cohort), timeout=timeout)
+            if current != source:
+                raise OSError("benchmark authority changed during order selection")
+            capture = await wait_for_owned(finality.collect(), timeout=timeout)
+            slots.append(
+                await run_owned_thread(self.queue.select, order, participant, source, capture)
+            )
         # Publish only after every member has a durable original selection.
         # Delivery can proceed independently while a later selection is retried.
-        self.queue.journal.put(
-            "order_host_roster", cohort, _Selection(round_sha256=digest(round_), slots=tuple(slots))
+        await run_owned_thread(
+            self.queue.journal.put,
+            "order_host_roster",
+            cohort,
+            _Selection(round_sha256=digest(round_), slots=tuple(slots)),
         )
         return len(slots)
 
@@ -307,9 +364,7 @@ class CohortOrderHost:
         )
         if await wait_for_owned(self.service.history(cohort), timeout=timeout) != source:
             raise OSError("benchmark authority changed before order selection")
-        self.selected[cohort] = await run_owned_thread(
-            self._select, prepared, source, capture, view
-        )
+        self.selected[cohort] = await self._select(prepared, source, view)
         return self.selected[cohort]
 
     def report(self, name, result):
