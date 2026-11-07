@@ -2733,6 +2733,30 @@ even with `RemainAfterExit=yes`. Check the live resident PID and kernel partitio
 as well as the completion receipt. The receipt's total is the actual active-slot
 count, not a fixed lane count.
 
+For additive expansion of an already timed pool, the managed controller must
+hold the owner, both evaluators and both settlement consumers together, while
+preserving reward renewal. Keep the original slot's CPU, lock, account and
+resource bindings. Qualify the added slots concurrently against the retained
+baseline before selecting them in all five consumers. Startup restoration must
+precede all five services; the current partition template declares that order.
+
+The restorer supports a bounded reconfiguration command in the existing service's
+`setup` leaf, using `--previous-config` and `--previous-sha256` with the target
+`--config`. Run it through the controller's retained `ExecReload` selection,
+without `--resident`; the existing notify owner keeps the delegated tree alive.
+Both generations' native locks remain held during the change. A failed
+qualification can restore the exact predecessor plan through the same path.
+Rollback removes only obsolete empty slot, reviewer and probe directories named
+by those plans. Unexpected descendants, active consumers or changed reservations
+require repair before any retirement. Preserve signed inputs and completed
+measurement identities throughout.
+
+This native operation does not provide the managed handoff or its qualification.
+The controller must retain recovery intent before changing the partition, arrange
+automatic restoration after interruption, verify kernel placement and select the
+matching durable startup plan. Never use the original prelaunch controller for a
+live timed-pool transition or infer rollout from source tests.
+
 For an installed oneshot, drain all consumers of its admission slots, including
 settlement verification, before replacing the service with the notify template.
 Keep the original memory policy and signed cohort state. Resume the services

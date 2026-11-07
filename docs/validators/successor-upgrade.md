@@ -268,6 +268,13 @@ Retain the historical systemd reader for untimed execution and orphan recovery.
 Qualify actual rootless migration, bounded probe cancellation, cache ownership,
 restart cleanup and the intended concurrent lane/load profile before selection.
 Restoration completion alone records neither qualification nor contract selection.
+For a timed-pool expansion, update the restorer and all five shared admission
+consumers through the supported source/configuration paths. The restorer's
+predecessor-bound reload can add slots or restore the old layout while the
+resident owner remains alive. Its current startup template orders restoration
+before the owner, evaluators and settlement services. Preserve the historical
+startup command for unchanged installations; reload support alone does not
+establish managed recovery, concurrent qualification or installed adoption.
 
 CPU-work timing v3 runs the fixed calibration workload in separate processes,
 so Python interpreter-lock contention does not dominate the calibration. Each
