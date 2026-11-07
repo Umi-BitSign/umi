@@ -1080,7 +1080,11 @@ def _verify_sqlite_family(path: Path, label: str) -> None:
     for suffix in ("-journal", "-wal", "-shm"):
         sidecar = Path(f"{path}{suffix}")
         if sidecar.exists() or sidecar.is_symlink():
-            _verify_private_regular_file(sidecar, f"{label} sidecar")
+            # A concurrent SQLite owner may finish its transaction between
+            # discovery and open. Only disappearance of this optional sidecar
+            # is allowed; the main file and unsafe links remain errors.
+            with suppress(FileNotFoundError):
+                _verify_private_regular_file(sidecar, f"{label} sidecar")
 
 
 @contextmanager

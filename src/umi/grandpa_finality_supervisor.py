@@ -34,7 +34,7 @@ import stat
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -52,6 +52,7 @@ from .grandpa_finality import (
     GrandpaFinalityObserverError,
 )
 from .grandpa_finality_accounting import AccountingError, install_accounting, read_usage
+from .grandpa_finality_frontier import FinalityAuditFrontier, FinalityFrontierError
 from .policy import LiveChainObservationPin, ScoringPolicy, scoring_policy_hash
 from .protocol import canonical_json_bytes
 from .validator_chain_scan import (
@@ -383,6 +384,7 @@ class DurableGrandpaFinalityPort:
         self._busy_timeout_ms = busy_timeout_ms
         self._path = _prepare_database_path(state_path)
         self._run_lock = threading.Lock()
+        self._frontier = FinalityAuditFrontier(self._path, busy_timeout_ms=busy_timeout_ms)
         self._initialize()
 
     @classmethod
@@ -765,6 +767,12 @@ class DurableGrandpaFinalityPort:
     ) -> tuple[int, int]:
         """Validate indexed cursors while the caller owns their read snapshot."""
 
+        started, reported, completed = time.monotonic(), 0.0, 0
+        _LOGGER.info(
+            "finality_startup_audit state=running stage=sqlite_integrity completed=0 "
+            "total=unknown elapsed_seconds=0 eta_seconds=unknown "
+            "eta_basis=integrity_scan_before_row_rate stalled=false retrying=false"
+        )
         if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise GrandpaFinalityStoreCorruption("sqlite_quick_check_failed")
         if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
@@ -794,6 +802,13 @@ class DurableGrandpaFinalityPort:
         count, total_evidence = connection.execute(
             "SELECT COUNT(*), COALESCE(SUM(length(canonical_evidence)), 0) FROM finalized_headers"
         ).fetchone()
+        _LOGGER.info(
+            "finality_startup_audit state=running stage=attestations completed=0 total=%d "
+            "elapsed_seconds=%.3f eta_seconds=unknown eta_basis=no_row_rate_yet "
+            "stalled=false retrying=false",
+            count,
+            time.monotonic() - started,
+        )
         if count > self._limits.maximum_headers:
             raise GrandpaFinalityStoreCorruption("header_count_limit")
         if total_evidence > self._limits.maximum_total_evidence_bytes:
@@ -916,18 +931,109 @@ class DurableGrandpaFinalityPort:
                 previous_segment = parsed
                 previous_global = stored
                 expected_sequence += 1
+                completed += 1
+                elapsed = time.monotonic() - started
+                if elapsed - reported >= 1:
+                    _LOGGER.info(
+                        "finality_startup_audit state=running stage=attestations "
+                        "completed=%d total=%d elapsed_seconds=%.3f eta_seconds=%.3f "
+                        "eta_basis=current_audit_rows_per_second stalled=false retrying=false",
+                        completed,
+                        count,
+                        elapsed,
+                        elapsed * (count - completed) / completed,
+                    )
+                    reported = elapsed
                 row = next(rows, None)
         if row is not None:
             raise GrandpaFinalityStoreCorruption("global_height_rollback")
         if stored_head_digest[0] != previous_acceptance:
             raise GrandpaFinalityStoreCorruption("head_acceptance_digest_mismatch")
+        _LOGGER.info(
+            "finality_startup_audit state=completed completed=%d total=%d "
+            "elapsed_seconds=%.3f eta_seconds=0 eta_basis=audited_snapshot "
+            "stalled=false retrying=false",
+            completed,
+            count,
+            time.monotonic() - started,
+        )
         return count, total_evidence
 
     def _initialize(self) -> None:
-        audited = False
+        started = time.monotonic()
+        try:
+            with self._frontier.owner():
+                reason = self._frontier.inspect(self._config_bytes())
+                if reason is None:
+                    self._assert_database_bound()
+                    _LOGGER.info(
+                        "finality_startup_audit state=reused completed=1 total=1 "
+                        "elapsed_seconds=%.3f eta_seconds=0 eta_basis=unchanged_native_frontier "
+                        "stalled=false retrying=false",
+                        time.monotonic() - started,
+                    )
+                    return
+                state = "enrolling" if self._path.stat().st_size == 0 else "repair_required"
+                _LOGGER.info("finality_startup_audit state=%s reason=%s", state, reason)
+                self._initialize_unretained()
+        except FinalityFrontierError as error:
+            raise GrandpaFinalityStoreCorruption(str(error)) from error
+
+    @contextmanager
+    def _native_mutation(self, *, initial: bool = False):
+        """Keep the audited identity stable through commit, close and publication.
+
+        A read-only keeper prevents writer close from checkpointing behind the
+        completion record. SQLite excludes uncooperative writes during the
+        transaction; data_version and file identities detect them afterward.
+        The caller holds the external native-owner lock throughout this scope.
+        """
+        before = self._frontier.snapshot()
+        config = self._config_bytes()
+        reason = None if initial else self._frontier.inspect(config)
+        body_failure = None
+        with ExitStack() as readers:
+            with self._connect(read_only=False) as connection:
+                keeper = readers.enter_context(self._connect(read_only=True))
+                keeper.execute("BEGIN")
+                keeper.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+                version = connection.execute("PRAGMA data_version").fetchone()[0]
+                try:
+                    with self._transaction(connection):
+                        if not initial:
+                            self._frontier.require_snapshot(before, opened_wal=True)
+                            if reason is not None:
+                                _LOGGER.warning(
+                                    "finality_startup_audit state=repair_required reason=%s", reason
+                                )
+                                self._audit_snapshot(connection)
+                        try:
+                            yield connection
+                        except BaseException as error:
+                            body_failure = error
+                            raise
+                except BaseException as error:
+                    # A known native body failure followed by successful SQLite
+                    # rollback preserves the already verified database. A failed
+                    # commit/rollback, initial audit or repair cannot extend it.
+                    if (
+                        error is not body_failure
+                        or initial
+                        or reason is not None
+                        or connection.in_transaction
+                    ):
+                        raise
+                after = self._frontier.snapshot()
+                if connection.execute("PRAGMA data_version").fetchone()[0] != version:
+                    raise FinalityFrontierError("database_changed_outside_native_owner")
+            self._frontier.publish(config, expected_snapshot=after)
+        if body_failure is not None:
+            raise body_failure
+
+    def _initialize_unretained(self) -> None:
         repair_started = None
         try:
-            with self._connect(read_only=False) as connection, self._transaction(connection):
+            with self._native_mutation(initial=True) as connection:
                 application_id = connection.execute("PRAGMA application_id").fetchone()[0]
                 user_version = connection.execute("PRAGMA user_version").fetchone()[0]
                 has_tables = bool(
@@ -965,15 +1071,13 @@ class DurableGrandpaFinalityPort:
                     usage = self._audit_snapshot(connection, legacy_accounting=True)
                     install_accounting(connection, usage)
                     connection.execute(f"PRAGMA user_version = {STORE_SCHEMA_VERSION}")
-                    audited = True
+                else:
+                    self._audit_snapshot(connection)
         except AccountingError as error:
             raise GrandpaFinalityStoreCorruption("evidence_accounting_corrupt") from error
         except sqlite3.DatabaseError as error:
             raise GrandpaFinalityStoreCorruption("sqlite_initialize_failed") from error
-        if audited:
-            self._assert_database_bound()
-        else:
-            self.audit()
+        self._assert_database_bound()
         if repair_started is not None:
             _LOGGER.info(
                 "empty_finality_binding_repair state=completed completed=1 total=1 "
@@ -985,12 +1089,18 @@ class DurableGrandpaFinalityPort:
     def _commit(
         self, binding: ObserverRunBinding, attestation: FinalityAttestation
     ) -> PersistedFinalityHead:
+        try:
+            with self._frontier.owner():
+                return self._commit_owned(binding, attestation)
+        except FinalityFrontierError as error:
+            raise GrandpaFinalityStoreCorruption(str(error)) from error
+
+    def _commit_owned(
+        self, binding: ObserverRunBinding, attestation: FinalityAttestation
+    ) -> PersistedFinalityHead:
         evidence_sha = hashlib.sha256(attestation.canonical_bytes).hexdigest()
         try:
-            with (
-                self._connect(read_only=False) as connection,
-                self._transaction(connection),
-            ):
+            with self._native_mutation() as connection:
                 existing = connection.execute(
                     """
                     SELECT h.*, s.minimum_finalized_block, s.maximum_records,

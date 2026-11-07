@@ -1641,6 +1641,32 @@ current operation before releasing the database. Package and expiry completion
 remain individually reusable. Existing complete inventory receipts continue to
 work without generating new item checkpoints or repeating their audits.
 
+The native finality store retains a private `.audit-frontier` directory beside
+its SQLite database. Preserve that directory with the database and WAL during
+supported restoration. Its completion binds the observer/configuration and
+audit semantics to the actual database and WAL identities; an internal SQLite
+flag alone cannot authorize reuse. Native appends serialize completion checking,
+validated insertion and publication. A read-only keeper prevents close-time
+checkpointing from changing the retained identity. SQLite `data_version` and
+file-identity checks reject unrelated writes during publication. A successfully
+rolled-back native attempt retains the original completed audit.
+
+Unchanged startup reuses the retained conclusion without replaying evidence.
+Missing, damaged or changed completion enters a reported repair audit; failed
+audits cannot publish completion. Original schema-2 accounting migration and
+approved policy/capacity transitions retain their existing semantic checks.
+Initial and repair audits currently remain full passes. Per-item first-audit
+checkpoints and actual installed namespace/restart qualification remain required
+before selecting this startup-reuse capability in production. No signed evidence,
+chain observation, current nonce or transaction-finality check is replaced.
+
+Historical header-hint import uses the existing bounded native importer. Hints
+remain untrusted until the active provider checks each parent link from its owned
+anchor. Readers tolerate a temporary SQLite sidecar disappearing when another
+supported owner commits; missing main databases, unsafe modes and symlinks still
+fail. On older readers without this compatibility fix, finish the import before
+retrying the original provider against its retained directory.
+
 During initial history/package replay, the original supervisor continues
 predecessor reconciliation. The durable handoff intent stops that continuation
 before successor signing, including after restart. A failed old feed does not
