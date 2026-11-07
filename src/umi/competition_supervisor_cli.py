@@ -453,7 +453,10 @@ async def run_supervisor(
     history_repair: dict | None = None,
     credit_repair: dict | None = None,
     legacy_preparation_directory: Path | None = None,
+    legacy_preparation_selection: tuple[Path, str] | None = None,
 ):
+    if legacy_preparation_selection is not None and legacy_preparation_directory is None:
+        raise ValueError("preparation selection requires the independent provider directory")
     if (
         sum(
             value is not None
@@ -486,8 +489,18 @@ async def run_supervisor(
             prepare_retained_legacy_handoff,
             read_prepared_legacy_handoff,
         )
+        from .competition_reward_preparation_selection import (
+            check_legacy_preparation_selection,
+            load_legacy_preparation_selection,
+            publish_legacy_preparation_outcome,
+        )
         from .open_competition import digest
 
+        selection = (
+            load_legacy_preparation_selection(*legacy_preparation_selection)
+            if legacy_preparation_selection is not None
+            else None
+        )
         stop = stop_event if stop_event is not None else asyncio.Event()
         loop, handlers = asyncio.get_running_loop(), []
         try:
@@ -523,7 +536,16 @@ async def run_supervisor(
                     raise ValueError("preparation differs from the authenticated installation")
                 _verify_running_host(installation)
                 runtime_limits, adapter_limits = _runtime_limits(), _adapter_limits()
-                read_retained_handoff_intent(installation, runtime_limits)
+                retained = read_retained_handoff_intent(installation, runtime_limits)
+                if selection is not None:
+                    check_legacy_preparation_selection(
+                        selection,
+                        installation,
+                        standing,
+                        Path(__file__).parents[2],
+                        legacy_preparation_directory,
+                        digest(retained.intent),
+                    )
                 anchor.recheck()
 
                 async def prepare():
@@ -548,6 +570,11 @@ async def run_supervisor(
                             )
                     anchor.recheck()
                     installation.recheck()
+                    if selection is not None:
+                        # The outcome is an immutable report. A retry still runs
+                        # the native completion check above before republishing.
+                        load_legacy_preparation_selection(*legacy_preparation_selection)
+                        publish_legacy_preparation_outcome(selection, result)
                     return {
                         "status": "legacy_prepared",
                         "writer_authority": False,
@@ -663,11 +690,28 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
         type=Path,
         help="Prepare retained legacy handoff with independent providers before service hold",
     )
+    parser.add_argument("--legacy-preparation-selection", type=Path)
+    parser.add_argument("--legacy-preparation-selection-sha256")
     parser.add_argument("--interval", help="Exact retained coverage interval digest")
     parser.add_argument("--through-block", type=int, help="Inclusive history repair target")
     parser.add_argument("--reason", help="Explicit operator repair reason")
     parser.add_argument("--history", choices=("current", "predecessor"))
     args = parser.parse_args(argv)
+    preparation_selection = (
+        args.legacy_preparation_selection,
+        args.legacy_preparation_selection_sha256,
+    )
+    if any(value is not None for value in preparation_selection):
+        if args.prepare_legacy_provider_root is None or any(
+            value is None for value in preparation_selection
+        ):
+            parser.error("preparation selection requires its digest and provider root")
+        from .competition_evidence_codec import checked_digest
+
+        try:
+            checked_digest(args.legacy_preparation_selection_sha256)
+        except (TypeError, ValueError):
+            parser.error("preparation selection requires an exact digest")
     if args.repair_credit:
         from .competition_evidence_codec import checked_digest
 
@@ -704,6 +748,8 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
             )
         elif args.prepare_legacy_provider_root is not None:
             options["legacy_preparation_directory"] = args.prepare_legacy_provider_root
+            if args.legacy_preparation_selection is not None:
+                options["legacy_preparation_selection"] = preparation_selection
         result = asyncio.run(run_supervisor(args.config, **options))
         if (
             args.repair_history

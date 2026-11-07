@@ -802,9 +802,10 @@ async def test_history_repair_refuses_missing_standing_selection(host, monkeypat
     assert host.events == ["read-config", "load-anchor", "verify-anchor-host"]
 
 
+@pytest.mark.parametrize("selected", [False, True])
 @pytest.mark.parametrize("failure", [None, "audit", "cancel", "completed"])
 async def test_legacy_preparation_loads_real_inputs_before_independent_providers(
-    host, monkeypatch, tmp_path, failure
+    host, monkeypatch, tmp_path, failure, selected
 ):
     from umi import competition_reward_boot as boot
     from umi import competition_reward_handoff as handoff
@@ -812,6 +813,41 @@ async def test_legacy_preparation_loads_real_inputs_before_independent_providers
 
     standing, providers = SimpleNamespace(legacy_chains=()), object()
     directory = tmp_path / "independent-providers"
+    directory.mkdir(mode=0o700)
+    selection_options = {}
+    if selected:
+        from umi import competition_host_activation as activation
+        from umi import competition_reward_preparation_selection as scope
+        from umi.open_competition import digest
+
+        value = scope.LegacyPreparationSelection(
+            schema="umi-legacy-preparation-selection/1",
+            transition_id="01" * 32,
+            retained_intent_sha256="ab" * 32,
+            source_revision="02" * 20,
+            config_sha256="04" * 32,
+            installation_receipt_sha256="ab" * 32,
+            standing_boot_sha256="03" * 32,
+            provider_directory=str(directory),
+            maximum_memory_bytes=2 * 1024**3,
+            background_cpus=(0, 1),
+        )
+        selection_path = tmp_path / "selection.json"
+        selection_path.write_bytes(canonical_json_bytes(value))
+        selection_path.chmod(0o444)
+        monkeypatch.setattr(activation, "_root_owner_uid", os.getuid)
+        selection_options["legacy_preparation_selection"] = (
+            selection_path,
+            scope.legacy_preparation_selection_sha256(value),
+        )
+
+        def check(selected_value, installation, boot_value, source, provider_root, intent):
+            assert selected_value == value and installation is host.inputs
+            assert boot_value is standing and provider_root == directory
+            assert intent == digest({"intent": "fixture"})
+            host.events.append("check-selection")
+
+        monkeypatch.setattr(scope, "check_legacy_preparation_selection", check)
     host.inputs.receipt_sha256 = "ab" * 32
     host.inputs.host_manifest_sha256 = "cd" * 32
     host.inputs.recheck = lambda: host.events.append("recheck-installation")
@@ -826,6 +862,7 @@ async def test_legacy_preparation_loads_real_inputs_before_independent_providers
         assert installation is host.inputs
         assert limits == cli._runtime_limits()
         host.events.append("retained-intent")
+        return SimpleNamespace(intent={"intent": "fixture"})
 
     @asynccontextmanager
     async def owned(config, selected_host, selected_directory):
@@ -871,6 +908,7 @@ async def test_legacy_preparation_loads_real_inputs_before_independent_providers
             Path("/etc/umi/supervisor.json"),
             stop_event=host.stop,
             legacy_preparation_directory=directory,
+            **selection_options,
         )
 
     if failure in {"audit", "cancel"}:
@@ -894,11 +932,18 @@ async def test_legacy_preparation_loads_real_inputs_before_independent_providers
         "load-seal",
         "verify-host",
         "retained-intent",
+        *(["check-selection"] if selected else []),
         "recheck-anchor",
         "check-completion",
         *([] if failure == "completed" else ["providers", "prepare", "close-providers"]),
         *([] if failure in {"audit", "cancel"} else ["recheck-anchor", "recheck-installation"]),
     ]
+    if selected:
+        path = scope.legacy_preparation_outcome_path(value)
+        assert path.exists() == (failure not in {"audit", "cancel"})
+        if path.exists():
+            assert scope.read_legacy_preparation_outcome(value).attempts == 449
+            assert scope.read_legacy_preparation_outcome(value).writer_authority is False
 
 
 @pytest.mark.parametrize("failure", ["receipt", "manifest", "intent", "missing_boot"])
@@ -1152,3 +1197,36 @@ def test_writer_credit_repair_cli_passes_predecessor_scope_and_reports_repair_re
     output = json.loads(capsys.readouterr().err)
     assert output["status"] == "repair_required"
     assert output["recovery"] == "restore_original_metadata_and_source_in_place_no_reset"
+
+
+def test_preparation_selection_cli_requires_complete_scope(monkeypatch):
+    captured = []
+
+    async def run(path, **kwargs):
+        captured.append(kwargs)
+        return {"status": "legacy_prepared", "writer_authority": False}
+
+    monkeypatch.setattr(cli, "run_supervisor", run)
+    base = ["--config", "/etc/umi/supervisor.json"]
+    provider = ["--prepare-legacy-provider-root", "/state/providers"]
+    scope = ["--legacy-preparation-selection", "/etc/umi/preparation.json"]
+    sha = ["--legacy-preparation-selection-sha256", "ab" * 32]
+    for args in (
+        scope,
+        sha,
+        provider + scope,
+        provider + sha,
+        scope + sha,
+        provider + scope + [sha[0], "invalid"],
+    ):
+        with pytest.raises(SystemExit) as error:
+            cli.run_cli(base + args)
+        assert error.value.code == 2
+    assert not captured
+    assert cli.run_cli(base + provider + scope + sha) == 0
+    assert captured == [
+        {
+            "legacy_preparation_directory": Path("/state/providers"),
+            "legacy_preparation_selection": (Path("/etc/umi/preparation.json"), "ab" * 32),
+        }
+    ]

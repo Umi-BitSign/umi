@@ -119,6 +119,25 @@ starting independent finality observers. Missing or changed retained completion
 requires repair; an unfinished first preparation continues through native providers.
 This reuse does not replace fresh writer locks, finality or transaction checks.
 
+Supervised preparation can additionally select `--legacy-preparation-selection`
+and `--legacy-preparation-selection-sha256`. The canonical root-owned mode-0444
+selection binds the native maintenance transition ID, retained intent, installed
+configuration and receipt, standing boot, signed source revision, independent
+provider directory and admitted memory/CPU settings. The enclosing maintenance
+request references this selection; the selection does not hash that request.
+The controller must enforce the selected resource settings in the service.
+After native completion and input rechecks, the command atomically retains a
+bounded `completed-<selection-digest>.json` report in the private provider directory.
+Exact retries preserve that report; changed results require repair. Existing
+commands without a selection retain their original behavior.
+
+The root controller reads this report with the installed service UID and an
+explicitly verified namespace mapping. It must also verify the exact successful
+service invocation and run a fresh native completion check before handoff. A
+retained report or zero exit status alone does not authorize ServiceHold. This
+interface supplies a completion channel; the separate supervised launcher,
+resource qualification and pre-hold integration remain required.
+
 ### Challenge execution lanes
 
 The host's model lane ceiling comes from the available CPU affinity and cgroup
