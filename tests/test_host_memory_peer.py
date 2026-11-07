@@ -9,6 +9,7 @@ import pytest
 
 from umi import host_memory_admission as native
 from umi import host_memory_peer as peer
+from umi import host_memory_startup as startup
 from umi.host_execution_memory import expanded_execution_policy
 
 from .test_host_execution_memory import joint as joint
@@ -17,6 +18,56 @@ from .test_host_execution_memory import provisioned as provisioned
 
 GIB = 1024**3
 pytestmark = pytest.mark.skipif(os.uname().sysname != "Linux", reason="Linux OFD witnesses")
+
+
+def test_bounded_graph_uses_service_ceiling_without_discounting_models_or_peers(pool, monkeypatch):
+    first, graph, next_model = [pool.controller() for _ in range(3)]
+    graph.startup_reservation_bytes = 4 * GIB
+    monkeypatch.setattr(startup, "enforced_service_limit", lambda: 4 * GIB)
+    first_lease = first.try_acquire_group("transient", 1)
+    graph_lease = next_lease = None
+    try:
+        # One 8 GiB job already owns capacity. A capped 4 GiB graph fits at
+        # 17 GiB available, including the unchanged 4+1 GiB host/background.
+        monkeypatch.setattr(native, "_available_memory", lambda: 17 * GIB - 1)
+        assert graph.try_acquire("transient") is None
+        assert graph.last_model_admission["shortfall_bytes"] == 1
+        monkeypatch.setattr(native, "_available_memory", lambda: 17 * GIB)
+        assert next_model.try_acquire_group("transient", 1) is None
+        graph_lease = graph.try_acquire("transient")
+        assert graph_lease is not None and graph_lease.service_bounded
+        assert graph.last_model_admission["selected_reservation_bytes"] == 4 * GIB
+        target = pool.container()
+        with pytest.raises(native.AdmissionBindingError):
+            graph.bind_model_container(graph_lease, "a" * 64, target)
+        (target / "cgroup.events").write_text("populated 0\n")
+        first_lease.close()
+        # Peers continue charging the graph's full historical 8 GiB slot.
+        monkeypatch.setattr(native, "_available_memory", lambda: 21 * GIB)
+        next_lease = next_model.try_acquire_group("transient", 1)
+        assert next_lease is not None and not next_lease.service_bounded
+        assert next_model.last_model_admission["pending_reservation_bytes"] == 16 * GIB
+    finally:
+        for lease in (next_lease, graph_lease, first_lease):
+            if lease is not None:
+                lease.close()
+
+
+@pytest.mark.parametrize("limit", [9 * GIB, "unavailable"])
+def test_graph_cap_change_or_unavailable_measurement_keeps_full_charge(pool, monkeypatch, limit):
+    controller = pool.controller()
+    controller.startup_reservation_bytes = 4 * GIB
+
+    def ceiling():
+        if limit == "unavailable":
+            raise native.AdmissionBindingError("no supported cap")
+        return limit
+
+    monkeypatch.setattr(startup, "enforced_service_limit", ceiling)
+    monkeypatch.setattr(native, "_available_memory", lambda: 9 * GIB)
+    assert controller.try_acquire("transient") is None
+    assert controller.last_model_admission["selected_reservation_bytes"] == 8 * GIB
+    assert controller.last_model_admission["required_available_bytes"] == 13 * GIB
 
 
 @pytest.fixture

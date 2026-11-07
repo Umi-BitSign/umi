@@ -292,6 +292,7 @@ class HostMemoryLease:
         self._generation = object()
         self._model_container = None
         self._peer_witness = False
+        self.service_bounded = False
 
     @property
     def closed(self) -> bool:
@@ -549,7 +550,30 @@ class HostMemoryAdmission:
             os.close(descriptor)
             raise
 
-    def _reserve(self, parent: int, selected: HostMemorySlot) -> HostMemoryLease | None:
+    def _service_reservation(self, selected: HostMemorySlot) -> int:
+        """Use a selected host's enforced ceiling for its own graph allocation.
+
+        This credits no resident pages. Peers still charge the full slot, and
+        model group acquisition never uses this path. A missing, enlarged or
+        unsupported service cap falls back to the original full reservation.
+        Supported service-limit changes must drain owned work before handoff.
+        """
+        budget = self.startup_reservation_bytes
+        if not self.peer_execution_stage or budget is None:
+            return selected.reservation_bytes
+        from .host_memory_startup import enforced_service_limit
+
+        try:
+            ceiling = enforced_service_limit()
+        except (AdmissionBindingError, OSError, ValueError):
+            return selected.reservation_bytes
+        if ceiling > budget:
+            return selected.reservation_bytes
+        return min(ceiling, selected.reservation_bytes)
+
+    def _reserve(
+        self, parent: int, selected: HostMemorySlot, *, service_bounded=False
+    ) -> HostMemoryLease | None:
         descriptor = self._open_slot(parent, selected)
         try:
             try:
@@ -566,7 +590,12 @@ class HostMemoryAdmission:
             # reservation in addition to current RSS rather than racing grants
             # against a stale memory sample. Measurements must qualify this
             # conservative admission envelope, including downstream owner work.
-            pending = selected.reservation_bytes
+            selected_bytes = (
+                self._service_reservation(selected)
+                if service_bounded
+                else selected.reservation_bytes
+            )
+            pending = selected_bytes
             busy = set()
             for slot in self.policy.slots:
                 if slot.name == selected.name:
@@ -596,6 +625,9 @@ class HostMemoryAdmission:
                     minimum_available_bytes=self.policy.minimum_available_bytes,
                     background_reservation_bytes=self.policy.background_reservation_bytes,
                     shortfall_bytes=max(0, required - available),
+                    selected_reservation_bytes=selected_bytes,
+                    selected_slot_reservation_bytes=selected.reservation_bytes,
+                    selected_service_bounded=selected_bytes < selected.reservation_bytes,
                 )
             if self.joint_execution_stage:
                 # A dead owner releases flock before a surviving rootless
@@ -611,6 +643,7 @@ class HostMemoryAdmission:
             if available < required:
                 return None
             lease = HostMemoryLease(descriptor, selected)
+            lease.service_bounded = selected_bytes < selected.reservation_bytes
             if self.model_execution_stage:
                 self._model_leases.add(lease)
             descriptor = None
@@ -631,6 +664,7 @@ class HostMemoryAdmission:
             or lease not in self._model_leases
             or lease.closed
             or lease._creator_pid != os.getpid()
+            or lease.service_bounded
             or lease.slot.lane != "transient"
             or type(container_id) is not str
             or re.fullmatch(r"[0-9a-f]{64}", container_id) is None
@@ -859,7 +893,7 @@ class HostMemoryAdmission:
                 return None
             for slot in self.policy.slots:
                 if slot.lane == lane:
-                    lease = self._reserve(parent, slot)
+                    lease = self._reserve(parent, slot, service_bounded=True)
                     if lease is not None:
                         return lease
             return None

@@ -228,6 +228,18 @@ Benchmark construction shares this startup reservation; subsequent inference
 still acquires its own checked grant. Old selection bytes omit the new field and
 retain the full idle-slot startup check. Qualify the actual retained configuration
 and namespace before handoff; do not add this field to an older installed reader.
+With joint execution policy `/2`, these explicitly bounded hosts also charge
+their own graph acquisition at the smaller of the slot reservation and current
+enforced service ceiling. The service must retain zero swap and a ceiling within
+its selected startup budget. Unsupported or enlarged caps keep the full charge.
+This uses the existing whole-service limit, including current allocations and
+failure cleanup; it does not subtract sampled resident pages. Peers continue to
+charge the full historical slot, so mixed source versions remain conservative.
+Model group grants always retain their full signed allowance, and a reduced
+graph grant cannot be rebound to a model container. Drain owned work before
+changing a service limit or moving workers outside its cgroup. Carry the source
+update through the existing validator host maintenance path; miners need no
+submission or signed-input migration.
 Reviewer, settlement and supervisor CLI logs include native finality audit counts,
 repair reasons and ETAs. An initial frontier enrollment may precede readiness;
 later starts reuse its retained completion when its dependencies are unchanged.
