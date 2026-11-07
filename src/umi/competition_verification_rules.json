@@ -689,7 +689,7 @@
     "host_memory_request_bounds.py": "c46621379eca0fa9d09a84fcc3bd6c962219bdfad38e01f7405caf908f74d642",
     "host_memory_requests.py": "4c4461311afc1713c5be9ee2cbb88492d250aa626c906271158efa44e9e34f60",
     "host_memory_runtime.py": "ebe609f70cbf6f8d56f75f8a38e5c52203e164ce5045c847f9b2ecb62b95599e",
-    "host_memory_startup.py": "25617646f9266b96dcfd846b0c0a80c5f90d09c5018ddae8ab131686a2f03ff9",
+    "host_memory_startup.py": "a9afe9d37bcf41be6e64d7ae7a076b042f531bcf475dab97fe8d7a177437b3de",
     "host_memory_workload_profile.py": "54b8f6a10edc132d3864d5e35ba4985239856b5145795738ec1393c03db843b0",
     "host_model_cache.py": "be76f571501057c526045273b2a9334a678b2e60469838d45648a047ad445cdc",
     "host_model_execution.py": "fd955c33d11b82e6a2610b5a20d19aa9659e6c9410e0b2dd9548efb0eb367b79",

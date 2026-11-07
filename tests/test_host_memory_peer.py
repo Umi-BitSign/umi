@@ -70,6 +70,33 @@ def test_graph_cap_change_or_unavailable_measurement_keeps_full_charge(pool, mon
     assert controller.last_model_admission["required_available_bytes"] == 13 * GIB
 
 
+def test_startup_probe_uses_selected_graph_budget_and_waits_for_consistent_slot_sample(
+    pool, monkeypatch
+):
+    controller, model = pool.controller(), pool.controller()
+    controller.startup_reservation_bytes = 4 * GIB
+    lease = model.try_acquire_group("transient", 1)
+    root = model._open_root()
+    transaction = None
+    try:
+        monkeypatch.setattr(startup, "_available_memory", lambda: 17 * GIB)
+        observation = startup.probe_startup_reservation(controller)
+        assert observation["status"] == "admitted"
+        assert observation["required_available_bytes"] == 17 * GIB
+        assert observation["capacity_reserved"] is False
+        transaction = model._transaction(root)
+        assert transaction is not None
+        observation = startup.probe_startup_reservation(controller)
+        assert observation["status"] == "capacity_required"
+        assert observation["eta_basis"] == "awaiting_native_capacity_transaction"
+        assert "pending_reservation_bytes" not in observation
+    finally:
+        if transaction is not None:
+            os.close(transaction)
+        os.close(root)
+        lease.close()
+
+
 @pytest.fixture
 def pool(parallel_joint, provisioned, tmp_path, monkeypatch):
     fixture, _, previous = parallel_joint

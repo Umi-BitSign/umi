@@ -240,6 +240,10 @@ graph grant cannot be rebound to a model container. Drain owned work before
 changing a service limit or moving workers outside its cgroup. Carry the source
 update through the existing validator host maintenance path; miners need no
 submission or signed-input migration.
+Startup preflight uses the selected bounded budget and samples busy slots under
+the native admission transaction. A competing transaction reports a retry without
+inventing occupied-slot counts. The new host still acquires its own grant before
+allocating; preflight reserves no capacity.
 Reviewer, settlement and supervisor CLI logs include native finality audit counts,
 repair reasons and ETAs. An initial frontier enrollment may precede readiness;
 later starts reuse its retained completion when its dependencies are unchanged.

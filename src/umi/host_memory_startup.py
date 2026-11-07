@@ -162,9 +162,28 @@ def probe_startup_reservation(controller):
     must acquire its own lease before construction; this observation is not a grant.
     """
     root = controller._open_root()
+    transaction = None
     busy = set()
     pending = max(s.reservation_bytes for s in controller.policy.slots if s.lane == "transient")
+    if controller.peer_execution_stage and controller.startup_reservation_bytes is not None:
+        pending = min(pending, controller.startup_reservation_bytes)
     try:
+        # A grant briefly locks otherwise free slots while measuring peers.
+        # Without this transaction, a probe can mistake those locks for live
+        # reservations and repeatedly refuse a replacement that actually fits.
+        transaction = controller._transaction(root)
+        if transaction is None:
+            return dict(
+                schema="umi-host-memory-startup/1",
+                stage="host_startup_capacity",
+                status="capacity_required",
+                policy_sha256=controller.policy_sha256,
+                startup_memory_bytes=controller.startup_reservation_bytes,
+                capacity_reserved=False,
+                eta_seconds=None,
+                eta_basis="awaiting_native_capacity_transaction",
+                stalled_or_retrying=True,
+            )
         for slot in controller.policy.slots:
             descriptor = controller._open_slot(root, slot)
             try:
@@ -177,6 +196,8 @@ def probe_startup_reservation(controller):
                 os.close(descriptor)
         containers = controller._model_container_reservations(busy)
     finally:
+        if transaction is not None:
+            os.close(transaction)
         os.close(root)
     available = _available_memory()
     required = (
