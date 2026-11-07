@@ -453,6 +453,22 @@ class RemoteProofStore:
         with journal.read_transaction() as db:
             return self._retained_snapshot(key, db)
 
+    def _validated_retained(self, key: str) -> RemoteProofReference | None:
+        """Select the original receipt and its damage fences in one fresh snapshot."""
+        owner = self.receipt_source or self.journal
+        with (
+            owner.read_transaction() as db,
+            (
+                self.journal.read_transaction()
+                if self.receipt_source is not None
+                else nullcontext(db)
+            ) as damage_db,
+        ):
+            reference = self._retained_snapshot(key, db)
+            if reference is not None:
+                self._require_undamaged(reference, db, damage_db)
+            return reference
+
     def _retained_snapshot(self, key: str, db) -> RemoteProofReference | None:
         """Read completion and original receipt from one caller-owned snapshot."""
         completed = self._completion(key, db)
@@ -778,9 +794,8 @@ class RemoteProofStore:
             self._publication_slot(key, len(raw), progress),
         ):
             with self._lock:
-                prior = self._retained(key)
+                prior = self._validated_retained(key)
                 if prior is not None:
-                    self.validate_reference(prior.model_dump(mode="json", by_alias=True))
                     if (prior.content_sha256, prior.size_bytes) != (sha, len(raw)):
                         raise ValueError("immutable proof index conflicts with its original bytes")
                     progress.advance(len(raw), restored=True)
@@ -1191,12 +1206,10 @@ class RemoteProofStore:
         return self.read_path("objects/" + sha256, maximum=maximum, expected_sha256=sha256)
 
     def reference_for_path(self, path: str) -> dict | None:
-        reference = self._retained(self._key(path))
+        reference = self._validated_retained(self._key(path))
         if reference is None:
             return None
-        value = reference.model_dump(mode="json", by_alias=True)
-        self.validate_reference(value)
-        return value
+        return reference.model_dump(mode="json", by_alias=True)
 
     def evict_cache(self) -> int:
         with self._lock, TransferProgress("proof_cache_eviction", 1, unit="objects") as progress:
