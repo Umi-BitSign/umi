@@ -1,6 +1,7 @@
 """Exact immutable transport, bounded leases and persistent owner repair fences."""
 
 import hashlib
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
@@ -101,6 +102,54 @@ def config(root: Path, *, read_only=False, prefix="proofs"):
 
 def store(root, server, **kwargs):
     return RemoteProofStore(root, config(root.parent, **kwargs), client=server.client())
+
+
+@pytest.mark.parametrize("independent_reader", [False, True])
+def test_path_receipt_uses_one_fresh_snapshot_and_observes_later_damage(
+    tmp_path, monkeypatch, independent_reader
+):
+    server = EvidenceServer()
+    owner = store(tmp_path / "owner", server)
+    reference = owner.put_bytes(b"retained exact bytes")
+    reader = (
+        RemoteProofStore(
+            tmp_path / "reader",
+            config(tmp_path, read_only=True),
+            client=server.client(),
+            receipt_source_directory=owner.journal.root,
+        )
+        if independent_reader
+        else owner
+    )
+    journals = [reader.journal]
+    if independent_reader:
+        journals.append(reader.receipt_source)
+    counts = [0] * len(journals)
+
+    def counted(original, index):
+        @contextmanager
+        def transaction():
+            counts[index] += 1
+            with original() as db:
+                yield db
+
+        return transaction
+
+    for index, journal in enumerate(journals):
+        monkeypatch.setattr(journal, "read_transaction", counted(journal.read_transaction, index))
+    server.calls.clear()
+    path = reference["key"].removeprefix("proofs/")
+    assert reader.reference_for_path(path) == reference
+    assert counts == [1] * len(journals)
+    # A completed lookup must not become a cached verdict. Both the producer's
+    # original ledger and an independent reader's local damage fence still apply.
+    reader._hold(reader.validate_reference(reference))
+    with pytest.raises(ValueError, match="explicit original-generation repair"):
+        reader.reference_for_path(path)
+    if not independent_reader:
+        with pytest.raises(ValueError, match="explicit original-generation repair"):
+            reader.put_bytes(b"retained exact bytes")
+    assert not server.calls
 
 
 @pytest.mark.parametrize("size", [8, 4096, 4097])
