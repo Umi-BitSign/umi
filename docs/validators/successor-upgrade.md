@@ -95,6 +95,24 @@ prepared; retained orders keep their original bytes and observations on retry.
 
 ## Supervisor maintenance for an installed successor
 
+The native `hold_legacy_preparation_providers` assembly uses the same provider
+constructor as the standing writer. Its caller must supply authenticated boot
+and host inputs, an independently admitted private state directory and supervised
+shutdown. It relocates only writable finality and historical-header state;
+original chain configurations, native binaries and proof rules remain selected.
+Protected service stores, wallets and executable inputs cannot overlap that root.
+Constructor failures and cancellation drain before owned providers close. Retain
+the private state for retries. Use the installed supervisor command with `--prepare-legacy-provider-root` and
+the exact admitted private directory. This mode selects the approved standing
+boot, loads the existing immutable installation mounts and checks the retained
+handoff intent before opening providers. It uses the same adapter/runtime limits
+as final handoff, takes no startup lease and does not stop the worker. Its JSON
+result reports `legacy_prepared` with `writer_authority: false`; an interrupted
+run drains owned work and retains successful checkpoints. The updater must run
+and verify this preparation under supervised resource admission before taking
+ServiceHold. CLI availability alone does not establish installed preparation,
+finality startup reuse or completed handoff qualification.
+
 ### Challenge execution lanes
 
 The host's model lane ceiling comes from the available CPU affinity and cgroup

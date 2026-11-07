@@ -5,7 +5,8 @@ import hashlib
 import json
 import logging
 import os
-from contextlib import contextmanager
+import threading
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -799,6 +800,205 @@ async def test_history_repair_refuses_missing_standing_selection(host, monkeypat
             history_repair=dict(through_block=200, reason="original restored"),
         )
     assert host.events == ["read-config", "load-anchor", "verify-anchor-host"]
+
+
+@pytest.mark.parametrize("failure", [None, "audit", "cancel"])
+async def test_legacy_preparation_loads_real_inputs_before_independent_providers(
+    host, monkeypatch, tmp_path, failure
+):
+    from umi import competition_reward_boot as boot
+    from umi import competition_reward_handoff as handoff
+    from umi import competition_reward_handoff_preparation as preparation
+
+    standing, providers = object(), object()
+    directory = tmp_path / "independent-providers"
+    host.inputs.receipt_sha256 = "ab" * 32
+    host.inputs.host_manifest_sha256 = "cd" * 32
+    host.inputs.recheck = lambda: host.events.append("recheck-installation")
+
+    def select(path, anchor, **kwargs):
+        anchor.receipt_sha256 = host.inputs.receipt_sha256
+        anchor.receipt = SimpleNamespace(host_manifest_sha256=host.inputs.host_manifest_sha256)
+        host.events.append("standing-approval")
+        return standing
+
+    def intent(installation, limits):
+        assert installation is host.inputs
+        assert limits == cli._runtime_limits()
+        host.events.append("retained-intent")
+
+    @asynccontextmanager
+    async def owned(config, selected_host, selected_directory):
+        assert config is standing and selected_host is host.inputs.config
+        assert selected_directory == directory
+        host.events.append("providers")
+        try:
+            yield providers
+        finally:
+            host.events.append("close-providers")
+
+    async def prepare(installation, **kwargs):
+        assert installation is host.inputs
+        assert kwargs == dict(
+            runtime_limits=cli._runtime_limits(),
+            adapter_limits=cli._adapter_limits(),
+            providers=providers,
+        )
+        host.events.append("prepare")
+        if failure == "audit":
+            raise ValueError("fixture audit failure")
+        if failure == "cancel":
+            raise asyncio.CancelledError
+        return preparation.LegacyHandoffPreparationResult("ab" * 32, "cd" * 32, 449, 170)
+
+    monkeypatch.setattr(boot, "select_standing_boot", select)
+    monkeypatch.setattr(boot, "hold_legacy_preparation_providers", owned)
+    monkeypatch.setattr(handoff, "read_retained_handoff_intent", intent)
+    monkeypatch.setattr(preparation, "prepare_retained_legacy_handoff", prepare)
+
+    async def run():
+        return await cli.run_supervisor(
+            Path("/etc/umi/supervisor.json"),
+            stop_event=host.stop,
+            legacy_preparation_directory=directory,
+        )
+
+    if failure:
+        with pytest.raises(asyncio.CancelledError if failure == "cancel" else ValueError):
+            await run()
+    else:
+        result = await run()
+        assert result == dict(
+            status="legacy_prepared",
+            writer_authority=False,
+            intent_sha256="ab" * 32,
+            inventory_sha256="cd" * 32,
+            attempts=449,
+            through_block=170,
+        )
+    assert host.events == [
+        "read-config",
+        "load-anchor",
+        "verify-anchor-host",
+        "standing-approval",
+        "load-seal",
+        "verify-host",
+        "retained-intent",
+        "recheck-anchor",
+        "providers",
+        "prepare",
+        *([] if failure else ["recheck-anchor", "recheck-installation"]),
+        "close-providers",
+    ]
+
+
+@pytest.mark.parametrize("failure", ["receipt", "manifest", "intent", "missing_boot"])
+async def test_legacy_preparation_refuses_before_providers_or_writer_ownership(
+    host, monkeypatch, tmp_path, failure
+):
+    from umi import competition_reward_boot as boot
+    from umi import competition_reward_handoff as handoff
+
+    host.inputs.receipt_sha256 = "ab" * 32
+    host.inputs.host_manifest_sha256 = "cd" * 32
+
+    def select(path, anchor, **kwargs):
+        anchor.receipt_sha256 = "ef" * 32 if failure == "receipt" else "ab" * 32
+        anchor.receipt = SimpleNamespace(
+            host_manifest_sha256="ef" * 32 if failure == "manifest" else "cd" * 32
+        )
+        return None if failure == "missing_boot" else object()
+
+    def intent(*args):
+        raise ValueError("fixture missing retained intent")
+
+    def forbidden(*args):
+        pytest.fail("refused preparation acquired writable ownership")
+
+    monkeypatch.setattr(boot, "select_standing_boot", select)
+    monkeypatch.setattr(boot, "hold_legacy_preparation_providers", forbidden)
+    monkeypatch.setattr(handoff, "read_retained_handoff_intent", intent)
+    monkeypatch.setattr(cli, "hold_successor_startup_lease", forbidden)
+    with pytest.raises(ValueError):
+        await cli.run_supervisor(
+            Path("/etc/umi/supervisor.json"),
+            stop_event=host.stop,
+            legacy_preparation_directory=tmp_path / "providers",
+        )
+    assert "stop-startup-worker" not in host.events
+
+
+def test_legacy_preparation_cli_dispatch_and_conflicting_repair(monkeypatch, capsys):
+    captured = []
+
+    async def run(path, **kwargs):
+        captured.append(kwargs)
+        return dict(status="legacy_prepared", writer_authority=False)
+
+    monkeypatch.setattr(cli, "run_supervisor", run)
+    args = ["--config", "/etc/umi/supervisor.json", "--prepare-legacy-provider-root", "/state/prep"]
+    assert cli.run_cli(args) == 0
+    assert captured == [dict(legacy_preparation_directory=Path("/state/prep"))]
+    assert json.loads(capsys.readouterr().out) == dict(
+        status="legacy_prepared", writer_authority=False
+    )
+    for extra in (["--repair-history"], ["--reason", "repair"], ["--repair-credit"]):
+        with pytest.raises(SystemExit) as error:
+            cli.run_cli([*args, *extra])
+        assert error.value.code == 2
+    assert len(captured) == 1
+
+    async def interrupted(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(cli, "run_supervisor", interrupted)
+    assert cli.run_cli(args) == 130
+    assert json.loads(capsys.readouterr().out) == {"status": "interrupted"}
+
+
+async def test_cancelled_preparation_input_load_drains_before_receipt_scope_closes(
+    host, monkeypatch, tmp_path
+):
+    from umi import competition_reward_boot as boot
+
+    entered, release = threading.Event(), threading.Event()
+    closed = []
+
+    def load():
+        entered.set()
+        assert release.wait(10)
+        return host.inputs
+
+    @contextmanager
+    def receipts(**kwargs):
+        try:
+            yield
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(boot, "select_standing_boot", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "package_verification_session", receipts)
+    monkeypatch.setattr(cli, "load_successor_worker_inputs", load)
+    task = asyncio.create_task(
+        cli.run_supervisor(
+            Path("/etc/umi/supervisor.json"),
+            stop_event=host.stop,
+            legacy_preparation_directory=tmp_path / "providers",
+        )
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 10)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done() and not closed
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert closed == [True]
+        assert "lock" not in host.events and "stop-startup-worker" not in host.events
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.parametrize(

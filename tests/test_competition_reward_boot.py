@@ -8,6 +8,7 @@ These do not establish live chain effects or a deployed production migration.
 import asyncio
 import hashlib
 import os
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -559,6 +560,166 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
         await boot.run_installed_standing_rewards(runtime, selected, asyncio.Event())
     assert events[0] == "lease"
     assert events[-len(providers) :] == [("closed", digest(p.config)) for p in reversed(providers)]
+
+
+@pytest.mark.parametrize("failure", [None, "start", "body", "cancel"])
+async def test_preparation_providers_preserve_chain_and_own_disjoint_state(
+    inputs, monkeypatch, tmp_path, failure
+):
+    i = inputs
+    directory = tmp_path / "preparation-providers"
+    directory.mkdir(mode=0o700)
+    events, providers = [], []
+
+    class Provider:
+        def __init__(self, chain, policy, **kwargs):
+            self.config, self.policy, self.kwargs = chain, policy, kwargs
+            providers.append(self)
+
+        async def start(self):
+            events.append("start")
+            if failure == "start":
+                raise RuntimeError("fixture start failure")
+
+        async def aclose(self):
+            events.append("close")
+
+    monkeypatch.setattr(boot, "HistoricalRewardControlProvider", Provider)
+
+    async def run():
+        async with boot.hold_legacy_preparation_providers(
+            i.value, i.anchor.config, directory
+        ) as selected:
+            assert list(selected) == [digest(c.chain) for c in i.value.legacy_chains]
+            original = i.value.legacy_chains[0]
+            provider = providers[0]
+            assert provider.config is original.chain
+            assert provider.policy is i.value.legacy_policy
+            expected = directory / digest(original.chain)
+            locations = provider.kwargs["resources"]
+            assert locations.state_directory == str(expected / "chain")
+            for name in CompetitionChainResources.model_fields:
+                if name != "state_directory":
+                    assert getattr(locations, name) == getattr(original.resources, name)
+            assert provider.kwargs["historical_header_directory"] == expected / "headers"
+            assert provider.kwargs["runtime_proof_reads"] is False
+            assert (
+                provider.kwargs["historical_header_maximum_bytes"] == i.value.maximum_header_bytes
+            )
+            assert provider.kwargs["historical_header_database_maximum_bytes"] == (
+                i.value.maximum_header_database_bytes
+            )
+            assert original.resources.state_directory != locations.state_directory
+            if failure == "body":
+                raise RuntimeError("fixture body failure")
+            if failure == "cancel":
+                raise asyncio.CancelledError
+
+    if failure:
+        with pytest.raises(asyncio.CancelledError if failure == "cancel" else RuntimeError):
+            await run()
+    else:
+        await run()
+        # Retry keeps exact private state locations without touching writer stores.
+        await run()
+        assert providers[0].kwargs == providers[1].kwargs
+    assert events == ["start", "close"] * (2 if failure is None else 1)
+
+
+@pytest.mark.parametrize("route", ["state_root", "legacy", "parent", "symlink", "mode"])
+async def test_preparation_provider_routes_refuse_before_construction(
+    inputs, monkeypatch, tmp_path, route
+):
+    i = inputs
+    directory = tmp_path / "preparation-providers"
+    directory.mkdir(mode=0o700)
+    if route == "state_root":
+        directory = Path(i.anchor.config.state_root)
+        directory.mkdir(mode=0o700)
+    elif route == "legacy":
+        directory = Path(i.value.legacy_chains[0].resources.state_directory)
+        directory.mkdir(mode=0o700, exist_ok=True)
+    elif route == "parent":
+        directory = tmp_path
+    elif route == "symlink":
+        alias = tmp_path / "alias"
+        alias.symlink_to(directory, target_is_directory=True)
+        directory = alias
+    else:
+        directory.chmod(0o755)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unsafe preparation constructed a provider")
+
+    monkeypatch.setattr(boot, "HistoricalRewardControlProvider", forbidden)
+    with pytest.raises((ValueError, OSError)):
+        async with boot.hold_legacy_preparation_providers(i.value, i.anchor.config, directory):
+            pytest.fail("unsafe preparation yielded")
+
+
+async def test_cancelled_provider_constructor_drains_and_closes_before_return(
+    inputs, monkeypatch, tmp_path
+):
+    directory = tmp_path / "preparation-providers"
+    directory.mkdir(mode=0o700)
+    entered, release = threading.Event(), threading.Event()
+    closed = asyncio.Event()
+
+    class Provider:
+        def __init__(self, *args, **kwargs):
+            entered.set()
+            assert release.wait(10)
+
+        async def start(self):
+            pytest.fail("cancelled construction must not start")
+
+        async def aclose(self):
+            closed.set()
+
+    monkeypatch.setattr(boot, "HistoricalRewardControlProvider", Provider)
+
+    async def run():
+        async with boot.hold_legacy_preparation_providers(
+            inputs.value, inputs.anchor.config, directory
+        ):
+            pytest.fail("cancelled construction must not yield")
+
+    task = asyncio.create_task(run())
+    try:
+        assert await asyncio.to_thread(entered.wait, 10)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert closed.is_set()
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_preparation_observer_failure_drains_inflight_audit():
+    entered, drained = asyncio.Event(), asyncio.Event()
+    cause = ValueError("fixture observer exit")
+
+    class Provider:
+        def ensure_observer_running(self):
+            assert entered.is_set()
+            raise RuntimeError("owned_finality_observer_stopped") from cause
+
+    async def audit():
+        try:
+            entered.set()
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            drained.set()
+
+    with pytest.raises(RuntimeError, match="owned_finality_observer_stopped") as error:
+        await boot.run_legacy_preparation_with_providers({"original": Provider()}, audit())
+    assert error.value.__cause__ is cause
+    assert drained.is_set()
 
 
 async def test_successor_native_assembly_reconstructs_predecessor_owners(inputs, monkeypatch):
