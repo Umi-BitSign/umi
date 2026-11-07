@@ -5860,6 +5860,17 @@ Exceeding the profile or losing a completed count is a pending capacity/repair
 condition, reported as retryable HTTP 503 where applicable. It is not a failed
 model score. A single-graph measurement does not qualify a concurrent batch.
 
+An HTTP-only scheduling update can retain completed input counts by selecting
+`count_reuse_profile: {path, sha256}` in the new workload profile. Point directly
+to the original immutable profile whose counts are retained. Only simultaneous
+HTTP requests, queued input bytes and the qualification digest may differ;
+authority, decoding bounds, roles, preparation workers and receipt storage must
+match. The reader rejects changed originals and reference chains. Keep that
+original profile while any selected consumer uses its counts. Later HTTP updates
+reuse the same original reference. Install the compatible reader before selecting
+this optional field; older profiles preserve their serialized fields unchanged.
+Qualify concurrent work under the selected service cap before increasing limits.
+
 Every grant accounts for the other occupied slots, background allowance and
 surviving container ceilings. A populated model container whose lease has ended
 blocks the next shared transient grant even if memory is otherwise available.

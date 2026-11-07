@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import sqlite3
+from copy import deepcopy
 from functools import partial
 from pathlib import Path
 
@@ -459,3 +460,106 @@ async def test_review_ingress_reports_pending_before_schema_decoding(profile):
         await router.routes[0].endpoint(request)
     assert caught.value.status_code == 503
     assert exporter.calls == 0
+
+
+def test_legacy_profile_serialization_preserves_exact_fields(profile):
+    assert profile[0].profile.model_dump(mode="json", by_alias=True) == profile[3]
+
+
+def test_http_only_profile_reuses_original_counts_across_restart_and_later_selection(
+    profile, tmp_path, monkeypatch
+):
+    loaded, original, binding, body = profile
+    raw = b'{"records":[{"result":"unchanged"}]}'
+    trusted = identity(raw)
+    with workload.workload_runtime(loaded):
+        count = workload.check_workload_input(raw, identity=trusted)
+    native_hash = hashlib.sha256
+
+    def no_payload_hash(value=b"", *args, **kwargs):
+        assert value != raw
+        return native_hash(value, *args, **kwargs)
+
+    monkeypatch.setattr(workload.hashlib, "sha256", no_payload_hash)
+    monkeypatch.setattr(
+        workload, "count_json_shape", lambda *a, **k: pytest.fail("completed input rescanned")
+    )
+    for inflight in (3, 4):
+        candidate = dict(
+            body,
+            maximum_http_inflight=inflight,
+            maximum_queued_input_bytes=inflight * body["maximum_queued_input_bytes"],
+            qualification_sha256=str(inflight) * 64,
+            count_reuse_profile=original.model_dump(),
+        )
+        selected = write_profile(tmp_path / f"http-{inflight}.json", candidate)
+        for _ in range(2):
+            restarted = workload.load_workload_profile(selected, binding)
+            assert restarted.sha256 == selected.sha256 != original.sha256
+            assert restarted.count_profile_sha256 == original.sha256
+            with workload.workload_runtime(restarted):
+                assert workload.check_workload_input(raw, identity=trusted) == count
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "bounds",
+        "receipt_directories",
+        "maximum_receipt_entries",
+        "roles",
+        "maximum_preparation_workers",
+    ],
+)
+def test_http_count_reuse_refuses_changed_non_http_dependencies(profile, tmp_path, field):
+    _, original, binding, body = profile
+    candidate = deepcopy(body)
+    candidate["count_reuse_profile"] = original.model_dump()
+    if field == "bounds":
+        candidate[field]["maximum_records"] += 1
+    elif field == "receipt_directories":
+        candidate[field][str(os.getuid())] = str(tmp_path / "other-counts")
+    elif field == "roles":
+        candidate[field] = ["phase_reviewer"]
+    else:
+        candidate[field] += 1
+    selected = write_profile(tmp_path / "changed.json", candidate)
+    with pytest.raises(workload.WorkloadQualificationPending, match="dependencies_changed"):
+        workload.load_workload_profile(selected, binding)
+
+
+def test_http_count_reuse_refuses_changed_original_and_reference_chains(profile, tmp_path):
+    _, original, binding, body = profile
+    successor_body = dict(body, count_reuse_profile=original.model_dump(), maximum_http_inflight=3)
+    successor = write_profile(tmp_path / "successor.json", successor_body)
+    chained = write_profile(
+        tmp_path / "chained.json", dict(body, count_reuse_profile=successor.model_dump())
+    )
+    with pytest.raises(workload.WorkloadQualificationPending, match="dependencies_changed"):
+        workload.load_workload_profile(chained, binding)
+    write_profile(Path(original.path), dict(body, qualification_sha256="9" * 64))
+    with pytest.raises(workload.WorkloadQualificationPending, match="profile_changed"):
+        workload.load_workload_profile(successor, binding)
+
+
+def test_http_count_reuse_keeps_damaged_completion_an_explicit_repair(
+    profile, tmp_path, monkeypatch
+):
+    loaded, original, binding, body = profile
+    raw = b"[1]"
+    with workload.workload_runtime(loaded):
+        workload.check_workload_input(raw, identity=identity(raw))
+    with sqlite3.connect(loaded.counts.path) as db:
+        db.execute("DELETE FROM counts")
+    selected = write_profile(
+        tmp_path / "http.json",
+        dict(body, count_reuse_profile=original.model_dump(), maximum_http_inflight=3),
+    )
+    monkeypatch.setattr(
+        workload, "count_json_shape", lambda *a, **k: pytest.fail("repair rescanned")
+    )
+    with (
+        workload.workload_runtime(workload.load_workload_profile(selected, binding)),
+        pytest.raises(workload.WorkloadQualificationPending),
+    ):
+        workload.check_workload_input(raw, identity=identity(raw))
