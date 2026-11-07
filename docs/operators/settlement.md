@@ -6044,6 +6044,12 @@ the sum of isolated peaks can block its own dependencies. Verify startup, steady
 state, replica restart and recovery under the actual account/mount/cgroup limits
 before cutover; do not infer these bounds from aggregate file sizes alone.
 
+Graph work and model inference sharing a transient slot retry admission at the
+same 100 ms interval. This avoids giving graph consumers a faster polling cadence;
+it does not provide FIFO scheduling or reserve a slot for inference. When diagnosing
+evaluation throughput, separate model subprocess time, capacity waits and authority
+work. An idle model CPU can still be waiting for another consumer's memory lease.
+
 
 ### Retained request owner repair diagnostics
 

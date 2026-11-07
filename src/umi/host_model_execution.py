@@ -14,6 +14,7 @@ from pydantic import Field, model_serializer, model_validator
 from .competition_transport_verification import TransferProgress
 from .host_cpu_timing import CpuTimingHostSelection, CpuTimingSession, load_cpu_timing_profile
 from .host_memory_admission import (
+    CAPACITY_RETRY_SECONDS,
     AdmissionBindingError,
     HostMemoryAdmission,
     HostMemoryFile,
@@ -318,7 +319,10 @@ class ModelExecutionAdmission:
                         self.controller, lane=lane, count=count, started=started, state="waiting"
                     )
                     last_wait = now
-                await asyncio.sleep(0.5)
+                # Model and graph work compete for the same native slot. Use
+                # the same retry cadence so inference does not sample each
+                # released slot five times less often than graph consumers.
+                await asyncio.sleep(CAPACITY_RETRY_SECONDS)
             progress.advance(count)
         try:
             token = (

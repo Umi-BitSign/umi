@@ -214,6 +214,9 @@ startup envelope needs separate qualification of those allocations.
 
 Timed inference also requires a matching qualified CPU slot for every admitted
 model slot. More benchmark tasks or unused memory slots do not add timed capacity.
+Shared-slot graph and inference readers use the same 100 ms capacity retry
+interval. Carry both readers through the supported source update; this scheduling
+change preserves existing policies, resource limits and retained timing evidence.
 Keep completed baseline observations only when their measurement profile remains
 identical. Qualify simultaneous load, cold-cache isolation and cancellation/orphan
 cleanup under the actual service limits before selecting additional CPU slots.

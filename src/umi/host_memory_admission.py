@@ -30,6 +30,7 @@ from .protocol import StrictProtocolModel
 
 Lane = Literal["owner_export", "transient", "settlement_retained"]
 MINIMUM_AVAILABLE_BYTES = 24 * 1024**3
+CAPACITY_RETRY_SECONDS = 0.1
 _MAX_POLICY_BYTES = 64 * 1024
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -990,7 +991,7 @@ class HostMemoryAdmission:
                     last_report = now
             if lease is not None:
                 return lease
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(CAPACITY_RETRY_SECONDS)
 
     @asynccontextmanager
     async def hold(self, lane: Lane):
