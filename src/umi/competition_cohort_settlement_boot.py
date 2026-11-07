@@ -37,7 +37,12 @@ from .competition_store import CompetitionStore
 from .competition_transport_verification import TransferProgress
 from .concurrency import run_owned_thread
 from .host_memory_runtime import memory_runtime
-from .host_memory_startup import complete_memory_startup, memory_startup
+from .host_memory_startup import (
+    HostStartupStopped,
+    check_startup_stop,
+    complete_memory_startup,
+    memory_startup,
+)
 from .named_hotkey import load_named_hotkey
 from .open_competition import digest, sign_object
 from .private_files import ensure_private_directory, lock_private_file, read_private_model
@@ -151,6 +156,15 @@ def settlement_store(root: Path, maximum_bytes: int):
 
 
 async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.Event):
+    try:
+        await _run_settlement_service(config, stop)
+    except HostStartupStopped:
+        if not stop.is_set():
+            raise
+
+
+async def _run_settlement_service(config: SettlementServiceConfig, stop: asyncio.Event):
+    check_startup_stop(stop)
     config = SettlementServiceConfig.model_validate_json(canonical_json_bytes(config))
     root = Path(config.state_directory) / digest(config.series)
     ensure_private_directory(root)
@@ -168,7 +182,7 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
                 authority_sha256=digest(config.series.recovery.authority),
             )
         )
-        startup = await resources.enter_async_context(memory_startup(memory))
+        startup = await resources.enter_async_context(memory_startup(memory, stop=stop))
         legacy_sources = await run_owned_thread(
             lambda: authenticate_legacy_model_sources(
                 config.legacy_model_storage,
@@ -178,6 +192,7 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
                 original_verification_directory=root / "legacy-original-verification",
             )
         )
+        check_startup_stop(stop)
         if memory is not None and {digest(p) for p in config.series.cohorts} != {
             signal.cohort_sha256 for signal in memory.policy.settlement_signals
         }:

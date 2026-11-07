@@ -224,6 +224,12 @@ and namespace before handoff; do not add this field to an older installed reader
 Reviewer, settlement and supervisor CLI logs include native finality audit counts,
 repair reasons and ETAs. An initial frontier enrollment may precede readiness;
 later starts reuse its retained completion when its dependencies are unchanged.
+Phase-review and settlement hosts honor the operator stop event while waiting
+for a construction lease. They exit without constructing another provider or
+claiming capacity after the stop. Work already running in an owned thread still
+drains before its resources are released; this does not impose an audit timeout.
+Deliver this behavior through the same supported cohort source update on each
+validator. Miner configuration and signed cohort inputs are unchanged.
 
 Timed inference also requires a matching qualified CPU slot for every admitted
 model slot. More benchmark tasks or unused memory slots do not add timed capacity.

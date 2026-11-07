@@ -26,6 +26,15 @@ from .host_memory_admission import (
 _active = ContextVar("host_startup_reservation", default=None)
 
 
+class HostStartupStopped(Exception):
+    """The operator stopped construction before it acquired host capacity."""
+
+
+def check_startup_stop(stop):
+    if stop is not None and stop.is_set():
+        raise HostStartupStopped
+
+
 def enforced_service_limit():
     membership = Path("/proc/self/cgroup").read_text().strip()
     if not membership.startswith("0::/") or "\n" in membership:
@@ -88,12 +97,19 @@ def _selected(controller):
 
 
 @asynccontextmanager
-async def memory_startup(controller):
+async def memory_startup(controller, *, stop=None):
+    check_startup_stop(stop)
     if not _selected(controller):
         yield None
         return
     with TransferProgress("host_startup_capacity", 1, unit="hosts") as progress:
-        lease = await controller.acquire("transient")
+        lease = (
+            await controller.acquire("transient")
+            if stop is None
+            else await controller.acquire("transient", stop=stop)
+        )
+        if lease is None:
+            raise HostStartupStopped
         progress.advance(1)
     reservation = StartupReservation(controller, lease)
     token = _active.set(reservation)

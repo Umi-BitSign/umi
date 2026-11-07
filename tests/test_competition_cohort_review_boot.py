@@ -153,6 +153,20 @@ async def test_reserved_startup_covers_provider_and_benchmark_then_releases(
     assert observed == ["reserved", "reserved"]
     assert providers.events.count("started") == providers.events.count("closed") == 2
 
+    # An independent lease owner must not delay this service's operator stop.
+    held = controller.try_acquire("transient")
+    assert held is not None
+    stop = asyncio.Event()
+    task = asyncio.create_task(boot.run_phase_review_service(c, stop))
+    try:
+        await asyncio.sleep(0)
+        stop.set()
+        await asyncio.wait_for(task, timeout=1)
+        assert observed == ["reserved", "reserved"]
+        os.close(lock_private_file(Path(c.signing.directory) / "service.lock"))
+    finally:
+        held.close()
+
 
 @pytest.fixture
 def selected(inputs, tmp_path):

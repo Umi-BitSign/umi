@@ -100,6 +100,48 @@ async def test_waiter_cancellation_and_construction_failure_leave_no_grants(rese
     assert not entered.is_set() and startup.current_startup_reservation() is None
 
 
+@pytest.mark.parametrize("already_stopped", [False, True])
+async def test_operator_stop_abandons_capacity_wait_without_waiting_for_owner(
+    reserved, already_stopped
+):
+    _, runtime = reserved
+    stop = asyncio.Event()
+    if already_stopped:
+        stop.set()
+
+    async def another_host():
+        with runtime() as controller, pytest.raises(startup.HostStartupStopped):
+            async with startup.memory_startup(controller, stop=stop):
+                pytest.fail("stopped host constructed")
+
+    with runtime() as owner:
+        async with startup.memory_startup(owner):
+            waiter = contextvars.Context().run(asyncio.create_task, another_host())
+            await asyncio.sleep(0)
+            stop.set()
+            await asyncio.wait_for(waiter, timeout=1)
+            assert owner.try_acquire("transient") is None
+        lease = owner.try_acquire("transient")
+        assert lease is not None
+        lease.close()
+
+
+async def test_operator_stop_wins_when_capacity_becomes_free(reserved):
+    _, runtime = reserved
+    stop = asyncio.Event()
+    with runtime() as controller:
+        held = controller.try_acquire("transient")
+        assert held is not None
+        task = asyncio.create_task(controller.acquire("transient", stop=stop))
+        await asyncio.sleep(0)
+        held.close()
+        stop.set()
+        assert await asyncio.wait_for(task, timeout=1) is None
+        lease = controller.try_acquire("transient")
+        assert lease is not None
+        lease.close()
+
+
 async def test_service_cap_above_measured_budget_refuses_before_allocation(reserved, monkeypatch):
     _, runtime = reserved
     monkeypatch.setattr(startup, "enforced_service_limit", lambda: 9 * GIB)

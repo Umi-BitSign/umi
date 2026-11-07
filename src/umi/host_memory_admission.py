@@ -957,12 +957,14 @@ class HostMemoryAdmission:
             os.close(parent)
 
     async def acquire(
-        self, lane: Lane, *, operation=None, cohort=None, phase=None
-    ) -> HostMemoryLease:
+        self, lane: Lane, *, operation=None, cohort=None, phase=None, stop=None
+    ) -> HostMemoryLease | None:
         # No blocking flock in a worker thread: cancellation cannot leave a
         # future acquisition running after the waiter has abandoned ownership.
         started, last_report = time.monotonic(), None
         while True:
+            if stop is not None and stop.is_set():
+                return None
             lease = (
                 self.try_acquire(lane, operation=operation, cohort=cohort, phase=phase)
                 if self.requests_stage
@@ -1003,7 +1005,11 @@ class HostMemoryAdmission:
                     last_report = now
             if lease is not None:
                 return lease
-            await asyncio.sleep(CAPACITY_RETRY_SECONDS)
+            if stop is None:
+                await asyncio.sleep(CAPACITY_RETRY_SECONDS)
+            else:
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=CAPACITY_RETRY_SECONDS)
 
     @asynccontextmanager
     async def hold(self, lane: Lane):
