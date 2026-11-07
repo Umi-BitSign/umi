@@ -445,16 +445,22 @@ async def test_initial_evidence_audit_resumes_each_item_and_database_check(
 
         monkeypatch.setattr(sqlite3, "connect", tracing)
         remember = handoff.LegacyHandoffVerification.remember
+        interruptions = []
 
         def interrupted(self, stage, key, context, value):
             remember(self, stage, key, context, value)
             if stage == "evidence_frontier" and key == kind and value["completed"] == 1:
+                interruptions.append((stage, key))
                 raise failure("after durable evidence item")
 
         with monkeypatch.context() as patch:
             patch.setattr(handoff.LegacyHandoffVerification, "remember", interrupted)
-            with pytest.raises(failure, match="durable evidence item"):
+            # Python 3.10 may discard a CancelledError's message while an owned
+            # task drains. Assert the injected checkpoint and exception type.
+            match = "durable evidence item" if failure is OSError else None
+            with pytest.raises(failure, match=match):
                 await preparation_module.prepare_retained_legacy_handoff(c.installation, **args)
+        assert interruptions == [("evidence_frontier", kind)]
         result = await preparation_module.prepare_retained_legacy_handoff(c.installation, **args)
         assert result.attempts == 1
         assert len(verified) == len(set(verified))

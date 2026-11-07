@@ -1,5 +1,6 @@
 """Interrupted native startup audits resume only unchanged verified prefixes."""
 
+import gc
 import json
 import logging
 import multiprocessing
@@ -92,6 +93,9 @@ def test_process_death_resumes_upgrade_without_rechecking_prefix(
     assert len(calls) == 3
     assert resumed.persisted_head().height == records[-1].block.number
     assert retained_bytes(port._path)[1:] == original[1:]
+    # Diagnostic readers must not leave writable handles whose eventual
+    # collection checkpoints the WAL behind the native completion record.
+    gc.collect()
     assert (
         _port(tmp_path, observer, chain_observation, **options).persisted_head()
         == resumed.persisted_head()

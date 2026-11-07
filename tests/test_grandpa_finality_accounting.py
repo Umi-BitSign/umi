@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from threading import Barrier
 
 import pytest
@@ -24,7 +24,7 @@ _TABLE = "finality_evidence_accounting"
 
 
 def usage(path):
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as connection:
         return read_usage(connection)
 
 
@@ -41,7 +41,7 @@ def accounting_triggers(connection):
 
 def legacy_database(path):
     """Restore the exact pre-accounting shape, not a broken version-3 store."""
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         for name in accounting_triggers(connection):
             connection.execute('DROP TRIGGER "' + name.replace('"', '""') + '"')
         connection.execute(f"DROP TABLE {_TABLE}")
@@ -50,7 +50,9 @@ def legacy_database(path):
 
 
 def retained_bytes(path):
-    with sqlite3.connect(path) as connection:
+    # A diagnostic read must not leave a writable SQLite handle that can later
+    # checkpoint the WAL during garbage collection or process teardown.
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as connection:
         return (
             connection.execute(
                 "SELECT * FROM store_meta WHERE key!=? ORDER BY key", (_MARKER,)
