@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from umi import competition_reward_handoff as handoff
+from umi import competition_reward_handoff_preparation as preparation_module
 from umi import competition_supervisor_adapters as adapters
 from umi.competition_reward_control_archive import HistoricalRewardControlProvider
 from umi.competition_reward_decisions import RewardActivation
@@ -200,6 +201,128 @@ async def migration(series_case, adapter_case, monkeypatch, request):
 async def signed_attempt(c):
     with pytest.raises(ConnectionError, match="reply lost"):
         await _run(c.item)
+
+
+async def retain_preparation_intent(c, runtime, monkeypatch):
+    monkeypatch.setattr(
+        preparation_module,
+        "validate_authenticated_successor_installation",
+        adapters.validate_authenticated_successor_installation,
+    )
+    monkeypatch.setattr(
+        handoff,
+        "validate_authenticated_successor_installation",
+        adapters.validate_authenticated_successor_installation,
+    )
+    intent = handoff.LegacyRewardHandoffIntent(
+        schema="umi-legacy-reward-handoff-intent/1",
+        plan=c.plan,
+        activation_sha256=digest(c.prepared.activation),
+        installation_receipt_sha256=c.installation.receipt_sha256,
+        validator_hotkey=c.config.validator_hotkey,
+    )
+    async with runtime._mutex:
+        runtime._retain_standing_handoff(intent)
+    return dict(
+        runtime_limits=runtime.limits, adapter_limits=c.adapter.limits, providers=c.providers
+    )
+
+
+@pytest.mark.parametrize("shared_directory", [False, True], ids=["private-root", "shared-root"])
+async def test_readonly_preparation_runs_under_original_locks_and_handoff_reuses_it(
+    migration, monkeypatch, caplog, tmp_path, shared_directory
+):
+    if shared_directory:
+        monkeypatch.setenv(
+            "UMI_NATIVE_VERIFICATION_DIRECTORY", str(tmp_path / "shared-verification")
+        )
+    c = migration
+    await signed_attempt(c)
+    async with c.reopen() as runtime:
+        args = await retain_preparation_intent(c, runtime, monkeypatch)
+        events = list(c.container.events) if hasattr(c.container, "events") else None
+        before = handoff._recovery_journal_snapshot(c.item.worker.path)
+        with Path(c.item.worker.lock_path).open("rb") as lock, caplog.at_level("INFO"):
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = await preparation_module.prepare_retained_legacy_handoff(
+                c.installation, **args
+            )
+            assert_locked(Path(c.config.state_root) / "supervisor-process.lock")
+            assert_locked(c.item.worker.lock_path)
+            runtime._require_lease()
+        assert handoff._recovery_journal_snapshot(c.item.worker.path) == before
+        if events is not None:
+            assert c.container.events == events
+        with pytest.raises(ValueError):
+            c.validate(result)
+        assert result.attempts == 1
+        assert "legacy_handoff_inventory_verified" in caplog.text
+
+        def repeated(*args, **kwargs):
+            pytest.fail("preparation repeated completed inventory or proof work")
+
+        monkeypatch.setattr(handoff, "_attempts", repeated)
+        monkeypatch.setattr(c.adapter, "_verify", repeated)
+        monkeypatch.setattr(preparation_module, "verify_retained_package", repeated)
+        monkeypatch.setattr(preparation_module, "read_retained_adapter_inventory", repeated)
+        monkeypatch.setattr(handoff, "review_legacy_weight_expiry", repeated)
+        restored = await preparation_module.prepare_retained_legacy_handoff(c.installation, **args)
+        assert restored == result
+        async with handoff.hold_legacy_reward_handoff(runtime, **c.args) as leased:
+            c.validate(leased)
+            assert leased.inventory_sha256 == result.inventory_sha256
+    async with c.reopen() as restarted:
+        restarted._require_lease()
+        assert (
+            await preparation_module.prepare_retained_legacy_handoff(c.installation, **args)
+            == result
+        )
+    assert len(c.reviews) == 1
+
+
+@pytest.mark.parametrize("failure", [OSError, asyncio.CancelledError])
+async def test_preparation_resumes_completed_items_after_interrupted_completion(
+    migration, monkeypatch, failure
+):
+    c = migration
+    await signed_attempt(c)
+    async with c.reopen() as runtime:
+        args = await retain_preparation_intent(c, runtime, monkeypatch)
+        original = handoff.LegacyHandoffVerification.remember
+
+        def interrupted(self, stage, *values):
+            if stage == "completion":
+                raise failure("preparation interrupted")
+            return original(self, stage, *values)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(handoff.LegacyHandoffVerification, "remember", interrupted)
+            with pytest.raises(failure, match="preparation interrupted"):
+                await preparation_module.prepare_retained_legacy_handoff(c.installation, **args)
+
+        def repeated(*args, **kwargs):
+            pytest.fail("interruption repeated completed package/expiry verification")
+
+        monkeypatch.setattr(preparation_module, "verify_retained_package", repeated)
+        monkeypatch.setattr(handoff, "review_legacy_weight_expiry", repeated)
+        result = await preparation_module.prepare_retained_legacy_handoff(c.installation, **args)
+        assert result.attempts == 1 and len(c.reviews) == 1
+
+
+async def test_preparation_rejects_changed_source_before_repeating_proofs(migration, monkeypatch):
+    c = migration
+    await signed_attempt(c)
+    async with c.reopen() as runtime:
+        args = await retain_preparation_intent(c, runtime, monkeypatch)
+        await preparation_module.prepare_retained_legacy_handoff(c.installation, **args)
+        c.item.worker.path.touch()
+
+        def repeated(*args, **kwargs):
+            pytest.fail("changed preparation silently replayed old evidence")
+
+        monkeypatch.setattr(handoff, "_attempts", repeated)
+        with pytest.raises(OSError, match="completion_inputs_changed"):
+            await preparation_module.prepare_retained_legacy_handoff(c.installation, **args)
 
 
 def assert_locked(path):

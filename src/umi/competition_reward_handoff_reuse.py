@@ -50,16 +50,26 @@ def snapshot_identity(value):
 
 
 class LegacyHandoffVerification:
-    """Only the native stopped-inventory owner may issue these derived receipts.
+    """Native preparation and the stopped-inventory owner share derived receipts.
 
     Keys preserve unchanged verifier semantics across source upgrades. Contexts
     bind immutable input metadata; a changed or damaged completion requires
     explicit repair, never silent replay of an already completed inventory.
-    The caller still acquires and continuously checks both native process locks.
+    Only the final handoff acquires writer authority under both native process locks.
     """
 
     def __init__(self, runtime, intent):
-        marker = runtime.root / "legacy-handoff-verification.json"
+        self._initialize(runtime.root, runtime._binding, intent)
+
+    @classmethod
+    def _for_preparation(cls, root, runtime_binding, intent):
+        """The native preparer supplies authenticated retained inputs, never a lease."""
+        result = cls.__new__(cls)
+        result._initialize(root, runtime_binding, intent)
+        return result
+
+    def _initialize(self, root, runtime_binding, intent):
+        marker = root / "legacy-handoff-verification.json"
         selected = None
         try:
             selected = json.loads(read_verification_metadata(marker))
@@ -74,15 +84,15 @@ class LegacyHandoffVerification:
         ):
             raise repair_required("verification_directory_missing")
         self.reuse = VerificationReuse(
-            runtime.root / "legacy-handoff-verification",
-            owner={"intent": intent, "runtime_binding": runtime._binding},
+            root / "legacy-handoff-verification",
+            owner={"intent": intent, "runtime_binding": runtime_binding},
         )
         current = {"directory": str(self.reuse.directory), "owner": self.reuse.owner}
         if selected is not None and selected != current:
             raise repair_required("verification_owner_or_directory_changed")
         if selected is None:
             _write_private_bytes(marker, canonical_json_bytes(current))
-            descriptor = os.open(runtime.root, os.O_DIRECTORY | os.O_RDONLY | os.O_NOFOLLOW)
+            descriptor = os.open(root, os.O_DIRECTORY | os.O_RDONLY | os.O_NOFOLLOW)
             try:
                 os.fsync(descriptor)
             finally:

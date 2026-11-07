@@ -1552,6 +1552,22 @@ alongside preparation; the final native handoff still checks selection and fresh
 ownership. These metadata readers are components of preparation, not a complete
 pre-stop preparation command.
 
+The native `prepare_retained_legacy_handoff` API uses these readers and the same
+package, evidence and transaction-expiry verification as final handoff. It accepts
+the authenticated installation, original runtime/adapter limits and independently
+owned, started native providers. It preserves the existing intent and writer
+locks, opens the source journals read-only, and checkpoints successful work under
+the final handoff's original verification owner. Its returned progress summary is
+not a writer capability. Repeated preparation and final handoff reuse completed
+verification after checking unchanged source identities; changed or damaged
+completion needs explicit repair. The supported service command must still own
+provider assembly, resource admission, cancellation and preparation before stopping
+the current writer. Do not construct another provider against its live writable
+cache or treat this library API as an installed supervised update path.
+Package and expiry checkpoints survive interruption; the initial full evidence
+audit currently checkpoints at stage completion. Per-item audit recovery remains
+required before selecting this preparation path for a large retained journal.
+
 During initial history/package replay, the original supervisor continues
 predecessor reconciliation. The durable handoff intent stops that continuation
 before successor signing, including after restart. A failed old feed does not

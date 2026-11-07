@@ -130,8 +130,8 @@ def read_retained_handoff_intent(installation, limits: SuccessorRuntimeLimits):
         return RetainedLegacyHandoffIntent(path, snapshot, binding, intent)
 
 
-def _attempts(db, adapter, *, audit_evidence=True):
-    ceiling = adapter.installation.worker_execution_limits
+def _attempts(db, installation, *, audit_evidence=True):
+    ceiling = installation.worker_execution_limits
     count, maximum = db.execute(
         "SELECT COUNT(*),COALESCE(MAX(length(body)),0) FROM attempts"
     ).fetchone()
@@ -140,7 +140,7 @@ def _attempts(db, adapter, *, audit_evidence=True):
     read = evidence_reader(
         db,
         storage=ceiling.weight_evidence_storage,
-        validator_hotkey=adapter.config.validator_hotkey,
+        validator_hotkey=installation.config.validator_hotkey,
         maximum_attempts=ceiling.maximum_weight_attempts,
         maximum_evidence_bytes=ceiling.maximum_weight_evidence_bytes,
         audit_evidence=audit_evidence,
@@ -153,7 +153,8 @@ def _attempts(db, adapter, *, audit_evidence=True):
         if (
             canonical_json_bytes(item) != raw
             or item.authorization_id != key
-            or account_id32(item.validator_hotkey) != account_id32(adapter.config.validator_hotkey)
+            or account_id32(item.validator_hotkey)
+            != account_id32(installation.config.validator_hotkey)
         ):
             raise ValueError("legacy handoff attempt identity differs")
         attempts.append((raw, item))
@@ -290,7 +291,7 @@ async def hold_legacy_reward_handoff(
             try:
                 with verification.reuse.exclusive():
                     completed = await _verify_inventory(
-                        runtime,
+                        runtime.installation,
                         providers,
                         verification,
                         context,
@@ -302,6 +303,8 @@ async def hold_legacy_reward_handoff(
                         weight_snapshot=weight_snapshot,
                         registry_snapshot=registry_snapshot,
                         minimum_block=prepared.reviewed_at_block,
+                        read_records=adapter._records,
+                        verify_package=adapter._verify,
                     )
                 if (await adapter.container.status()).phase == "running":
                     raise ValueError("legacy worker restarted during handoff review")
@@ -317,7 +320,7 @@ async def hold_legacy_reward_handoff(
 
 
 async def _verify_inventory(
-    runtime,
+    installation,
     providers,
     verification,
     context,
@@ -330,9 +333,10 @@ async def _verify_inventory(
     weight_snapshot,
     registry_snapshot,
     minimum_block,
+    read_records,
+    verify_package,
 ):
     """Checkpoint native verification without granting writer ownership."""
-    adapter = runtime.adapter
     if completed is not None:
         with WorkProgress("legacy_handoff_restoration", 1, unit="inventories") as meter:
             packages.update(
@@ -350,7 +354,7 @@ async def _verify_inventory(
         _LOG.info("legacy_handoff_inventory_restored attempts=%d", completed["attempts"])
         return completed
     with WorkProgress("legacy_handoff_inventory_audit", 1, unit="inventories") as meter:
-        attempts, read = _attempts(db, adapter, audit_evidence=audited is None)
+        attempts, read = _attempts(db, installation, audit_evidence=audited is None)
         recheck()
         if audited is None:
             verification.remember("evidence_audit", "inventory", context, {"complete": True})
@@ -358,7 +362,7 @@ async def _verify_inventory(
     _LOG.info("legacy_handoff_inventory attempts=%d", len(attempts))
     targets = {}
     replay = RecoveryPackageReplay()
-    records = adapter._records()
+    records = read_records()
     with (
         work_heartbeats(),
         WorkProgress("legacy_handoff_packages", len(records), unit="runs") as progress,
@@ -369,11 +373,11 @@ async def _verify_inventory(
                 "snapshot": snapshot_identity(snapshot),
                 "registry": snapshot_identity(registry_snapshot),
                 "selection": selection.directive_sha256,
-                "installation": adapter.installation.receipt_sha256,
+                "installation": installation.receipt_sha256,
             }
             retained = verification.load("package", selection.directive_sha256, package_context)
             if retained is None:
-                checked = adapter._verify(
+                checked = verify_package(
                     selection,
                     files,
                     recovery_packages=replay,
@@ -416,13 +420,14 @@ async def _verify_inventory(
                     item.chain_config_sha256,
                     item.era_death - item.preflight_block,
                 )
-                or item.recovery_checkpoint_sha256 != adapter.installation.checkpoint_sha256
+                or item.recovery_checkpoint_sha256 != installation.checkpoint_sha256
             ):
                 raise ValueError("legacy attempt lacks its exact retained authority")
             if item.signed_extrinsic is None:
                 # The original worker durably saves exact signed bytes
-                # before broadcasting. Under its continuously held lock,
-                # an unsigned intention cannot create a future effect.
+                # before broadcasting. Preparation binds the unchanged source;
+                # final handoff also holds the original lock, so an unsigned
+                # intention cannot create a future effect under that lease.
                 # Recovery may have changed its local phase to unknown
                 # or expired; neither label is used as an expiry proof.
                 recheck()
@@ -451,7 +456,7 @@ async def _verify_inventory(
                     attempt=raw,
                     chain=chain,
                     metadata=metadata,
-                    validator_hotkey=runtime.config.validator_hotkey,
+                    validator_hotkey=installation.config.validator_hotkey,
                 )
                 if result is None:
                     raise ValueError("legacy transaction remains live; handoff is pending")
@@ -459,7 +464,7 @@ async def _verify_inventory(
                     result,
                     attempt=raw,
                     chain_config_sha256=item.chain_config_sha256,
-                    validator_hotkey=runtime.config.validator_hotkey,
+                    validator_hotkey=installation.config.validator_hotkey,
                 )
                 recheck()
                 retained = {"finalized_block": result.finalized.block_number}
