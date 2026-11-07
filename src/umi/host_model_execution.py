@@ -203,6 +203,9 @@ class ModelExecutionMemoryPolicy(StrictProtocolModel):
 
 class ModelExecutionAdmission:
     def __init__(self, selection, policy, *, reattach_worker=False):
+        from .host_memory_startup import current_startup_reservation
+
+        startup = current_startup_reservation()
         self.selection = {
             "policy_path": str(selection.policy_path),
             "policy_sha256": selection.policy_sha256,
@@ -212,8 +215,10 @@ class ModelExecutionAdmission:
             policy_path=_absolute(selection.policy_path),
             expected_sha256=selection.policy_sha256,
             host_identity_path=_absolute(selection.host_identity_path),
-            _reattach_model_worker=reattach_worker,
+            _reattach_model_worker=reattach_worker or startup is not None,
         )
+        if startup is not None:
+            startup.compatible_model_controller(self.controller)
         selected = self.controller.policy
         if not self.controller.model_execution_stage or (
             selected.protocol_policy_sha256 != digest(policy)

@@ -343,6 +343,7 @@ class HostMemoryAdmission:
         expected_sha256: str,
         host_identity_path: Path = Path("/etc/machine-id"),
         _reattach_model_worker: bool = False,
+        _startup_reservation_bytes: int | None = None,
     ):
         started = time.monotonic()
         self.startup_observation = None
@@ -373,6 +374,15 @@ class HostMemoryAdmission:
         if self.policy.host_identity_sha256 != _host_identity(host_identity_path):
             raise AdmissionBindingError("host admission policy belongs to another host")
         self._validate_all()
+        self.startup_reservation_bytes = _startup_reservation_bytes
+        if _startup_reservation_bytes is not None and (
+            not self.joint_execution_stage
+            or type(_startup_reservation_bytes) is not int
+            or not 0
+            < _startup_reservation_bytes
+            <= min(slot.reservation_bytes for slot in self.policy.slots if slot.lane == "transient")
+        ):
+            raise AdmissionBindingError("startup reservation requires bounded joint execution")
         if _reattach_model_worker and not self.model_execution_stage:
             raise AdmissionBindingError("worker reattachment requires model execution admission")
         # Startup and every later grant remeasure current memory. Idle Python
@@ -381,8 +391,10 @@ class HostMemoryAdmission:
         # all idle startup slots again would block it behind unrelated active
         # work. Reattachment grants nothing: every invocation still takes the
         # native locks and remeasures the full current reservation envelope.
-        if not _reattach_model_worker and (
-            not self.model_execution_stage or self.joint_execution_stage
+        if (
+            _startup_reservation_bytes is None
+            and not _reattach_model_worker
+            and (not self.model_execution_stage or self.joint_execution_stage)
         ):
             available = _available_memory()
             required = (

@@ -44,6 +44,7 @@ from .test_competition_reward_boot import control as control
 from .test_competition_reward_boot import inputs as inputs
 from .test_competition_reward_boot import policy as policy
 from .test_competition_reward_boot import series_case as series_case
+from .test_host_memory_admission import provisioned as provisioned
 from .test_open_competition import wallet
 
 
@@ -77,6 +78,80 @@ def config_for(value, root):
         eligible_tracks=("endpoint",),
         listen_port=19578,
     )
+
+
+async def test_reserved_startup_covers_provider_and_benchmark_then_releases(
+    selected, providers, provisioned, monkeypatch, tmp_path
+):
+    from umi import host_memory_admission as native
+    from umi import host_memory_startup as startup
+    from umi.host_memory_runtime import HostMemoryAdmissionSelection
+
+    from .test_host_memory_workload_profile import profile_body, write_profile
+
+    c = with_benchmark(selected.config)
+    _, path, prior, write, _ = provisioned
+    gib = 1024**3
+    profile = write_profile(
+        tmp_path / "reserved-workload.json",
+        profile_body(
+            tmp_path,
+            digest(c.policy),
+            c.policy.evaluation_runtime_sha256,
+            digest(c.series),
+            digest(c.series.recovery.authority),
+        ),
+    )
+    body = dict(prior)
+    body.update(
+        schema="umi-host-execution-memory-admission/1",
+        minimum_available_bytes=4 * gib,
+        incremental_budget_bytes=15 * gib,
+        background_reservation_bytes=gib,
+        maximum_aggregate_bytes=4 * gib,
+        protocol_policy_sha256=digest(c.policy),
+        evaluation_runtime_sha256=c.policy.evaluation_runtime_sha256,
+        workload_profile=profile.model_dump(),
+        container_cgroup_roots=("/sys/fs/cgroup/umi-startup-test-absent",),
+        slots=[
+            dict(slot, reservation_bytes=size)
+            for slot, size in zip(prior["slots"], (gib, 8 * gib, 3 * gib, 3 * gib), strict=True)
+        ],
+    )
+    selection = HostMemoryAdmissionSelection(
+        policy_path=str(path), policy_sha256=write(body), startup_memory_bytes=8 * gib
+    )
+    c = c.model_copy(
+        update={
+            "host_memory_admission": selection,
+            "benchmark": c.benchmark.model_copy(update={"model_execution_admission": selection}),
+        }
+    )
+    monkeypatch.setattr(native, "_available_memory", lambda: 13 * gib)
+    monkeypatch.setattr(startup, "enforced_service_limit", lambda: 8 * gib)
+    original = boot.HistoricalRegistrationProvider
+    observed = []
+
+    def provider(*args, **kwargs):
+        reservation = startup.current_startup_reservation()
+        assert reservation is not None
+        assert reservation.controller.try_acquire("transient") is None
+        observed.append("reserved")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(boot, "HistoricalRegistrationProvider", provider)
+    for _ in range(2):
+        async with boot.phase_review_app(c) as app:
+            assert app.state.benchmark is not None
+            assert startup.current_startup_reservation() is None
+            controller = native.HostMemoryAdmission(
+                path, expected_sha256=selection.policy_sha256, _reattach_model_worker=True
+            )
+            lease = controller.try_acquire("transient")
+            assert lease is not None
+            lease.close()
+    assert observed == ["reserved", "reserved"]
+    assert providers.events.count("started") == providers.events.count("closed") == 2
 
 
 @pytest.fixture

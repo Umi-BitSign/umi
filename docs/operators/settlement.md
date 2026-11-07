@@ -6034,6 +6034,19 @@ With the ordinary `/2` host memory policy enabled, startup requires current
 available memory above the 24 GiB floor plus all slot reservations and background
 allowance. The explicitly qualified joint policy uses its selected floor and the
 same full startup accounting.
+For cohort intake, phase reviewers and settlement services, an explicit
+`host_memory_admission.startup_memory_bytes` selection uses a bounded construction
+reservation instead. Set it from observed startup peaks with headroom, at least
+the service's enforced `MemoryMax` and no larger than a transient slot. The service
+must enforce zero swap. Startup acquires a native transient lease before legacy
+source authentication and provider/store construction, then releases it before
+normal workers run. Concurrent startups compete through the same reservation
+accounting as other work; they cannot all allocate from one free-memory sample.
+The intake app factory and its later admission-owner startup use separate scopes.
+Older configurations omit this field and preserve their original startup gate.
+Update every selected bootstrap reader before adopting the field. The pre-stop
+capacity probe is advisory; actual construction still requires its own lease.
+
 Each serialized grant rechecks
 current available memory against the floor, background allowance, candidate
 reservation and the full reservations of all occupied slots. This deliberately

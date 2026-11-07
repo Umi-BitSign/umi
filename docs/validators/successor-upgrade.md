@@ -212,6 +212,16 @@ only a fresh memory sample establishes returned space. Startup also constructs
 providers and retained metadata outside individual model leases, so a lower
 startup envelope needs separate qualification of those allocations.
 
+Supported cohort hosts can select `host_memory_admission.startup_memory_bytes`
+after measuring startup peaks under their enforced service cap. The value must
+cover that cap, fit one native transient slot and use zero swap. The updated
+intake, phase-review and settlement bootstrap readers acquire a construction
+lease, preserve it through failure cleanup, and release it before normal work.
+Benchmark construction shares this startup reservation; subsequent inference
+still acquires its own checked grant. Old selection bytes omit the new field and
+retain the full idle-slot startup check. Qualify the actual retained configuration
+and namespace before handoff; do not add this field to an older installed reader.
+
 Timed inference also requires a matching qualified CPU slot for every admitted
 model slot. More benchmark tasks or unused memory slots do not add timed capacity.
 Shared-slot graph and inference readers use the same 100 ms capacity retry
