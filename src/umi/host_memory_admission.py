@@ -950,7 +950,11 @@ class HostMemoryAdmission:
             except BlockingIOError:
                 return None
             slot = next(s for s in self.policy.slots if s.settlement_role == role)
-            lease = self._reserve(parent, slot)
+            # Retained settlement graphs and transient work live under the
+            # same enforced service cap. Publish the existing graph witness
+            # so peers do not charge that ceiling twice. Legacy hosts retain
+            # their full reservations when no bounded service is selected.
+            lease = self._reserve(parent, slot, service_bounded=True)
             if lease is None:
                 return None
             marker = self._open_slot(parent, signal)

@@ -87,6 +87,51 @@ def test_independent_reader_and_startup_probe_share_only_proven_graph_ceiling(
             lease.close()
 
 
+def test_retained_settlement_and_transient_graph_share_the_service_cap(pool, shared, monkeypatch):
+    controller, _ = shared
+    reader = pool.controller()
+    retained = controller.try_settlement("0" * 64, "coordinator")
+    transient = model = None
+    try:
+        assert retained is not None and retained._graph_binding is not None
+        monkeypatch.setattr(native, "_available_memory", lambda: 13 * GIB)
+        transient = controller.try_acquire("transient")
+        assert transient is not None
+        assert controller.last_model_admission["pending_reservation_bytes"] == 8 * GIB
+        assert controller.last_model_admission["shared_graph_ceiling_discount_bytes"] == (
+            retained.slot.reservation_bytes
+        )
+        monkeypatch.setattr(native, "_available_memory", lambda: 21 * GIB)
+        model = reader.try_acquire_group("transient", 1)
+        assert model is not None and not model.service_bounded
+        assert reader.last_model_admission["required_available_bytes"] == 21 * GIB
+        assert reader.last_model_admission["selected_reservation_bytes"] == 8 * GIB
+    finally:
+        for lease in (model, transient, retained):
+            if lease is not None:
+                lease.close()
+
+
+def test_unwitnessed_retained_settlement_keeps_its_full_charge(pool, shared, monkeypatch):
+    controller, _ = shared
+    reader = pool.controller()
+    monkeypatch.setattr(graph, "_operator_controlled", lambda *_: False)
+    retained = controller.try_settlement("0" * 64, "coordinator")
+    transient = controller.try_acquire("transient")
+    try:
+        assert retained is not None and retained._graph_binding is None
+        assert transient is not None and transient._graph_binding is None
+        monkeypatch.setattr(native, "_available_memory", lambda: 21 * GIB)
+        assert reader.try_acquire_group("transient", 1) is None
+        assert reader.last_model_admission["shared_graph_ceiling_discount_bytes"] == 0
+        assert reader.last_model_admission["required_available_bytes"] == (
+            21 * GIB + retained.slot.reservation_bytes
+        )
+    finally:
+        transient.close()
+        retained.close()
+
+
 @pytest.mark.parametrize("change", ["swap", "enlarged", "moved", "unowned", "marker"])
 def test_changed_or_unverifiable_peer_keeps_full_reservations(pool, shared, monkeypatch, change):
     controller, root = shared
@@ -175,14 +220,20 @@ def test_uncontrolled_cgroup_limits_do_not_publish_graph_witness(pool, shared, m
 @pytest.mark.skipif(
     os.environ.get("UMI_TEST_BOUNDED_STARTUP") != "1", reason="bounded service only"
 )
-def test_actual_kernel_service_cap_and_separate_process_reader(pool, monkeypatch):
+@pytest.mark.parametrize("retained", [False, True])
+def test_actual_kernel_service_cap_and_separate_process_reader(pool, monkeypatch, retained):
     monkeypatch.setattr(graph, "own_binding", pool.native_graph_binding)
     monkeypatch.setattr(native, "_require_cgroup2", _KERNEL_CGROUP_CHECK)
     cap = startup.enforced_service_limit()
     assert 0 < cap <= 2 * GIB
     controller = pool.controller()
     controller.startup_reservation_bytes = cap
-    leases = [controller.try_acquire("transient") for _ in range(2)]
+    leases = [
+        controller.try_settlement("0" * 64, "coordinator")
+        if retained
+        else controller.try_acquire("transient"),
+        controller.try_acquire("transient"),
+    ]
     assert all(lease._graph_binding is not None for lease in leases)
     read, write = os.pipe()
     child = os.fork()

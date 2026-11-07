@@ -251,6 +251,8 @@ its selected startup budget. Unsupported or enlarged caps keep the full charge.
 This uses the existing whole-service limit, including current allocations and
 failure cleanup; it does not subtract sampled resident pages. Updated readers
 charge concurrent graph grants in one service no more than its enforced ceiling.
+This includes retained settlement and transient grants in that same service;
+their separate locks and settlement cohort markers remain independently held.
 Each grant binds a distinct kernel control-file inode to its native lease; the
 reader verifies the live flock owner, matching cgroup, operator-owned limit and
 zero swap. Missing or changed witnesses keep the full historical charges.
