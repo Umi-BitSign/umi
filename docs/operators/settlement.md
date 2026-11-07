@@ -1847,8 +1847,13 @@ and applied counts retain their ordinary meanings.
 Owned ancestry walks also emit `historical_header_recovery_progress`: anchor,
 target and current block, completed/remaining links, percent, elapsed time and a
 measured ETA after enough new checks. Retained hints, RPC-fetched hints and reused
-process-local ancestry are counted separately; reused links do not inflate the
-measured rate. A 30-second heartbeat identifies stalled RPC or persistence work
+process-local ancestry are counted separately. `links_per_second` describes the
+whole invocation; `eta_links_per_second` measures the current source, including
+retrieval and durable persistence. Switching from retained hints to archive RPC
+withdraws the earlier estimate until three new links and one second have been
+measured. The ETA assumes the remaining links have the current source's cost;
+it cannot predict the amount of cached work ahead. Process-local reuse contributes
+no rate samples. A 30-second heartbeat identifies stalled RPC or persistence work
 and withdraws unsupported estimates. A completed bounded pass remains running,
 while actual retry, repair or cancellation states withdraw its ETA. History logs
 include this separate ancestry substage and its ETA without counting ancestry

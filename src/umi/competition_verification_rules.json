@@ -675,7 +675,7 @@
     "historical_header_capacity.py": "a0c17dda5aa1db129f4e35b254b97941735f358d496ed8e8311176d8c9932aa3",
     "historical_header_hint_import.py": "67001561d42fa4232e3fd27c0227d7e8cd03fb6f66c995f9b895f1587bd9a3b5",
     "historical_header_hint_import_cli.py": "6e10e340039b8fd59b9a597b979475dbeeb67888c1368c26407c7543fe7da05b",
-    "historical_header_progress.py": "8b65bb88c4fa8b000d5eb7c37a5e316f132c2193b107c539dd79137b46aa67d9",
+    "historical_header_progress.py": "d4d6874d3849c54364affc619738173bf528ffba0a1e9da84dad62326854fd5b",
     "historical_header_recovery.py": "0751f920d0c8041e1d52a2b7a28e78452fe8cd5ddc5208e228f8bd836376d045",
     "host_cpu_cgroupfs.py": "c30d847729d3b6bf03786318faab6667bf7cbda1c58d1a81ab86b74027fef437",
     "host_cpu_conditions.py": "6925d37b7cd062c43a2ce95f69f681464ccebe5611b76ac23468662a0b18ebb8",

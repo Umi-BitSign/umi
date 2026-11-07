@@ -95,6 +95,64 @@ async def test_restart_measures_retained_hint_checks_and_reuses_no_process_verif
     assert (await finish(restarted, w)).snapshot == w.target
 
 
+async def test_restart_local_burst_does_not_forecast_fresh_archive_fetches(walk, measured_clock):
+    w = walk
+    first = HistoricalHeaderRecovery(w.connect, batch_size=8)
+    with pytest.raises(HistoricalHeaderRecoveryProgress):
+        await first.recover(w.anchor, w.target, w.request)
+    restarted = HistoricalHeaderRecovery(w.connect, batch_size=8)
+    with pytest.raises(HistoricalHeaderRecoveryProgress):
+        await restarted.recover(w.anchor, w.target, w.request)
+
+    async def slow_request(method, params):
+        measured_clock[0] += 1
+        return await w.request(method, params)
+
+    with pytest.raises(HistoricalHeaderRecoveryProgress) as raised:
+        await restarted.recover(w.anchor, w.target, slow_request)
+    progress = raised.value.ancestry_progress
+    assert progress["completed_links"] == 16
+    assert progress["retained_hint_links"] == progress["rpc_fetched_links"] == 8
+    assert progress["links_per_second"] == 2  # Aggregate throughput stays descriptive.
+    assert progress["eta_links_per_second"] == 1
+    assert progress["eta_source"] == "rpc"
+    assert progress["eta_source_completed_links"] == 8
+    assert progress["eta_source_elapsed_seconds"] == 8
+    assert progress["eta_seconds"] == 24
+    assert progress["eta_basis"] == "measured_rpc_ancestry_links_per_elapsed_second"
+    assert len(w.calls) == len(set(w.calls)) == 16
+
+
+def test_pending_source_change_withdraws_old_rate_before_first_fresh_link(measured_clock):
+    progress = telemetry.HeaderRecoveryTelemetry()
+    progress.begin("anchor", 100, 0, 100)
+    for height in range(99, 96, -1):
+        progress.phase("load_retained_hint")
+        measured_clock[0] += 1
+        progress.advance(height, "retained")
+    assert progress.latest["eta_seconds"] == 97
+    progress.phase("load_retained_hint")
+    progress.phase("fetch_archive_header")
+    assert progress.latest["eta_seconds"] is None
+    assert progress.latest["eta_links_per_second"] is None
+    assert progress.latest["eta_source"] == "rpc"
+    assert progress.latest["eta_source_completed_links"] == 0
+    for height in range(96, 93, -1):
+        progress.phase("load_retained_hint")
+        progress.phase("fetch_archive_header")
+        measured_clock[0] += 2
+        progress.phase("persist_verified_hint")
+        measured_clock[0] += 1
+        progress.advance(height, "rpc")
+        if height > 94:
+            assert progress.latest["eta_seconds"] is None
+    assert progress.latest["eta_links_per_second"] == 1 / 3
+    assert progress.latest["eta_seconds"] == 282
+    progress.finish("retrying")
+    assert progress.latest["eta_seconds"] is None
+    assert progress.latest["planning_eta_seconds"] is None
+
+
 async def test_completed_process_ancestry_reuse_does_not_inflate_rate(walk):
     w = walk
     service = HistoricalHeaderRecovery(w.connect)
