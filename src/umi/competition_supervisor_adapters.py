@@ -341,6 +341,82 @@ def _read_worker_database(
         os.close(descriptor)
 
 
+def retained_adapter_binding(installation, limits):
+    """Bind an existing registry without constructing its writable owner."""
+    return canonical_json_bytes(
+        {
+            "schema": "umi-successor-adapter-registry/1",
+            "receipt": installation.receipt_sha256,
+            "config": installation.config_sha256,
+            "maximum_retained_runs": limits.maximum_retained_runs,
+            "maximum_registry_bytes": limits.maximum_registry_bytes,
+        }
+    )
+
+
+@log_phase("package_verification")
+def verify_retained_package(
+    installation,
+    selection,
+    files,
+    *,
+    recovery_packages: RecoveryPackageReplay | None = None,
+    recovery_history=None,
+):
+    validate_authenticated_successor_installation(installation)
+    if selection.continuation_bytes is not None and (
+        selection.continuation_bytes != files.current_directive_page_bytes
+    ):
+        raise SuccessorAdapterError("delivery differs from the runtime's retained history")
+    signed, directive = selection.signed, selection.signed.directive
+    verify_signed_successor_supervisor_directive_history(
+        signed,
+        config=installation.config,
+        operator_consent=installation.operator_consent,
+        finalized_block=max(directive.issued_at_block, installation.checkpoint_finalized_block),
+    )
+    if recovery_history is None:
+        page = parse_canonical_successor_supervisor_directive_history(
+            files.current_directive_page_bytes
+        )
+        if page.more or page.head != signed:
+            raise SuccessorAdapterError("staged history does not end at the selected directive")
+    elif (
+        replayed_history_head(recovery_history, payload=files.current_directive_page_bytes)
+        != signed
+    ):
+        raise SuccessorAdapterError("staged history does not end at the selected directive")
+    execution = _canonical(SuccessorWorkerExecutionConfig, files.worker_execution_bytes)
+    package = (
+        load_bound_successor_replay_package(
+            files.package_path,
+            directive=directive,
+            observed_release=directive.release.replay_release_identity,
+        )
+        if recovery_packages is None
+        else recovery_packages.load(files.package_path, directive=directive)
+    )
+    authorization, body = None, None
+    if selection.mode == "competition_weights":
+        body = verify_bound_successor_chain_authorization(
+            files.authorization_bytes,
+            directive=directive,
+            config=installation.config,
+            package=package,
+        )
+        authorization = _canonical(SignedCompetitionWeightAuthorization, files.authorization_bytes)
+    elif files.authorization_bytes is not None:
+        raise SuccessorAdapterError("replay staging contains unexpected weight authority")
+    _validate_worker_execution_bindings(
+        execution=execution,
+        limits=retained_execution_limits(installation, directive),
+        directive=directive,
+        release_identity=directive.release.replay_release_identity,
+        authorization_body=body,
+    )
+    return _Prepared(selection, files, execution, package, authorization)
+
+
 class ProductionSuccessorRuntimeAdapter:
     """Execute the runtime protocol under its original supervisor process lock.
 
@@ -373,15 +449,7 @@ class ProductionSuccessorRuntimeAdapter:
             CompetitionReplayWorker._prepare_state_file(root_fd, self.path.name)
         finally:
             os.close(root_fd)
-        self._binding = canonical_json_bytes(
-            {
-                "schema": "umi-successor-adapter-registry/1",
-                "receipt": installation.receipt_sha256,
-                "config": installation.config_sha256,
-                "maximum_retained_runs": limits.maximum_retained_runs,
-                "maximum_registry_bytes": limits.maximum_registry_bytes,
-            }
-        )
+        self._binding = retained_adapter_binding(installation, limits)
         with self._registry() as db:
             db.execute("CREATE TABLE IF NOT EXISTS binding (id INTEGER PRIMARY KEY, body BLOB)")
             db.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, body BLOB, sha TEXT)")
@@ -493,71 +561,14 @@ class ProductionSuccessorRuntimeAdapter:
                 ),
             )
 
-    @log_phase("package_verification")
-    def _verify(
-        self,
-        selection,
-        files,
-        *,
-        recovery_packages: RecoveryPackageReplay | None = None,
-        recovery_history=None,
-    ):
-        validate_authenticated_successor_installation(self.installation)
-        if selection.continuation_bytes is not None and (
-            selection.continuation_bytes != files.current_directive_page_bytes
-        ):
-            raise SuccessorAdapterError("delivery differs from the runtime's retained history")
-        signed, directive = selection.signed, selection.signed.directive
-        verify_signed_successor_supervisor_directive_history(
-            signed,
-            config=self.config,
-            operator_consent=self.installation.operator_consent,
-            finalized_block=max(
-                directive.issued_at_block, self.installation.checkpoint_finalized_block
-            ),
+    def _verify(self, selection, files, *, recovery_packages=None, recovery_history=None):
+        return verify_retained_package(
+            self.installation,
+            selection,
+            files,
+            recovery_packages=recovery_packages,
+            recovery_history=recovery_history,
         )
-        if recovery_history is None:
-            page = parse_canonical_successor_supervisor_directive_history(
-                files.current_directive_page_bytes
-            )
-            if page.more or page.head != signed:
-                raise SuccessorAdapterError("staged history does not end at the selected directive")
-        elif (
-            replayed_history_head(recovery_history, payload=files.current_directive_page_bytes)
-            != signed
-        ):
-            raise SuccessorAdapterError("staged history does not end at the selected directive")
-        execution = _canonical(SuccessorWorkerExecutionConfig, files.worker_execution_bytes)
-        package = (
-            load_bound_successor_replay_package(
-                files.package_path,
-                directive=directive,
-                observed_release=directive.release.replay_release_identity,
-            )
-            if recovery_packages is None
-            else recovery_packages.load(files.package_path, directive=directive)
-        )
-        authorization, body = None, None
-        if selection.mode == "competition_weights":
-            body = verify_bound_successor_chain_authorization(
-                files.authorization_bytes,
-                directive=directive,
-                config=self.config,
-                package=package,
-            )
-            authorization = _canonical(
-                SignedCompetitionWeightAuthorization, files.authorization_bytes
-            )
-        elif files.authorization_bytes is not None:
-            raise SuccessorAdapterError("replay staging contains unexpected weight authority")
-        _validate_worker_execution_bindings(
-            execution=execution,
-            limits=retained_execution_limits(self.installation, directive),
-            directive=directive,
-            release_identity=directive.release.replay_release_identity,
-            authorization_body=body,
-        )
-        return _Prepared(selection, files, execution, package, authorization)
 
     @log_phase("publication_replay")
     def _replay(self, prepared):

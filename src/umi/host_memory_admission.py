@@ -350,7 +350,10 @@ class HostMemoryAdmission:
             from .host_model_execution import ModelExecutionMemoryPolicy
 
             self.policy = ModelExecutionMemoryPolicy.model_validate_json(raw)
-        elif schema == "umi-host-execution-memory-admission/1":
+        elif schema in {
+            "umi-host-execution-memory-admission/1",
+            "umi-host-execution-memory-admission/2",
+        }:
             from .host_execution_memory import ExecutionMemoryPolicy
 
             self.policy = ExecutionMemoryPolicy.model_validate_json(raw)
@@ -422,11 +425,15 @@ class HostMemoryAdmission:
         return self.policy.schema_ in {
             "umi-host-model-execution-admission/1",
             "umi-host-execution-memory-admission/1",
+            "umi-host-execution-memory-admission/2",
         }
 
     @property
     def joint_execution_stage(self) -> bool:
-        return self.policy.schema_ == "umi-host-execution-memory-admission/1"
+        return self.policy.schema_ in {
+            "umi-host-execution-memory-admission/1",
+            "umi-host-execution-memory-admission/2",
+        }
 
     @property
     def requests_stage(self) -> bool:

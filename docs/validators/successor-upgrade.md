@@ -113,6 +113,21 @@ through the supported whole-host configuration handoff. See
 [host memory admission](../operators/settlement.md#host-memory-admission) for
 orphan cleanup, restart and capacity requirements.
 
+The `/2` joint execution policy supports multiple equally reserved transient
+slots. `expanded_execution_policy` preserves every original slot, settlement
+signal, reserve and workload binding, and charges the complete added reservation.
+Older readers continue to accept the unchanged `/1` policy; they must be upgraded
+before selecting `/2`. The model-only command below still refuses joint policies.
+All consumers of the shared pool must adopt the same qualified generation together.
+
+Timed inference also requires a matching qualified CPU slot for every admitted
+model slot. More benchmark tasks or unused memory slots do not add timed capacity.
+Keep completed baseline observations only when their measurement profile remains
+identical. Qualify simultaneous load, cold-cache isolation and cancellation/orphan
+cleanup under the actual service limits before selecting additional CPU slots.
+The original single-slot installation controls do not perform a live timed-pool
+expansion; do not rerun them against an active challenge cohort.
+
 Prepare a prospective policy using the qualified host interpreter:
 
 ```sh
