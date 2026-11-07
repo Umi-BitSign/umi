@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -726,6 +727,7 @@ def test_parallel_joint_preserves_original_locks_and_old_schema(parallel_joint):
         ExecutionMemoryPolicy.model_validate_json(json.dumps(raw))
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="joint /2 uses native Linux OFD witnesses")
 def test_parallel_joint_reconstructed_controllers_share_all_slots(parallel_joint):
     joint, _, _ = parallel_joint
     first, second, third = joint.graph(), joint.model(), joint.graph()
@@ -745,6 +747,7 @@ def test_parallel_joint_reconstructed_controllers_share_all_slots(parallel_joint
     graph_job.close()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="joint /2 uses native Linux OFD witnesses")
 def test_parallel_joint_charges_startup_and_pending_work(parallel_joint, monkeypatch):
     joint, _, _ = parallel_joint
     monkeypatch.setattr(native, "_available_memory", lambda: 28 * GIB - 1)
@@ -780,6 +783,7 @@ def test_parallel_joint_refuses_invalid_expansion(parallel_joint, change):
         ExecutionMemoryPolicy.model_validate_json(json.dumps(raw))
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="joint /2 uses native Linux OFD witnesses")
 def test_parallel_joint_keeps_orphan_stop_even_with_another_free_slot(parallel_joint, monkeypatch):
     joint, _, _ = parallel_joint
     controller = joint.graph()
@@ -802,6 +806,7 @@ def test_parallel_joint_keeps_orphan_stop_even_with_another_free_slot(parallel_j
         job.close()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="joint /2 uses native Linux OFD witnesses")
 async def test_parallel_joint_cancellation_releases_only_its_own_slot(parallel_joint):
     joint, _, _ = parallel_joint
     controller, other = joint.graph(), joint.graph()

@@ -120,6 +120,25 @@ Older readers continue to accept the unchanged `/1` policy; they must be upgrade
 before selecting `/2`. The model-only command below still refuses joint policies.
 All consumers of the shared pool must adopt the same qualified generation together.
 
+On supported Linux x86-64 and arm64 hosts, `/2` binds each running container to
+its existing native slot through a kernel OFD read-lock witness. The witness
+uses the same open file description as the slot's exclusive flock; it changes
+neither the slot file bytes nor permissions. The runner holds the exact cgroup
+directory descriptor until clearing the witness. Independent isolated workers
+can recognize that container without relying on process IDs or durable claims.
+The full busy-slot reservation remains charged. Expired leases, unknown
+containers, changed cgroup identities and excess ceilings retain their existing
+cleanup or capacity holds. `/1` policies keep local-only accounting.
+
+Upgrade every shared-pool reader before selecting `/2`, including qualification
+workers. Supported interpreters must pass actual kernel OFD-lock and cgroup
+readback checks; an omitted Python header constant does not imply missing Linux
+kernel support. Keep native slot files and descriptors outside model sandboxes.
+Qualify staggered admissions while other workers already run, worker death and
+restart, alongside simultaneous timing and resource limits. These witnesses
+resolve live peer identity; they do not lower startup reserves, qualify physical
+core exclusivity or establish the memory headroom for a larger pool.
+
 Timed inference also requires a matching qualified CPU slot for every admitted
 model slot. More benchmark tasks or unused memory slots do not add timed capacity.
 Keep completed baseline observations only when their measurement profile remains
