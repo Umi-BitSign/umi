@@ -1168,3 +1168,165 @@ async def test_driver_and_attempt_preparation_finish_before_progress_capture(lif
     assert (await service.tick())["status"] == "waiting_phase_progress"
     assert stages == ["driver", "prepare", "sample", "release"]
     assert service.last_progress.observed_at_block == h.block
+
+
+@pytest.mark.parametrize(
+    ("stage", "outcome"),
+    [
+        (stage, outcome)
+        for stage in (
+            "progress_sampling_lock",
+            "phase_start",
+            "progress_preparation",
+            "progress_finality_capture",
+            "progress_sampling",
+        )
+        for outcome in ("complete", "cancel", "fail")
+        if (stage, outcome) != ("progress_sampling_lock", "fail")
+    ],
+)
+async def test_lifecycle_pending_wait_projection_and_native_cleanup(
+    lifecycle, monkeypatch, stage, outcome
+):
+    from contextlib import asynccontextmanager
+    from dataclasses import replace
+
+    import umi.competition_work_progress as work_progress
+    from umi.competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
+
+    h = lifecycle
+    service = h.reopen()
+    entered, release, drained = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    factory = service.factories["intake"]
+    reports = []
+    original_report = service._log_lifecycle
+
+    def report(status, **kwargs):
+        reports.append(status)
+        original_report(status, **kwargs)
+
+    monkeypatch.setattr(service, "_log_lifecycle", report)
+    monkeypatch.setattr(work_progress, "_HEARTBEAT_SECONDS", 0.01)
+
+    async def wait():
+        entered.set()
+        await release.wait()
+        if outcome == "fail":
+            raise OSError("fixture wait failure")
+
+    @asynccontextmanager
+    async def prepare(state):
+        try:
+            if stage == "progress_preparation":
+                await wait()
+
+            async def sample(capture):
+                if stage == "progress_sampling":
+                    await wait()
+                return await native.observer.sample(state, capture)
+
+            yield sample
+        finally:
+            drained.set()
+
+    native = await factory()
+
+    async def delayed_driver():
+        if stage == "phase_start":
+            await wait()
+        return replace(native, prepare_progress=prepare)
+
+    service.factories["intake"] = delayed_driver
+    if stage == "progress_finality_capture":
+
+        async def collect():
+            await wait()
+            return await h.provider.collect()
+
+        service.controller.provider = SimpleNamespace(collect=collect)
+    if stage == "progress_sampling_lock":
+        # The real sampler's lock remains held by a separate owner.
+        await service.controller.sampling_lock.acquire()
+
+    task = asyncio.create_task(service.tick())
+    try:
+        if stage == "progress_sampling_lock":
+            for _ in range(500):
+                if stage + "_started" in reports:
+                    break
+                await asyncio.sleep(0.01)
+        else:
+            await asyncio.wait_for(entered.wait(), 5)
+        await asyncio.sleep(0.025)
+        snapshot = PUBLIC_COHORT_PROGRESS.snapshot(h.cohort)
+        current = snapshot["components"]["lifecycle"]
+        assert current["stage"] == stage
+        assert current["status"] == stage + "_started"
+        work = snapshot["components"]["work"]
+        assert work["stage"] == stage
+        assert work["state"] == "waiting"
+        assert work["completed"] == 0 and work["total"] == 1
+        assert not work["stale"]
+        assert work["eta_seconds"] is None
+        assert not snapshot["certification_authority"]
+        assert "history_publication_completed" in reports
+        if outcome == "cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            if stage == "progress_sampling_lock":
+                service.controller.sampling_lock.release()
+            release.set()
+            if outcome == "fail":
+                with pytest.raises(OSError, match="fixture wait failure"):
+                    await task
+            else:
+                assert (await task)["status"] == "waiting_phase_progress"
+        assert (stage + "_completed" in reports) == (outcome == "complete")
+        if stage == "progress_sampling_lock" and outcome == "cancel":
+            assert service.controller.sampling_lock.locked()
+            service.controller.sampling_lock.release()
+        assert not service.controller.sampling_lock.locked()
+        if stage not in {"phase_start", "progress_sampling_lock"} or outcome == "complete":
+            assert drained.is_set()
+        assert not PUBLIC_COHORT_PROGRESS.active_work_snapshot(h.cohort)
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        if service.controller.sampling_lock.locked():
+            service.controller.sampling_lock.release()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+async def test_result_publication_completion_requires_success(lifecycle, monkeypatch, fails):
+    from dataclasses import replace
+
+    h = lifecycle
+    for worker in h.admissions:
+        await worker.poll_once()
+    service = h.reopen()
+    while h.store.status(h.cohort)[0].phase != "requests":
+        await service.tick()
+        h.block += 5
+    history = service.controller._history()[0]
+    reports = []
+    monkeypatch.setattr(service, "_log_lifecycle", reports.append)
+    driver = service.drivers["preparation"]
+
+    async def publish(history):
+        if fails:
+            raise OSError("fixture publication failed")
+        await driver.publish_closed(history)
+
+    service.drivers["preparation"] = replace(driver, publish_closed=publish)
+    if fails:
+        with pytest.raises(OSError, match="fixture publication failed"):
+            await service._publish(history)
+    else:
+        await service._publish(history)
+    assert "history_publication_completed" in reports
+    assert "result_publication_started" in reports
+    assert ("result_publication_completed" in reports) is not fails

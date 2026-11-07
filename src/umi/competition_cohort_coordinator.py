@@ -12,8 +12,8 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from collections.abc import Awaitable, Callable, Sequence
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
-from typing import Annotated, Literal, Protocol
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager, suppress
+from typing import Annotated, Literal, Protocol, TypeVar
 
 from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
@@ -36,8 +36,11 @@ from .competition_cohort_recovery import (
 )
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_execution import ExecutionBoundary, execution_boundary
+from .competition_work_progress import await_progress
 from .open_competition import CompetitionPolicy, Signature, digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+
+_T = TypeVar("_T")
 
 
 class CohortPhaseProgress(StrictProtocolModel):
@@ -277,6 +280,7 @@ class CohortRecoveryCoordinator:
         prepare_progress: ProgressPreparation | None = None,
         attest_progress: Callable[[CohortPhaseProgress], Awaitable[AttestedCohortPhaseProgress]]
         | None = None,
+        observe_stage: Callable[[str, str], None] | None = None,
     ) -> None:
         self.store, self.cohort, self.provider = store, cohort, provider
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
@@ -288,6 +292,7 @@ class CohortRecoveryCoordinator:
             raise ValueError("cohort recovery needs an observer or durable native sampler")
         if prepare_progress is not None and sample_progress is None:
             raise ValueError("progress preparation requires a durable native sampler")
+        self.observe_stage = observe_stage
         self.prepare_progress = prepare_progress
         self.sample_progress, self.attest_progress = sample_progress, attest_progress
         self.serial = asyncio.Lock()
@@ -295,6 +300,14 @@ class CohortRecoveryCoordinator:
         # is slow. Serialize only collection/observation, never peer voting.
         self.sampling_lock = asyncio.Lock()
         self._history()
+
+    async def _wait(self, work: Awaitable[_T], stage: str) -> _T:
+        if self.observe_stage is not None:
+            self.observe_stage(stage, stage + "_started")
+        result = await await_progress(work, stage=stage, cohort=self.cohort)
+        if self.observe_stage is not None:
+            self.observe_stage(stage, stage + "_completed")
+        return result
 
     def _history(self) -> tuple[CohortRecoveryHistory, CohortRecoveryState, int, int]:
         history = self.store.export_history(self.cohort, genesis_signatures=self.genesis_signatures)
@@ -344,7 +357,7 @@ class CohortRecoveryCoordinator:
             if pending is None:
                 intent = None
                 if self.sample_progress is None:
-                    capture = await self.provider.collect()
+                    capture = await self._wait(self.provider.collect(), "progress_finality_capture")
                     observation = execution_boundary(capture)
                     progress = await self.observe(state, capture)
                 else:
@@ -352,13 +365,20 @@ class CohortRecoveryCoordinator:
                         self.cohort, state.tip_sha256, CohortProgressIntent
                     )
                     if intent is None:
-                        async with self.sampling_lock, self._prepared(state) as sample:
-                            capture = await self.provider.collect()
-                            intent = CohortProgressIntent(
-                                schema="umi-cohort-progress-intent/1",
-                                progress=await sample(capture),
-                                observation=execution_boundary(capture),
+                        async with AsyncExitStack() as sampling:
+                            await self._wait(
+                                sampling.enter_async_context(self.sampling_lock),
+                                "progress_sampling_lock",
                             )
+                            async with self._prepared(state) as sample:
+                                capture = await self._wait(
+                                    self.provider.collect(), "progress_finality_capture"
+                                )
+                                intent = CohortProgressIntent(
+                                    schema="umi-cohort-progress-intent/1",
+                                    progress=await sample(capture),
+                                    observation=execution_boundary(capture),
+                                )
                         intent = self.store.reserve_progress(self.cohort, state.tip_sha256, intent)
                     # This observation was current when the native phase was
                     # sampled. Signing may finish arbitrarily later; preserve

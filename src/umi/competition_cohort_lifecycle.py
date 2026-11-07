@@ -11,7 +11,7 @@ import asyncio
 import logging
 import sqlite3
 from collections.abc import Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass
 
 from .competition_chain import RegistrationCapture
@@ -97,6 +97,7 @@ class CohortLifecycleService:
             sample_progress=self._sample,
             prepare_progress=self._prepare,
             attest_progress=self._attest,
+            observe_stage=self._observe_stage,
         )
         history, state, _, _ = self.controller._history()
         self.plan_sequence = history.plan.sequence
@@ -162,12 +163,15 @@ class CohortLifecycleService:
         PUBLIC_COHORT_PROGRESS.record("lifecycle", report)
         logger.info("%s", canonical_json_bytes(report).decode())
 
+    def _observe_stage(self, stage: str, status: str) -> None:
+        self.stage = stage
+        self._log_lifecycle(status)
+
     async def _driver(self, phase: Phase) -> CohortPhaseDriver:
         if phase not in PHASES:
             raise ValueError("phase belongs to the settlement runtime")
         if phase not in self.drivers:
-            self.stage = "phase_start"
-            driver = await self.factories[phase]()
+            driver = await self.controller._wait(self.factories[phase](), "phase_start")
             if not isinstance(driver, CohortPhaseDriver) or driver.observer.policy != self.policy:
                 raise ValueError("cohort phase runtime has another policy")
             if phase in {"preparation", "requests"} and driver.publish_closed is None:
@@ -189,12 +193,15 @@ class CohortLifecycleService:
 
             yield sample
         else:
-            self.stage = "progress_preparation"
-            async with driver.prepare_progress(state) as prepared:
+            async with AsyncExitStack() as preparation:
+                prepared = await self.controller._wait(
+                    preparation.enter_async_context(driver.prepare_progress(state)),
+                    "progress_preparation",
+                )
 
                 async def sample(capture):
-                    self.stage = "progress_sampling"
-                    return self._remember_progress(state, await prepared(capture))
+                    progress = await self.controller._wait(prepared(capture), "progress_sampling")
+                    return self._remember_progress(state, progress)
 
                 yield sample
 
@@ -202,8 +209,10 @@ class CohortLifecycleService:
         authorize_memory("requests_lifecycle", state.cohort_sha256, state.phase)
         self._remember_state(state)
         driver = await self._driver(state.phase)
-        self.stage = "progress_sampling"
-        return self._remember_progress(state, await driver.observer.sample(state, capture))
+        progress = await self.controller._wait(
+            driver.observer.sample(state, capture), "progress_sampling"
+        )
+        return self._remember_progress(state, progress)
 
     def _remember_progress(self, state, progress):
         if (
@@ -276,6 +285,7 @@ class CohortLifecycleService:
                 stage="lifecycle_history_publication",
                 cohort=self.cohort,
             )
+        self._log_lifecycle("history_publication_completed")
         if any(t.transition.operation == "revoke" for t in history.transitions):
             return
         for signed in history.transitions:
@@ -298,6 +308,7 @@ class CohortLifecycleService:
                         stage=phase + "_result_publication",
                         cohort=self.cohort,
                     )
+                self._log_lifecycle("result_publication_completed")
             # Replaying publication also repairs a missing derived file. A
             # memory-only acknowledgement must not prevent that recovery.
 

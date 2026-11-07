@@ -2097,6 +2097,14 @@ decision retries select the phase recorded in the original intent. Preparation
 and request result publications must finish before the next phase starts. The
 preparation publisher's `publish_history` port restores the original round file
 from the owning journal after a lost acknowledgement or a missing derived file.
+Lifecycle observations mark history and result publication complete before later
+waits begin. Phase startup, sampling-lock acquisition, preparation, finality
+capture and progress sampling expose separate wait stages through the cached
+public progress projection. Their work counters measure one awaited operation;
+heartbeats report elapsed time and an unknown ETA when no duration estimate is
+available. These observations neither change signed phase clocks nor authorize
+completion. Cancellation retains the original lock and preparation cleanup.
+
 After request publication succeeds, the lifecycle returns
 `settlement_handoff_published` and the recurring settlement service takes over.
 Request publication reviews each exact closure once during initial delivery.
