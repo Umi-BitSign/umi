@@ -228,6 +228,42 @@ async def retain_preparation_intent(c, runtime, monkeypatch):
     )
 
 
+async def test_preparation_retries_only_unfinished_expiry_under_original_locks(
+    migration,
+    monkeypatch,
+):
+    from umi import competition_reward_preparation_retry as retry
+    from umi.validator_chain import ValidatorChainError
+
+    c = migration
+    await signed_attempt(c)
+    original = handoff.review_legacy_weight_expiry
+    calls = 0
+    provider = next(iter(c.providers.values()))
+    monkeypatch.setattr(provider, "ensure_observer_running", lambda: None)
+
+    async def review(actual, **inputs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValidatorChainError("proof_rpc_failed")
+        return await original(actual, **inputs)
+
+    async def wait(actual):
+        assert actual is provider
+        assert_locked(Path(c.config.state_root) / "supervisor-process.lock")
+
+    monkeypatch.setattr(handoff, "review_legacy_weight_expiry", review)
+    monkeypatch.setattr(retry, "_wait_for_retry", wait)
+    async with c.reopen() as runtime:
+        args = await retain_preparation_intent(c, runtime, monkeypatch)
+        result = await preparation_module.prepare_retained_legacy_handoff(c.installation, **args)
+        assert result.attempts == 1 and calls == 2 and len(c.validations) == 1
+        await preparation_module.prepare_retained_legacy_handoff(c.installation, **args)
+        assert calls == 2 and len(c.validations) == 1
+        runtime._require_lease()
+
+
 @pytest.mark.parametrize("shared_directory", [False, True], ids=["private-root", "shared-root"])
 async def test_readonly_preparation_runs_under_original_locks_and_handoff_reuses_it(
     migration, monkeypatch, caplog, tmp_path, shared_directory

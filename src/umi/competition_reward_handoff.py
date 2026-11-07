@@ -43,6 +43,7 @@ from .competition_reward_legacy_recovery import (
     validate_legacy_weight_expiry,
 )
 from .competition_reward_preparation import PreparedStandingReward, StandingRewardPreparation
+from .competition_reward_preparation_retry import review_preparation_expiry
 from .competition_supervisor import MAX_SUCCESSOR_DOCUMENT_BYTES
 from .competition_supervisor_adapters import (
     _MAX_ATTEMPT_BYTES,
@@ -396,6 +397,7 @@ async def _verify_inventory(
     minimum_block,
     read_records,
     verify_package,
+    preparation_retry=False,
 ):
     """Checkpoint native verification without granting writer ownership."""
     if completed is not None:
@@ -519,13 +521,22 @@ async def _verify_inventory(
             if retained is None:
                 chain = read(item.chain_evidence_sha256)
                 metadata = read(json.loads(chain)["runtime_metadata_sha256"])
-                result = await review_legacy_weight_expiry(
-                    provider,
+                arguments = dict(
                     attempt=raw,
                     chain=chain,
                     metadata=metadata,
                     validator_hotkey=installation.config.validator_hotkey,
                 )
+                if preparation_retry:
+                    result = await review_preparation_expiry(
+                        review_legacy_weight_expiry,
+                        provider,
+                        recheck=recheck,
+                        progress=progress,
+                        arguments=arguments,
+                    )
+                else:
+                    result = await review_legacy_weight_expiry(provider, **arguments)
                 if result is None:
                     raise ValueError("legacy transaction remains live; handoff is pending")
                 validate_legacy_weight_expiry(

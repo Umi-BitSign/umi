@@ -1873,6 +1873,11 @@ proofs and other operations retain exclusive access. Waiting requests observe
 the shared cooldown; a late success cannot erase a concurrent failure, and a
 shorter timeout cannot shorten a longer Retry-After. These limits concern
 retrieval, not challenge slots or finality authority.
+Independent legacy preparation keeps the same provider open during transient RPC
+failures in an unfinished expiry review. It retains native cooldowns and completed
+work, withdraws the retry ETA, and reports the retry count. Observer exit, changed
+source bindings, invalid proofs and cancellation still terminate that attempt.
+The final writer handoff keeps its existing failure behavior.
 The coordinator CLI enables both ancestry and history progress logging. Each
 bounded ancestry continuation emits its current cursor and substage ETA before
 the next pass resets the displayed stage, even within the heartbeat interval.

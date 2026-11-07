@@ -2749,6 +2749,10 @@ cold or failed provider, retains shared retry cooldowns, and drains all owned
 reads during cancellation and close. Update the common runtime through the
 supported release path; changing a local connection count alone does not adopt
 the complete recovery behavior.
+The same runtime retries unfinished preparation RPC reads without rebuilding
+providers or repeating completed package verification. It rechecks retained input
+identity and observer health before resuming. Finality and expiry validation still
+run before any completion record; final writer ownership is unchanged.
 The window's current-head check uses the owned observer directly; it does not
 repeat subnet membership collection. Admission and service review still perform
 their required registration and authority checks.

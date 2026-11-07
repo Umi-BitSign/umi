@@ -227,6 +227,7 @@ async def _prepare_retained_legacy_handoff(
                     minimum_block=0,
                     read_records=records,
                     verify_package=partial(verify_retained_package, installation),
+                    preparation_retry=True,
                 )
         recheck()
     return LegacyHandoffPreparationResult(
