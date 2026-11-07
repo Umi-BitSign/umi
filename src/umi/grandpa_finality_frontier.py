@@ -12,6 +12,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import stat
 import tempfile
@@ -23,7 +24,9 @@ from .protocol import canonical_json_bytes
 
 AUDIT_SEMANTICS = "umi-grandpa-native-audit/1"
 _SCHEMA = "umi-grandpa-file-bound-frontier/1"
+_CHECKPOINT_SCHEMA = "umi-grandpa-audit-checkpoint/1"
 _MAXIMUM_RECORD_BYTES = 64 * 1024
+_LOGGER = logging.getLogger(__name__)
 
 
 class FinalityFrontierError(ValueError):
@@ -154,13 +157,22 @@ class FinalityAuditFrontier:
 
     def publish(self, config: bytes, *, expected_snapshot):
         """Call only after the native audit or verified append has finished."""
-        self.require_snapshot(expected_snapshot)
-        snapshot = expected_snapshot
-        raw = canonical_json_bytes(
-            {"schema": _SCHEMA, "binding": self.binding(config), "snapshot": snapshot}
+        self._publish_record(
+            self.record,
+            {"schema": _SCHEMA, "binding": self.binding(config), "snapshot": expected_snapshot},
+            expected_snapshot,
         )
-        if self.record.exists() or self.record.is_symlink():
-            _identity(self.record)
+
+    def audit_checkpoint(self, config: bytes, *, legacy_accounting: bool):
+        return FinalityAuditCheckpoint(self, config, legacy_accounting=legacy_accounting)
+
+    def _publish_record(self, path, value, snapshot):
+        self.require_snapshot(snapshot)
+        raw = canonical_json_bytes(value)
+        if len(raw) > _MAXIMUM_RECORD_BYTES:
+            raise FinalityFrontierError("frontier_record_oversized")
+        if path.exists() or path.is_symlink():
+            _identity(path)
         fd, name = tempfile.mkstemp(prefix=".completion-", dir=self.root)
         try:
             with os.fdopen(fd, "wb") as stream:
@@ -169,7 +181,7 @@ class FinalityAuditFrontier:
                 os.fsync(stream.fileno())
             if self.snapshot() != snapshot:
                 raise FinalityFrontierError("database_changed_during_publication")
-            os.replace(name, self.record)
+            os.replace(name, path)
             directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
                 os.fsync(directory)
@@ -177,3 +189,92 @@ class FinalityAuditFrontier:
                 os.close(directory)
         finally:
             Path(name).unlink(missing_ok=True)
+
+
+def _audit_snapshot_identity(snapshot):
+    # An empty WAL contains no committed frames. SQLite may create or discard
+    # it when an interrupted read-only audit is opened again.
+    files = dict(snapshot["files"])
+    if files["-wal"] is not None and files["-wal"][5] == "0":
+        files["-wal"] = None
+    return {"directory": snapshot["directory"], "files": files}
+
+
+class FinalityAuditCheckpoint:
+    """One bounded continuation, committed after every accepted audit row.
+
+    No evidence payload is copied. The consumer supplies only the validated
+    predecessor metadata needed to continue its original ordered audit.
+    """
+
+    def __init__(self, owner, config, *, legacy_accounting):
+        self.owner = owner
+        self.path = owner.root / "audit-progress.json"
+        self.binding = {**owner.binding(config), "legacy_accounting": legacy_accounting}
+        self.snapshot = owner.snapshot()
+        self.reason = None
+        self._repair = False
+
+    def repair(self, reason):
+        self.reason, self._repair = reason, True
+        _LOGGER.warning(
+            "finality_startup_audit state=repair_required reason=%s completed=0 "
+            "total=unknown elapsed_seconds=0 eta_seconds=unknown "
+            "eta_basis=integrity_and_count_required stalled=false retrying=false",
+            reason,
+        )
+
+    def load(self):
+        if self._repair:
+            return None
+        try:
+            before = _identity(self.path)
+            if int(before[5]) > _MAXIMUM_RECORD_BYTES:
+                raise FinalityFrontierError("audit_checkpoint_oversized")
+            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (info.st_dev, info.st_ino) != tuple(map(int, before[:2])):
+                    raise FinalityFrontierError("audit_checkpoint_replaced")
+                raw = stream.read(_MAXIMUM_RECORD_BYTES + 1)
+            if _identity(self.path) != before:
+                raise FinalityFrontierError("audit_checkpoint_changed")
+            value = json.loads(raw)
+            if (
+                not isinstance(value, dict)
+                or set(value) != {"schema", "binding", "snapshot", "state", "state_sha256"}
+                or value["schema"] != _CHECKPOINT_SCHEMA
+                or canonical_json_bytes(value) != raw
+                or hashlib.sha256(canonical_json_bytes(value["state"])).hexdigest()
+                != value["state_sha256"]
+            ):
+                raise FinalityFrontierError("audit_checkpoint_damaged")
+        except FileNotFoundError:
+            self.reason = "audit_checkpoint_missing"
+            return None
+        except (ValueError, UnicodeError) as error:
+            if isinstance(error, FinalityFrontierError) and str(error) == "unsafe_frontier_path":
+                raise
+            self.repair("audit_checkpoint_requires_repair")
+            return None
+        self.owner.require_snapshot(self.snapshot)
+        if value["binding"] != self.binding:
+            self.repair("audit_checkpoint_binding_changed")
+            return None
+        if value["snapshot"] != _audit_snapshot_identity(self.snapshot):
+            self.repair("audit_checkpoint_database_changed")
+            return None
+        return value["state"]
+
+    def save(self, state):
+        self.owner._publish_record(
+            self.path,
+            {
+                "schema": _CHECKPOINT_SCHEMA,
+                "binding": self.binding,
+                "snapshot": _audit_snapshot_identity(self.snapshot),
+                "state": state,
+                "state_sha256": hashlib.sha256(canonical_json_bytes(state)).hexdigest(),
+            },
+            self.snapshot,
+        )

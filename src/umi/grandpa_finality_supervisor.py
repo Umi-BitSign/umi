@@ -34,8 +34,8 @@ import stat
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager, suppress
-from dataclasses import dataclass
+from contextlib import ExitStack, closing, contextmanager, suppress
+from dataclasses import asdict, dataclass
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -248,6 +248,12 @@ class _StoredHeader:
     previous_finalized_hash: str | None
     ancestry_complete: bool
     previous_acceptance_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class _AuditCursor:
+    head: PersistedFinalityHead
+    transcript_digest: str
 
 
 _SCHEMA_STATEMENTS = (
@@ -762,17 +768,8 @@ class DurableGrandpaFinalityPort:
             raise GrandpaFinalityStoreCorruption("sqlite_read_failed") from error
         self._assert_database_bound()
 
-    def _audit_snapshot(
-        self, connection: sqlite3.Connection, *, legacy_accounting: bool = False
-    ) -> tuple[int, int]:
-        """Validate indexed cursors while the caller owns their read snapshot."""
-
-        started, reported, completed = time.monotonic(), 0.0, 0
-        _LOGGER.info(
-            "finality_startup_audit state=running stage=sqlite_integrity completed=0 "
-            "total=unknown elapsed_seconds=0 eta_seconds=unknown "
-            "eta_basis=integrity_scan_before_row_rate stalled=false retrying=false"
-        )
+    def _audit_inputs(self, connection, *, legacy_accounting):
+        """Check one snapshot's integrity, binding, counts and segment coverage."""
         if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise GrandpaFinalityStoreCorruption("sqlite_quick_check_failed")
         if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
@@ -802,13 +799,6 @@ class DurableGrandpaFinalityPort:
         count, total_evidence = connection.execute(
             "SELECT COUNT(*), COALESCE(SUM(length(canonical_evidence)), 0) FROM finalized_headers"
         ).fetchone()
-        _LOGGER.info(
-            "finality_startup_audit state=running stage=attestations completed=0 total=%d "
-            "elapsed_seconds=%.3f eta_seconds=unknown eta_basis=no_row_rate_yet "
-            "stalled=false retrying=false",
-            count,
-            time.monotonic() - started,
-        )
         if count > self._limits.maximum_headers:
             raise GrandpaFinalityStoreCorruption("header_count_limit")
         if total_evidence > self._limits.maximum_total_evidence_bytes:
@@ -829,125 +819,262 @@ class DurableGrandpaFinalityPort:
         ):
             raise GrandpaFinalityStoreCorruption("empty_or_orphan_segment")
 
-        # Both cursors use primary-key order. A per-segment ORDER BY height can
-        # instead sort full evidence rows against the segment/sequence index.
-        segments = connection.execute("SELECT * FROM observer_segments ORDER BY segment_index")
-        rows = connection.execute("SELECT * FROM finalized_headers ORDER BY height")
-        row = next(rows, None)
-        previous_global: _StoredHeader | None = None
-        previous_acceptance = _ZERO_DIGEST
-        previous_accepted_at_unix_ms = 0
-        for expected_segment_index, segment in enumerate(segments):
-            if segment["segment_index"] != expected_segment_index:
-                raise GrandpaFinalityStoreCorruption("nonconsecutive_segment")
-            expected_minimum = (
-                self._initial_minimum
-                if previous_global is None
-                else max(self._initial_minimum, previous_global.head.height + 1)
+        return count, total_evidence, stored_head_digest[0]
+
+    def _audit_snapshot(
+        self, connection: sqlite3.Connection, *, legacy_accounting: bool = False, checkpoint=None
+    ) -> tuple[int, int]:
+        """Validate ordered records, resuming only a file-bound native checkpoint."""
+        started, reported = time.monotonic(), 0.0
+        saved = None if checkpoint is None else checkpoint.load()
+        previous_global = previous_segment = retained_segment = None
+        previous_acceptance, previous_accepted_at_unix_ms = _ZERO_DIGEST, 0
+        if saved is None:
+            _LOGGER.info(
+                "finality_startup_audit state=running stage=sqlite_integrity completed=0 "
+                "total=unknown elapsed_seconds=0 eta_seconds=unknown "
+                "eta_basis=integrity_scan_before_row_rate checkpoint_reason=%s "
+                "stalled=false retrying=false",
+                "explicit_full_audit" if checkpoint is None else checkpoint.reason,
             )
-            if (
-                segment["minimum_finalized_block"] != expected_minimum
-                or segment["maximum_records"] != self._limits.maximum_records_per_process
-                or segment["startup_timeout_seconds"] != self._startup_timeout_seconds
-            ):
-                raise GrandpaFinalityStoreCorruption("segment_run_binding_mismatch")
-            # Empty/orphan segments were excluded in this same snapshot. A
-            # different next segment means segment order rolls global heights
-            # backward; never skip it while merging the two cursors.
-            if row is None or row["segment_index"] != segment["segment_index"]:
-                raise GrandpaFinalityStoreCorruption("global_height_rollback")
-            previous_segment: FinalityAttestation | None = None
-            expected_sequence = 0
-            while row is not None and row["segment_index"] == segment["segment_index"]:
-                stored = _stored_header(row)
-                try:
-                    parsed = self._observer.validate_attestation(
-                        stored.canonical_evidence,
-                        minimum_finalized_block=segment["minimum_finalized_block"],
-                        maximum_records=segment["maximum_records"],
-                        startup_timeout_seconds=segment["startup_timeout_seconds"],
-                        expected_sequence=expected_sequence,
-                        previous_hash=(
-                            None if previous_segment is None else previous_segment.block.hash
-                        ),
-                        previous_digest=(
-                            "0" * 64
-                            if previous_segment is None
-                            else previous_segment.transcript_digest
-                        ),
-                        previous_number=(
-                            None if previous_segment is None else previous_segment.block.number
-                        ),
-                        previous_timestamp_ms=(
-                            None
-                            if previous_segment is None
-                            else previous_segment.block.timestamp_ms
-                        ),
+            count, total_evidence, stored_head_digest = self._audit_inputs(
+                connection, legacy_accounting=legacy_accounting
+            )
+            completed = 0
+            if checkpoint is not None:
+                checkpoint.save(
+                    {
+                        "count": count,
+                        "total_evidence": total_evidence,
+                        "head_acceptance_digest": stored_head_digest.hex(),
+                        "completed": 0,
+                        "previous": None,
+                        "segment": None,
+                    }
+                )
+        else:
+            try:
+                if set(saved) != {
+                    "count",
+                    "total_evidence",
+                    "head_acceptance_digest",
+                    "completed",
+                    "previous",
+                    "segment",
+                }:
+                    raise ValueError("checkpoint fields differ")
+                count, total_evidence, completed = (
+                    saved["count"],
+                    saved["total_evidence"],
+                    saved["completed"],
+                )
+                if any(type(v) is not int or v < 0 for v in (count, total_evidence, completed)):
+                    raise ValueError("checkpoint counts differ")
+                if completed > count:
+                    raise ValueError("checkpoint completion exceeds count")
+                stored_head_digest = bytes.fromhex(
+                    _sha256(saved["head_acceptance_digest"], "checkpoint head digest")
+                )
+                if completed:
+                    previous_segment = _AuditCursor(
+                        PersistedFinalityHead(**saved["previous"]["head"]),
+                        _sha256(saved["previous"]["transcript_digest"], "checkpoint transcript"),
                     )
-                except (GrandpaFinalityObserverError, ValueError) as error:
-                    raise GrandpaFinalityStoreCorruption(
-                        f"persisted_{getattr(error, 'reason_code', 'invalid_run_binding')}"
-                    ) from error
-                _compare_row(stored, parsed)
-                if expected_sequence == 0:
-                    _audit_segment_boundary(segment, stored, previous_global)
-                    request_id = json.loads(stored.canonical_evidence)["request_id"]
-                    if segment["request_id"] != request_id:
-                        raise GrandpaFinalityStoreCorruption("segment_request_id_mismatch")
-                if previous_global is not None:
-                    if stored.head.height <= previous_global.head.height:
-                        raise GrandpaFinalityStoreCorruption("global_height_rollback")
-                    if stored.head.timestamp_ms < previous_global.head.timestamp_ms:
-                        raise GrandpaFinalityStoreCorruption("global_timestamp_rollback")
+                    previous_global = previous_segment.head
+                    previous_acceptance = bytes.fromhex(
+                        _sha256(previous_global.acceptance_digest, "checkpoint acceptance digest")
+                    )
+                    previous_accepted_at_unix_ms = previous_global.accepted_at_unix_ms
+                    retained_segment = saved["segment"]
+                    if not isinstance(retained_segment, dict):
+                        raise ValueError("checkpoint segment differs")
+                elif saved["previous"] is not None or saved["segment"] is not None:
+                    raise ValueError("empty checkpoint has predecessor")
+            except (TypeError, ValueError, KeyError):
+                checkpoint.repair("audit_checkpoint_state_requires_repair")
+                return self._audit_snapshot(
+                    connection, legacy_accounting=legacy_accounting, checkpoint=checkpoint
+                )
+        reused = completed
+        _LOGGER.info(
+            "finality_startup_audit state=running stage=attestations completed=%d total=%d "
+            "reused=%d elapsed_seconds=%.3f eta_seconds=unknown "
+            "eta_basis=no_new_row_rate_yet stalled=false retrying=false",
+            completed,
+            count,
+            reused,
+            time.monotonic() - started,
+        )
+        # Drain cursors before the writer and its read-only keeper close. An
+        # exception traceback can otherwise retain an active statement, defer
+        # SQLite close, and cause a late checkpoint after the keeper has gone.
+        with ExitStack() as cursors:
+            # Both cursors use primary-key order. Resume after the last verified
+            # height; no completed evidence row or parser result is read again.
+            if previous_global is None:
+                segments = cursors.enter_context(
+                    closing(
+                        connection.execute("SELECT * FROM observer_segments ORDER BY segment_index")
+                    )
+                )
+                rows = cursors.enter_context(
+                    closing(connection.execute("SELECT * FROM finalized_headers ORDER BY height"))
+                )
+                first_segment = 0
+            else:
+                first_segment = previous_global.segment_index
+                segments = cursors.enter_context(
+                    closing(
+                        connection.execute(
+                            "SELECT * FROM observer_segments WHERE segment_index>=? "
+                            "ORDER BY segment_index",
+                            (first_segment,),
+                        )
+                    )
+                )
+                rows = cursors.enter_context(
+                    closing(
+                        connection.execute(
+                            "SELECT * FROM finalized_headers WHERE height>? ORDER BY height",
+                            (previous_global.height,),
+                        )
+                    )
+                )
+            row = next(rows, None)
+            for expected_segment_index, segment in enumerate(segments, start=first_segment):
+                if segment["segment_index"] != expected_segment_index:
+                    raise GrandpaFinalityStoreCorruption("nonconsecutive_segment")
+                continuing = retained_segment is not None and dict(segment) == retained_segment
+                if retained_segment is not None and not continuing:
+                    raise GrandpaFinalityStoreCorruption("audit_checkpoint_segment_changed")
+                retained_segment = None
+                if continuing:
+                    expected_sequence = previous_global.segment_sequence + 1
+                    # The checkpoint may be the last row of this segment, including
+                    # the last row in the store. Its boundary was already checked.
+                    if row is None or row["segment_index"] != segment["segment_index"]:
+                        continue
+                else:
+                    expected_minimum = (
+                        self._initial_minimum
+                        if previous_global is None
+                        else max(self._initial_minimum, previous_global.height + 1)
+                    )
                     if (
-                        stored.head.height == previous_global.head.height + 1
-                        and stored.head.parent_hash != previous_global.head.block_hash
+                        segment["minimum_finalized_block"] != expected_minimum
+                        or segment["maximum_records"] != self._limits.maximum_records_per_process
+                        or segment["startup_timeout_seconds"] != self._startup_timeout_seconds
                     ):
-                        raise GrandpaFinalityStoreCorruption("adjacent_parent_mismatch")
-                evidence_digest = hashlib.sha256(stored.canonical_evidence).digest()
-                accepted_at_unix_ms = _positive_uint(
-                    stored.head.accepted_at_unix_ms,
-                    "persisted finality acceptance time",
-                )
-                if accepted_at_unix_ms < previous_accepted_at_unix_ms:
-                    raise GrandpaFinalityStoreCorruption("acceptance_clock_rollback")
-                expected_acceptance = _acceptance_digest(
-                    previous_acceptance,
-                    height=stored.head.height,
-                    block_hash=stored.head.block_hash,
-                    evidence_digest=evidence_digest,
-                    segment_index=stored.head.segment_index,
-                    sequence=stored.head.segment_sequence,
-                    restart_gap=stored.head.restart_gap_before,
-                    accepted_at_unix_ms=accepted_at_unix_ms,
-                )
-                if (
-                    row["previous_acceptance_digest"] != previous_acceptance.hex()
-                    or stored.head.acceptance_digest != expected_acceptance.hex()
-                ):
-                    raise GrandpaFinalityStoreCorruption("acceptance_digest_mismatch")
-                previous_acceptance = expected_acceptance
-                previous_accepted_at_unix_ms = accepted_at_unix_ms
-                previous_segment = parsed
-                previous_global = stored
-                expected_sequence += 1
-                completed += 1
-                elapsed = time.monotonic() - started
-                if elapsed - reported >= 1:
-                    _LOGGER.info(
-                        "finality_startup_audit state=running stage=attestations "
-                        "completed=%d total=%d elapsed_seconds=%.3f eta_seconds=%.3f "
-                        "eta_basis=current_audit_rows_per_second stalled=false retrying=false",
-                        completed,
-                        count,
-                        elapsed,
-                        elapsed * (count - completed) / completed,
+                        raise GrandpaFinalityStoreCorruption("segment_run_binding_mismatch")
+                    if row is None or row["segment_index"] != segment["segment_index"]:
+                        raise GrandpaFinalityStoreCorruption("global_height_rollback")
+                    previous_segment = None
+                    expected_sequence = 0
+                while row is not None and row["segment_index"] == segment["segment_index"]:
+                    stored = _stored_header(row)
+                    try:
+                        parsed = self._observer.validate_attestation(
+                            stored.canonical_evidence,
+                            minimum_finalized_block=segment["minimum_finalized_block"],
+                            maximum_records=segment["maximum_records"],
+                            startup_timeout_seconds=segment["startup_timeout_seconds"],
+                            expected_sequence=expected_sequence,
+                            previous_hash=(
+                                None
+                                if previous_segment is None
+                                else previous_segment.head.block_hash
+                            ),
+                            previous_digest=(
+                                "0" * 64
+                                if previous_segment is None
+                                else previous_segment.transcript_digest
+                            ),
+                            previous_number=(
+                                None if previous_segment is None else previous_segment.head.height
+                            ),
+                            previous_timestamp_ms=(
+                                None
+                                if previous_segment is None
+                                else previous_segment.head.timestamp_ms
+                            ),
+                        )
+                    except (GrandpaFinalityObserverError, ValueError) as error:
+                        raise GrandpaFinalityStoreCorruption(
+                            f"persisted_{getattr(error, 'reason_code', 'invalid_run_binding')}"
+                        ) from error
+                    _compare_row(stored, parsed)
+                    if expected_sequence == 0:
+                        _audit_segment_boundary(segment, stored, previous_global)
+                        request_id = json.loads(stored.canonical_evidence)["request_id"]
+                        if segment["request_id"] != request_id:
+                            raise GrandpaFinalityStoreCorruption("segment_request_id_mismatch")
+                    if previous_global is not None:
+                        if stored.head.height <= previous_global.height:
+                            raise GrandpaFinalityStoreCorruption("global_height_rollback")
+                        if stored.head.timestamp_ms < previous_global.timestamp_ms:
+                            raise GrandpaFinalityStoreCorruption("global_timestamp_rollback")
+                        if (
+                            stored.head.height == previous_global.height + 1
+                            and stored.head.parent_hash != previous_global.block_hash
+                        ):
+                            raise GrandpaFinalityStoreCorruption("adjacent_parent_mismatch")
+                    evidence_digest = hashlib.sha256(stored.canonical_evidence).digest()
+                    accepted_at_unix_ms = _positive_uint(
+                        stored.head.accepted_at_unix_ms,
+                        "persisted finality acceptance time",
                     )
-                    reported = elapsed
-                row = next(rows, None)
+                    if accepted_at_unix_ms < previous_accepted_at_unix_ms:
+                        raise GrandpaFinalityStoreCorruption("acceptance_clock_rollback")
+                    expected_acceptance = _acceptance_digest(
+                        previous_acceptance,
+                        height=stored.head.height,
+                        block_hash=stored.head.block_hash,
+                        evidence_digest=evidence_digest,
+                        segment_index=stored.head.segment_index,
+                        sequence=stored.head.segment_sequence,
+                        restart_gap=stored.head.restart_gap_before,
+                        accepted_at_unix_ms=accepted_at_unix_ms,
+                    )
+                    if (
+                        row["previous_acceptance_digest"] != previous_acceptance.hex()
+                        or stored.head.acceptance_digest != expected_acceptance.hex()
+                    ):
+                        raise GrandpaFinalityStoreCorruption("acceptance_digest_mismatch")
+                    previous_acceptance = expected_acceptance
+                    previous_accepted_at_unix_ms = accepted_at_unix_ms
+                    previous_segment = _AuditCursor(stored.head, stored.transcript_digest)
+                    previous_global = stored.head
+                    expected_sequence += 1
+                    completed += 1
+                    if checkpoint is not None:
+                        checkpoint.save(
+                            {
+                                "count": count,
+                                "total_evidence": total_evidence,
+                                "head_acceptance_digest": stored_head_digest.hex(),
+                                "completed": completed,
+                                "previous": asdict(previous_segment),
+                                "segment": dict(segment),
+                            }
+                        )
+                    elapsed = time.monotonic() - started
+                    if elapsed - reported >= 1:
+                        _LOGGER.info(
+                            "finality_startup_audit state=running stage=attestations "
+                            "completed=%d total=%d elapsed_seconds=%.3f eta_seconds=%.3f "
+                            "eta_basis=current_audit_rows_per_second stalled=false retrying=false",
+                            completed,
+                            count,
+                            elapsed,
+                            elapsed * (count - completed) / (completed - reused),
+                        )
+                        reported = elapsed
+                    row = next(rows, None)
         if row is not None:
             raise GrandpaFinalityStoreCorruption("global_height_rollback")
-        if stored_head_digest[0] != previous_acceptance:
+        if completed != count:
+            raise GrandpaFinalityStoreCorruption("audit_checkpoint_count_mismatch")
+        if stored_head_digest != previous_acceptance:
             raise GrandpaFinalityStoreCorruption("head_acceptance_digest_mismatch")
         _LOGGER.info(
             "finality_startup_audit state=completed completed=%d total=%d "
@@ -1006,7 +1133,12 @@ class DurableGrandpaFinalityPort:
                                 _LOGGER.warning(
                                     "finality_startup_audit state=repair_required reason=%s", reason
                                 )
-                                self._audit_snapshot(connection)
+                                self._audit_snapshot(
+                                    connection,
+                                    checkpoint=self._frontier.audit_checkpoint(
+                                        config, legacy_accounting=False
+                                    ),
+                                )
                         try:
                             yield connection
                         except BaseException as error:
@@ -1068,11 +1200,22 @@ class DurableGrandpaFinalityPort:
                 if user_version == 2:
                     # Audit and backfill under the same write lock. Old opened
                     # connections automatically execute the installed triggers.
-                    usage = self._audit_snapshot(connection, legacy_accounting=True)
+                    usage = self._audit_snapshot(
+                        connection,
+                        legacy_accounting=True,
+                        checkpoint=self._frontier.audit_checkpoint(
+                            self._config_bytes(), legacy_accounting=True
+                        ),
+                    )
                     install_accounting(connection, usage)
                     connection.execute(f"PRAGMA user_version = {STORE_SCHEMA_VERSION}")
                 else:
-                    self._audit_snapshot(connection)
+                    self._audit_snapshot(
+                        connection,
+                        checkpoint=self._frontier.audit_checkpoint(
+                            self._config_bytes(), legacy_accounting=False
+                        ),
+                    )
         except AccountingError as error:
             raise GrandpaFinalityStoreCorruption("evidence_accounting_corrupt") from error
         except sqlite3.DatabaseError as error:
@@ -1870,11 +2013,11 @@ def _compare_row(stored: _StoredHeader, parsed: FinalityAttestation) -> None:
 def _audit_segment_boundary(
     segment: sqlite3.Row,
     first: _StoredHeader,
-    previous: _StoredHeader | None,
+    previous: PersistedFinalityHead | None,
 ) -> None:
-    expected_prior_height = None if previous is None else previous.head.height
-    expected_prior_hash = None if previous is None else previous.head.block_hash
-    gap = previous is not None and first.head.height != previous.head.height + 1
+    expected_prior_height = None if previous is None else previous.height
+    expected_prior_hash = None if previous is None else previous.block_hash
+    gap = previous is not None and first.head.height != previous.height + 1
     if (
         segment["prior_global_height"] != expected_prior_height
         or segment["prior_global_hash"] != expected_prior_hash
@@ -1882,7 +2025,7 @@ def _audit_segment_boundary(
         or first.head.restart_gap_before != gap
     ):
         raise GrandpaFinalityStoreCorruption("segment_boundary_mismatch")
-    if previous is not None and not gap and first.head.parent_hash != previous.head.block_hash:
+    if previous is not None and not gap and first.head.parent_hash != previous.block_hash:
         raise GrandpaFinalityStoreCorruption("adjacent_parent_mismatch")
 
 

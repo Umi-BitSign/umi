@@ -1655,9 +1655,17 @@ Unchanged startup reuses the retained conclusion without replaying evidence.
 Missing, damaged or changed completion enters a reported repair audit; failed
 audits cannot publish completion. Original schema-2 accounting migration and
 approved policy/capacity transitions retain their existing semantic checks.
-Initial and repair audits currently remain full passes. Per-item first-audit
-checkpoints and actual installed namespace/restart qualification remain required
-before selecting this startup-reuse capability in production. No signed evidence,
+Initial and repair audits checkpoint integrity/count results and each verified
+row in a bounded `audit-progress.json` file. An unchanged interrupted audit resumes
+after its retained prefix without rereading completed evidence or repeating its
+integrity scan. The checkpoint binds the exact database/WAL identities, audit
+semantics, configuration and accounting layout. Missing, damaged or changed state
+reports repair; it cannot authorize skipping evidence. Progress separates reused
+rows from new work when calculating the remaining audit rate. Explicit operator
+audits still inspect the whole snapshot. The native owner holds its write lock
+through an initial or repair audit; other writers must wait or retry their normal
+bounded lock acquisition. Qualify the actual installed namespace and supported
+adoption path before production selection. No signed evidence,
 chain observation, current nonce or transaction-finality check is replaced.
 
 Historical header-hint import uses the existing bounded native importer. Hints

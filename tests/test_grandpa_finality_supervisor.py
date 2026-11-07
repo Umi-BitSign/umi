@@ -573,6 +573,9 @@ def test_audit_streams_history_before_reading_the_next_header(
         def __init__(self, cursor, kind):
             self.cursor, self.kind = cursor, kind
 
+        def close(self):
+            self.cursor.close()
+
         def fetchall(self):
             pytest.fail("audit must not materialize history")
 
@@ -957,6 +960,9 @@ def test_streaming_audit_wraps_cursor_failure_and_closes_connection(
             class FailingCursor:
                 def __init__(self, cursor):
                     self.cursor, self.read = cursor, 0
+
+                def close(self):
+                    self.cursor.close()
 
                 def __next__(self):
                     self.read += 1
