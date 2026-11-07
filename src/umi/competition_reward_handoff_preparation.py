@@ -17,7 +17,11 @@ from .competition_host_activation import (
     selected_weight_state_root,
     validate_authenticated_successor_installation,
 )
-from .competition_reward_handoff import _verify_inventory, read_retained_handoff_intent
+from .competition_reward_handoff import (
+    _verify_database_integrity,
+    _verify_inventory,
+    read_retained_handoff_intent,
+)
 from .competition_reward_handoff_reuse import (
     LegacyHandoffVerification,
     repair_required,
@@ -31,7 +35,6 @@ from .competition_supervisor_adapters import (
     verify_retained_package,
 )
 from .competition_weights import _recovery_journal_snapshot, _recovery_package_snapshot
-from .competition_work_progress import WorkProgress, work_heartbeats
 from .competition_worker import _open_private_regular_file
 from .open_competition import digest
 
@@ -47,7 +50,7 @@ class LegacyHandoffPreparationResult:
 
 
 @contextmanager
-def _read_preparation_database(path, maximum_bytes, snapshot, *, audited):
+def _read_preparation_database(path, maximum_bytes, snapshot):
     if any(value is not None for suffix, value in snapshot[1] if suffix):
         raise repair_required("preparation_requires_stable_delete_journal")
     descriptor = _open_private_regular_file(path, "legacy preparation journal")
@@ -59,20 +62,11 @@ def _read_preparation_database(path, maximum_bytes, snapshot, *, audited):
         os.close(descriptor)
     if header[:16] != b"SQLite format 3\x00" or header[18:20] != b"\x01\x01":
         raise repair_required("preparation_requires_stable_delete_journal")
-    db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)
+    db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1, check_same_thread=False)
     try:
         db.execute("PRAGMA query_only=ON")
         db.execute("BEGIN")
-        if not audited:
-            with (
-                work_heartbeats(),
-                WorkProgress("legacy_preparation_database", 1, unit="journals") as meter,
-            ):
-                if db.execute("PRAGMA quick_check").fetchone() != ("ok",):
-                    raise ValueError("legacy preparation journal is corrupt")
-                meter.advance()
-        else:
-            db.execute("SELECT rootpage FROM sqlite_master LIMIT 1").fetchone()
+        db.execute("SELECT rootpage FROM sqlite_master LIMIT 1").fetchone()
         if _recovery_journal_snapshot(path) != snapshot:
             raise repair_required("preparation_source_changed")
         yield db
@@ -160,9 +154,17 @@ async def prepare_retained_legacy_handoff(
     with verification.reuse.exclusive():
         audited = verification.load("evidence_audit", "inventory", context)
         completed = verification.load("completion", "inventory", context)
-        with _read_preparation_database(
-            path, maximum_bytes, weight_snapshot, audited=audited is not None
-        ) as db:
+        database_checked = verification.load("database_check", "inventory", context)
+        if completed is not None and audited is None:
+            raise repair_required("inventory_audit_completion_missing")
+        with _read_preparation_database(path, maximum_bytes, weight_snapshot) as db:
+            await _verify_database_integrity(
+                db,
+                verification,
+                context,
+                recheck,
+                already_checked=audited is not None or database_checked is not None,
+            )
             completed = await _verify_inventory(
                 installation,
                 providers,

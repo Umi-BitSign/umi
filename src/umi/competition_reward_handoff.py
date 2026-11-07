@@ -5,6 +5,7 @@ select the approved new executable at boot; this library does not install it.
 No old attempt, signed history or original process lock is replaced or deleted.
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -13,8 +14,11 @@ import sqlite3
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
+from threading import Event
 
+from .competition_evidence_audit_progress import EvidenceAuditProgress
 from .competition_evidence_reader import evidence_reader
 from .competition_host_activation import (
     selected_weight_state_root,
@@ -56,8 +60,14 @@ from .competition_weights import (
     _WeightAttempt,
     competition_weight_authorization_digest,
 )
-from .competition_work_progress import WorkProgress, work_heartbeats
+from .competition_work_progress import (
+    WorkProgress,
+    cancellable_work,
+    check_work_cancelled,
+    work_heartbeats,
+)
 from .competition_worker import _open_private_regular_file
+from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .open_competition import digest, identity
 from .protocol import canonical_json_bytes
@@ -130,7 +140,7 @@ def read_retained_handoff_intent(installation, limits: SuccessorRuntimeLimits):
         return RetainedLegacyHandoffIntent(path, snapshot, binding, intent)
 
 
-def _attempts(db, installation, *, audit_evidence=True):
+def _attempts(db, installation, *, audit_evidence=True, audit_progress=None):
     ceiling = installation.worker_execution_limits
     count, maximum = db.execute(
         "SELECT COUNT(*),COALESCE(MAX(length(body)),0) FROM attempts"
@@ -144,9 +154,11 @@ def _attempts(db, installation, *, audit_evidence=True):
         maximum_attempts=ceiling.maximum_weight_attempts,
         maximum_evidence_bytes=ceiling.maximum_weight_evidence_bytes,
         audit_evidence=audit_evidence,
+        audit_progress=audit_progress,
     )
     attempts = []
     for key, raw, sha in db.execute("SELECT id,body,sha256 FROM attempts ORDER BY id"):
+        check_work_cancelled()
         if type(raw) is not bytes or hashlib.sha256(raw).hexdigest() != sha:
             raise ValueError("legacy handoff attempt checksum differs")
         item = _WeightAttempt.model_validate_json(raw)
@@ -254,11 +266,17 @@ async def hold_legacy_reward_handoff(
         }
         audited = verification.load("evidence_audit", "inventory", context)
         completed = verification.load("completion", "inventory", context)
+        database_checked = verification.load("database_check", "inventory", context)
+        if completed is not None and audited is None:
+            raise repair_required("inventory_audit_completion_missing")
         with _read_worker_database(
             path,
             lock,
             ceiling,
-            verified_snapshot=None if audited is None else initial_weight_snapshot,
+            defer_integrity_check=True,
+            verified_snapshot=initial_weight_snapshot
+            if audited is not None or database_checked is not None
+            else None,
         ) as db:
             # Both locks stay held across slow proof work and the caller's whole
             # execution lifetime. Snapshot guards also reject out-of-protocol edits.
@@ -290,6 +308,13 @@ async def hold_legacy_reward_handoff(
 
             try:
                 with verification.reuse.exclusive():
+                    await _verify_database_integrity(
+                        db,
+                        verification,
+                        context,
+                        recheck,
+                        already_checked=audited is not None or database_checked is not None,
+                    )
                     completed = await _verify_inventory(
                         runtime.installation,
                         providers,
@@ -317,6 +342,32 @@ async def hold_legacy_reward_handoff(
                 )
             finally:
                 active = False
+
+
+async def _verify_database_integrity(db, verification, context, recheck, *, already_checked):
+    """Retain one structural pass; drain cooperative SQLite work on cancellation."""
+    if already_checked:
+        recheck()
+        return
+    stopping = Event()
+
+    def check():
+        db.set_progress_handler(lambda: int(stopping.is_set()), 1000)
+        try:
+            if db.execute("PRAGMA quick_check").fetchone() != ("ok",):
+                raise ValueError("legacy handoff journal is corrupt")
+        except sqlite3.OperationalError as error:
+            if stopping.is_set():
+                raise asyncio.CancelledError("legacy database check cancelled") from error
+            raise
+        finally:
+            db.set_progress_handler(None, 0)
+
+    with work_heartbeats(), WorkProgress("legacy_database_integrity", 1, unit="journals") as meter:
+        await run_owned_thread(check, on_cancel=stopping.set)
+        recheck()
+        verification.remember("database_check", "inventory", context, {"complete": True})
+        meter.advance()
 
 
 async def _verify_inventory(
@@ -353,8 +404,22 @@ async def _verify_inventory(
             meter.advance()
         _LOG.info("legacy_handoff_inventory_restored attempts=%d", completed["attempts"])
         return completed
-    with WorkProgress("legacy_handoff_inventory_audit", 1, unit="inventories") as meter:
-        attempts, read = _attempts(db, installation, audit_evidence=audited is None)
+    with (
+        work_heartbeats(),
+        WorkProgress("legacy_handoff_inventory_audit", 1, unit="inventories") as meter,
+    ):
+        stopping = Event()
+        with cancellable_work(stopping):
+            attempts, read = await run_owned_thread(
+                partial(
+                    _attempts,
+                    db,
+                    installation,
+                    audit_evidence=audited is None,
+                    audit_progress=EvidenceAuditProgress(verification, context, recheck),
+                ),
+                on_cancel=stopping.set,
+            )
         recheck()
         if audited is None:
             verification.remember("evidence_audit", "inventory", context, {"complete": True})

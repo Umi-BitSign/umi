@@ -1564,9 +1564,17 @@ completion needs explicit repair. The supported service command must still own
 provider assembly, resource admission, cancellation and preparation before stopping
 the current writer. Do not construct another provider against its live writable
 cache or treat this library API as an installed supervised update path.
-Package and expiry checkpoints survive interruption; the initial full evidence
-audit currently checkpoints at stage completion. Per-item audit recovery remains
-required before selecting this preparation path for a large retained journal.
+The initial evidence audit checkpoints after each verified legacy payload, CAS
+object, expanded record and continuity record. Each inventory has one atomic
+ordered-prefix receipt bound to the unchanged journal, native limits and verifier
+semantics. Resume checks the retained prefix against ordered metadata and reads
+only unfinished audit payloads. This keeps receipt-file counts bounded even for
+large object inventories. Missing or damaged completion requires explicit repair.
+The database integrity check has its own retained completion. Both checks use
+owned thread work so heartbeat reporting stays active; cancellation drains the
+current operation before releasing the database. Package and expiry completion
+remain individually reusable. Existing complete inventory receipts continue to
+work without generating new item checkpoints or repeating their audits.
 
 During initial history/package replay, the original supervisor continues
 predecessor reconciliation. The durable handoff intent stops that continuation

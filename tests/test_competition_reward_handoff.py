@@ -325,6 +325,63 @@ async def test_preparation_rejects_changed_source_before_repeating_proofs(migrat
             await preparation_module.prepare_retained_legacy_handoff(c.installation, **args)
 
 
+@pytest.mark.parametrize("target", ["initial", "expanded"])
+@pytest.mark.parametrize("failure", [OSError, asyncio.CancelledError])
+async def test_initial_evidence_audit_resumes_each_item_and_database_check(
+    migration, monkeypatch, target, failure
+):
+    c = migration
+    cas = c.installation.worker_execution_limits.weight_evidence_storage is not None
+    if target == "expanded" and not cas:
+        pytest.skip("legacy evidence has no separate expanded-record inventory")
+    kind = "records" if target == "expanded" else "objects" if cas else "legacy"
+    await signed_attempt(c)
+    async with c.reopen() as runtime:
+        args = await retain_preparation_intent(c, runtime, monkeypatch)
+        verified, structural = [], []
+        run = handoff.EvidenceAuditProgress.run
+
+        def tracked(self, item_kind, total, items, verify):
+            def checked(key, size):
+                verified.append((item_kind, key))
+                return verify(key, size)
+
+            return run(self, item_kind, total, items, checked)
+
+        monkeypatch.setattr(handoff.EvidenceAuditProgress, "run", tracked)
+        connect = sqlite3.connect
+
+        def tracing(*values, **kwargs):
+            db = connect(*values, **kwargs)
+            if "competition-weights.sqlite3" in str(values[0]):
+                db.set_trace_callback(
+                    lambda sql: (
+                        structural.append(sql) if sql.upper() == "PRAGMA QUICK_CHECK" else None
+                    )
+                )
+            return db
+
+        monkeypatch.setattr(sqlite3, "connect", tracing)
+        remember = handoff.LegacyHandoffVerification.remember
+
+        def interrupted(self, stage, key, context, value):
+            remember(self, stage, key, context, value)
+            if stage == "evidence_frontier" and key == kind and value["completed"] == 1:
+                raise failure("after durable evidence item")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(handoff.LegacyHandoffVerification, "remember", interrupted)
+            with pytest.raises(failure, match="durable evidence item"):
+                await preparation_module.prepare_retained_legacy_handoff(c.installation, **args)
+        result = await preparation_module.prepare_retained_legacy_handoff(c.installation, **args)
+        assert result.attempts == 1
+        assert len(verified) == len(set(verified))
+        assert len(structural) == 1
+        async with handoff.hold_legacy_reward_handoff(runtime, **c.args) as leased:
+            c.validate(leased)
+        assert len(structural) == 1
+
+
 def assert_locked(path):
     with Path(path).open("rb") as f, pytest.raises(BlockingIOError):
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -646,9 +703,9 @@ async def test_completed_items_survive_interrupted_inventory_commit(
     attempts = handoff._attempts
     audits = []
 
-    def read_attempts(db, adapter, *, audit_evidence=True):
+    def read_attempts(db, adapter, *, audit_evidence=True, audit_progress=None):
         audits.append(audit_evidence)
-        return attempts(db, adapter, audit_evidence=audit_evidence)
+        return attempts(db, adapter, audit_evidence=audit_evidence, audit_progress=audit_progress)
 
     monkeypatch.setattr(handoff, "_attempts", read_attempts)
     async with (

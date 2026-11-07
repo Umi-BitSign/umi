@@ -17,7 +17,7 @@ _MAX_RECORD = 256 * 1024
 _MAX_RECORDS = 32
 
 
-def audit_continuity_transitions(db):
+def audit_continuity_transitions(db, *, audit_progress=None):
     schema = db.execute("SELECT sql FROM sqlite_master WHERE name=?", (_TABLE,)).fetchone()
     if schema is None:
         return
@@ -28,7 +28,8 @@ def audit_continuity_transitions(db):
     ).fetchone()
     if count > _MAX_RECORDS or maximum > _MAX_RECORD:
         raise ValueError("continuity transition history exceeds its bound")
-    for identity, raw, checksum in db.execute(f"SELECT id,body,sha256 FROM {_TABLE}"):
+
+    def verify(identity, raw, checksum):
         if not isinstance(raw, bytes) or hashlib.sha256(raw).hexdigest() != checksum:
             raise ValueError("continuity transition history checksum differs")
         value = json.loads(raw)
@@ -56,6 +57,24 @@ def audit_continuity_transitions(db):
         grant = SignedHistoryCompatibility.model_validate(value["signed_compatibility"])
         if grant.body_sha256 != value["compatibility_sha256"]:
             raise ValueError("continuity transition embedded authority differs")
+
+    if audit_progress is None:
+        for row in db.execute(f"SELECT id,body,sha256 FROM {_TABLE}"):
+            verify(*row)
+    else:
+
+        def check(identity, size):
+            raw, checksum = db.execute(
+                f"SELECT body,sha256 FROM {_TABLE} WHERE id=?", (identity,)
+            ).fetchone()
+            verify(identity, raw, checksum)
+
+        audit_progress.run(
+            "continuity",
+            count,
+            db.execute(f"SELECT id,length(body) FROM {_TABLE} ORDER BY id"),
+            check,
+        )
 
 
 def record_continuity_transition(db, *, activation, policy, before, after):

@@ -397,7 +397,12 @@ def read_retained_adapter_inventory(
 
 @contextmanager
 def _read_worker_database(
-    path: Path, lock_path: Path, maximum_bytes: int, *, verified_snapshot=None
+    path: Path,
+    lock_path: Path,
+    maximum_bytes: int,
+    *,
+    verified_snapshot=None,
+    defer_integrity_check=False,
 ):
     descriptor = _open_private_regular_file(lock_path, "stopped worker journal lock")
     try:
@@ -414,18 +419,23 @@ def _read_worker_database(
                     os.close(opened)
         if total > maximum_bytes:
             raise SuccessorAdapterError("stopped worker journal exceeds its byte budget")
-        db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)
+        db = sqlite3.connect(
+            path.as_uri() + "?mode=ro", uri=True, timeout=1, check_same_thread=False
+        )
         try:
             db.execute("PRAGMA query_only=ON")
             db.execute("BEGIN")
-            if verified_snapshot is None:
+            if verified_snapshot is None and not defer_integrity_check:
                 if db.execute("PRAGMA quick_check").fetchone() != ("ok",):
                     raise SuccessorAdapterError("stopped worker journal is corrupt")
             else:
                 # Establish the SQLite read lease even when the full audit is
                 # reused. BEGIN alone does not acquire a shared database lock.
                 db.execute("SELECT rootpage FROM sqlite_master LIMIT 1").fetchone()
-                if _recovery_journal_snapshot(path) != verified_snapshot:
+                if (
+                    verified_snapshot is not None
+                    and _recovery_journal_snapshot(path) != verified_snapshot
+                ):
                     raise SuccessorAdapterError("verified stopped worker journal changed")
             yield db
         finally:

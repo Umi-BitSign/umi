@@ -336,7 +336,7 @@ class EvidenceStore:
                 )
         return encoded.sha256
 
-    def audit(self) -> EvidenceBudget:
+    def audit(self, *, audit_progress=None) -> EvidenceBudget:
         """Reconstruct every original hash, including evidence not referenced by an attempt.
 
         Cost is proportional to *expanded* history. No unchecked memoization skips
@@ -344,12 +344,39 @@ class EvidenceStore:
         """
         usage = self.inventory()
         self._check_capacity(usage, self._reservations())
-        for key, size in self.db.execute("SELECT sha256,length(body) FROM weight_proof_objects"):
+
+        def check_object(key, size):
             checked_digest(key)
             checked_size(size, MAX_EVIDENCE_BYTES)
             self._object(key, size)
-        for (key,) in self.db.execute("SELECT sha256 FROM weight_proof_records"):
+
+        def check_record(key, size):
             kind, size, recipe = self._record(key)
             inspect_recipe(recipe, expanded_bytes=size, kind=kind)
             self.get(key)
+
+        if audit_progress is None:
+            for key, size in self.db.execute(
+                "SELECT sha256,length(body) FROM weight_proof_objects"
+            ):
+                check_object(key, size)
+            for (key,) in self.db.execute("SELECT sha256 FROM weight_proof_records"):
+                check_record(key, None)
+        else:
+            audit_progress.run(
+                "objects",
+                usage.objects,
+                self.db.execute(
+                    "SELECT sha256,length(body) FROM weight_proof_objects ORDER BY sha256"
+                ),
+                check_object,
+            )
+            audit_progress.run(
+                "records",
+                usage.records,
+                self.db.execute(
+                    "SELECT sha256,expanded_bytes FROM weight_proof_records ORDER BY sha256"
+                ),
+                check_record,
+            )
         return usage

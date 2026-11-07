@@ -12,7 +12,14 @@ from .protocol import canonical_json_bytes
 
 
 def evidence_reader(
-    db, *, storage, validator_hotkey, maximum_attempts, maximum_evidence_bytes, audit_evidence=True
+    db,
+    *,
+    storage,
+    validator_hotkey,
+    maximum_attempts,
+    maximum_evidence_bytes,
+    audit_evidence=True,
+    audit_progress=None,
 ):
     """Skip full replay only inside a durably verified immutable journal snapshot.
 
@@ -62,7 +69,7 @@ def evidence_reader(
         raise ValueError("retained evidence owner or legacy capacity changed")
     if storage is not None:
         if audit_evidence:
-            audit_continuity_transitions(db)
+            audit_continuity_transitions(db, audit_progress=audit_progress)
         bind_worker_profile(db, storage.profile())
         store = EvidenceStore(
             db,
@@ -70,7 +77,7 @@ def evidence_reader(
             limits=storage.profile().limits,
         )
         if audit_evidence:
-            store.audit()
+            store.audit(audit_progress=audit_progress)
         return store.get
     if cas:
         raise ValueError("legacy host cannot interpret content-addressed evidence")
@@ -92,8 +99,17 @@ def evidence_reader(
         return raw
 
     if audit_evidence:
-        for (identity,) in db.execute("SELECT sha256 FROM evidence"):
-            read(identity)
+        if audit_progress is None:
+            for (identity,) in db.execute("SELECT sha256 FROM evidence"):
+                read(identity)
+        else:
+            count = db.execute("SELECT COUNT(*) FROM evidence").fetchone()[0]
+            audit_progress.run(
+                "legacy",
+                count,
+                db.execute("SELECT sha256,length(body) FROM evidence ORDER BY sha256"),
+                lambda key, size: read(key),
+            )
     return read
 
 
