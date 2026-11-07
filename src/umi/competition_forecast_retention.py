@@ -7,6 +7,7 @@ import time
 from collections.abc import Mapping
 
 from .competition_forecast_archive import ForecastSegment
+from .competition_forecast_compaction import ForecastCompaction
 from .competition_forecast_health import write_health
 from .competition_forecast_io import encode_forecast_json
 from .competition_forecast_segments import ForecastSegments
@@ -45,6 +46,7 @@ class ForecastRetention:
         self.last_archive = self.started
         self.initial_indexed = None
         self.ledger = ledger
+        self.compaction = ForecastCompaction(ledger)
         if (
             ledger.db.execute("PRAGMA user_version").fetchone() == (2,)
             and not (ledger.directory / "retention").exists()
@@ -106,7 +108,7 @@ class ForecastRetention:
                     and remaining < self.page_events
                     and time.monotonic() - self.last_archive < 30
                 ):
-                    return False
+                    return self.compaction.advance()
                 rows = tuple(
                     ledger.db.execute(
                         "SELECT sequence,identity,scope,body,previous,digest FROM events "
@@ -145,6 +147,7 @@ class ForecastRetention:
                     ledger.health = {**ledger.health, "blocked_capacity_bytes": None}
                     write_health(ledger.health_path, ledger.health)
                     ledger.capacity_required = False
+        self.compaction.advance()
         return True
 
     def diagnostics(self, *, error=None):
@@ -195,6 +198,7 @@ class ForecastRetention:
             eta_scope="forecast_retention_only_not_cohort_completion",
             stalled_or_retrying=error is not None,
             error_type=None if error is None else type(error).__name__,
+            compaction=dict(self.compaction.status),
             certification_authority=False,
         )
 

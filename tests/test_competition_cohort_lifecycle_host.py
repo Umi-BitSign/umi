@@ -959,3 +959,19 @@ def test_optional_suite_adoption_config_preserves_legacy_and_protects_installed_
     assert Path(selected.evaluation_suite_operator_token_file) in config.stores()
     assert canonical_json_bytes(config.series) == canonical_json_bytes(c.series)
     assert canonical_json_bytes(c) == original
+
+
+def test_compaction_selection_retains_legacy_bytes_and_shared_namespace(lifecycle, tmp_path):
+    config = configured(lifecycle, tmp_path / "host").lifecycle
+    original = canonical_json_bytes(config)
+    assert b'"forecast_compaction"' not in original
+    selection = dict(reserve_bytes=123456, lock_file=str(tmp_path / "shared-compaction.lock"))
+    selected = LifecycleHostConfig.model_validate(
+        config.model_dump(by_alias=True) | {"forecast_compaction": selection}
+    )
+    assert selected.forecast_compaction.reserve_bytes == 123456
+    assert Path(selection["lock_file"]) in selected.stores()
+    assert Path(selection["lock_file"]) not in selected.stores(include_shared=False)
+    assert (
+        canonical_json_bytes(selected.model_copy(update={"forecast_compaction": None})) == original
+    )

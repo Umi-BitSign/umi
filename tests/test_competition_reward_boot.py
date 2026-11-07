@@ -973,3 +973,18 @@ async def test_writer_credit_repair_refuses_busy_owner_before_config_or_state(in
         await boot.run_installed_credit_repair(
             inputs.anchor, inputs.path, asyncio.Event(), key="ab" * 32, reason="original restored"
         )
+
+
+def test_compaction_selection_retains_legacy_bytes_and_shared_namespace(inputs, tmp_path):
+    original = canonical_json_bytes(inputs.value)
+    assert b'"forecast_compaction"' not in original
+    selection = dict(reserve_bytes=123456, lock_file=str(tmp_path / "shared-compaction.lock"))
+    selected = type(inputs.value).model_validate(
+        inputs.value.model_dump(by_alias=True) | {"forecast_compaction": selection}
+    )
+    assert selected.forecast_compaction.reserve_bytes == 123456
+    assert Path(selection["lock_file"]) in selected.mutable_stores()
+    assert Path(selection["lock_file"]) not in selected.mutable_stores(include_shared=False)
+    assert (
+        canonical_json_bytes(selected.model_copy(update={"forecast_compaction": None})) == original
+    )

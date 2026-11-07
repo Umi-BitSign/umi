@@ -73,6 +73,7 @@ def select_history_forecasts(
                 }
             ),
             maximum_index_bytes=getattr(config, "forecast_retention_index_bytes", 512 * 1024**2),
+            compaction=getattr(config, "forecast_compaction", None),
         )
         resources.callback(ledger.close)
         if remote_store is not None:

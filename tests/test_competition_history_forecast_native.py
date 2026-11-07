@@ -116,6 +116,8 @@ async def test_selected_native_owner_emits_qualified_originals_across_restart(
     monkeypatch.setattr(
         forecast_module, "time", SimpleNamespace(time_ns=lambda: int(now[0] * 10**9))
     )
+    admission = tmp_path / "compaction.lock"
+    admission.touch(mode=0o600)
     config = SimpleNamespace(
         series=h.c.series,
         policy=h.item.policy,
@@ -126,6 +128,7 @@ async def test_selected_native_owner_emits_qualified_originals_across_restart(
         runtime_adoptions=(),
         runtime_proof_reads=True,
         forecast_accounting_bytes=1024**2,
+        forecast_compaction=dict(reserve_bytes=0, lock_file=str(admission)) if archived else None,
     )
 
     remote, stop = (Remote() if archived else None), asyncio.Event()
@@ -151,6 +154,7 @@ async def test_selected_native_owner_emits_qualified_originals_across_restart(
 
     async with AsyncExitStack() as resources:
         ledger = select(resources)
+        assert (ledger.compaction is not None) == archived
         partial = await h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=3)
         scope = h.reader.progress.forecast.scope
         before = ledger.records(scope)
@@ -180,6 +184,7 @@ async def test_selected_native_owner_emits_qualified_originals_across_restart(
     now[0] += 100  # Downtime is part of the realized error, never erased by restart.
     async with AsyncExitStack() as resources:
         ledger = select(resources)
+        assert (ledger.compaction is not None) == archived
         load = h.reader._load
 
         def new_sources_only(height):

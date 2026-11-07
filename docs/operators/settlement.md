@@ -657,8 +657,28 @@ inside each page transaction to bound database calls during shared-process work.
 Maintenance indexes at most 256 events per
 page, retains completed R2 receipts, then removes archived originals from the
 hot database. Small final batches flush after 30 seconds. Reclaimed SQLite pages
-are reused without growing the original file; this does not shrink its physical
-size. At most 512 exact nonforecast originals remain cached for active retries.
+are reused without growing the original file. To return physical space, select
+`forecast_compaction` in the lifecycle host or standing reward/coordinator boot
+configuration. Its `reserve_bytes` must preserve the deployment's operating,
+startup and growth reserves. Its `lock_file` must name one durable, protected,
+regular admission file shared by every forecast owner on that filesystem;
+provision access for each selected service account and preserve its inode through
+handoffs. Include that file in each service's supported namespace bindings.
+An absent selection preserves legacy behavior and serialized configuration bytes.
+Do not run an independent VACUUM against an active ledger.
+
+The existing maintenance owner takes the shared admission lock and its ledger
+lock before compacting. It requires at least 16 MiB of free database pages, at
+most 16 MiB of live pages, and available storage exceeding the selected reserve
+plus twice the current database size for SQLite working files. Keep that envelope
+in aggregate admission and qualify the actual service cap before selection.
+Concurrent appends wait on the same owner lock, avoiding independent-connection
+SQLite timeouts. SQLite handles atomic interruption recovery. Schema, original
+row bytes, retained archive receipts and native proof verdicts do not change;
+restart uses page metadata and does not repeat completed archival or compaction.
+The nested `compaction` diagnostic reports reclaimed file bytes, elapsed time,
+scoped planning estimates and admission waits. This selection does not compact
+the retained archive index. At most 512 exact nonforecast originals remain cached for active retries.
 Older originals restore from the retained segment when explicitly needed.
 Restart and ordinary score/status queries use compact retained metadata without
 replaying archived events. Missing identities, summaries or archive state require
