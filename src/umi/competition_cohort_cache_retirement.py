@@ -12,6 +12,7 @@ from functools import partial
 from pathlib import Path
 
 from .competition_artifacts import _file_identity
+from .competition_chunked_model_retirement import retirement_generation_lease
 from .competition_cohort_order_signer import (
     CohortOrderHistory,
     remember_closed_order_history,
@@ -159,29 +160,30 @@ class TerminalModelCacheRetirement:
                     "retired_models": 0,
                     "reason": "active_model_cache_consumer",
                 }
-            # Durable remote facts survive cache eviction. Changed completion
-            # records require explicit repair, never a new payload pass.
-            for name, stamp in intent["remote_records"].items():
-                if _file_identity(Path(name).lstat()) != stamp:
-                    raise ValueError("cache retirement remote completion changed")
-            if path.exists() or path.is_symlink():
-                if self._slot_identity(path) != intent["slot_identity"]:
-                    raise ValueError("cache retirement slot was replaced")
-                await self.port._evict_archive(path, leased=True)
-            if self.port.parallel is not None:
-                self.port.parallel.assigned.pop(path, None)
-                self.port.parallel.recency.pop(path, None)
-            await run_owned_thread(
-                self.journal.put,
-                "model_cache_retired",
-                key,
-                {"intent_sha256": digest(intent), "payload_bytes": intent["payload_bytes"]},
-            )
-            return {
-                "status": "completed",
-                "retired_models": 1,
-                "payload_bytes": intent["payload_bytes"],
-            }
+            async with retirement_generation_lease(intent):
+                # Durable remote facts survive cache eviction. Changed completion
+                # records require explicit repair, never a new payload pass.
+                for name, stamp in intent["remote_records"].items():
+                    if _file_identity(Path(name).lstat()) != stamp:
+                        raise ValueError("cache retirement remote completion changed")
+                if path.exists() or path.is_symlink():
+                    if self._slot_identity(path) != intent["slot_identity"]:
+                        raise ValueError("cache retirement slot was replaced")
+                    await self.port._evict_archive(path, leased=True)
+                if self.port.parallel is not None:
+                    self.port.parallel.assigned.pop(path, None)
+                    self.port.parallel.recency.pop(path, None)
+                await run_owned_thread(
+                    self.journal.put,
+                    "model_cache_retired",
+                    key,
+                    {"intent_sha256": digest(intent), "payload_bytes": intent["payload_bytes"]},
+                )
+                return {
+                    "status": "completed",
+                    "retired_models": 1,
+                    "payload_bytes": intent["payload_bytes"],
+                }
 
     async def __call__(self):
         if self.port.boot is None or self.promotion is None:
@@ -235,7 +237,7 @@ class TerminalModelCacheRetirement:
                     )
                     if check is None:
                         held = "source_retirement_not_supported"
-                        continue  # Older legacy sources keep their original retention path.
+                        continue  # Unrecognized sources retain their original storage.
                     for path in tuple(self.port.cache.iterdir()):
                         if (
                             path in blocked

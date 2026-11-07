@@ -1965,15 +1965,24 @@ not cause a second payload hash pass solely to delete those bytes; a present but
 mismatched receipt still requires explicit repair. Signed manifests, requests,
 admissions, journals and remote objects remain retained.
 
-Benchmark evaluator owners also retire completed direct-model cache candidates
+Benchmark evaluator owners also retire completed direct and legacy chunked-model cache candidates
 incrementally from the existing execution worker's idle pass. A candidate needs
 its authenticated `complete` cohort history, completed local execution, intact
 remote byte-completion records and unchanged local materialization identities.
 The original `archive` and `standby` slots are included. Current and acknowledged
 frozen incumbents, unfinished transfers and live readers remain protected.
 An intent in the existing benchmark journal precedes eviction; restart finishes
-an interrupted removal without reading or hashing model payloads again. Unknown
-legacy sources retain their existing cleanup path and report a hold. Cohort
+an interrupted removal without reading or hashing model payloads again. Chunked
+sources accept their original and current byte-receipt layouts. Missing or damaged
+receipts refuse cleanup without migrating records, repairing markers or contacting
+R2. When a generation owner is selected, its completed scope and damage fence
+must remain intact. The retirement owner holds a native DELETE-mode read lease
+through eviction, ordering release before later damage commits. Unrelated scope
+completion does not invalidate a pending retirement. Cancellation drains the lease
+worker before releasing ownership. Hot-journal recovery belongs to the original
+owner; cleanup refuses it without repair. WAL mode requires an explicit supported
+transition before retirement. Unknown sources retain their existing cleanup path
+and report a hold. Cohort
 history discovery uses the existing owner history port at most once per minute
 per pending cohort, then reuses retained terminal verification.
 
