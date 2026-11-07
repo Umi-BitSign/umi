@@ -303,7 +303,9 @@ class _RetainedRuns(Mapping):
 
 
 @contextmanager
-def _read_worker_database(path: Path, lock_path: Path, maximum_bytes: int):
+def _read_worker_database(
+    path: Path, lock_path: Path, maximum_bytes: int, *, verified_snapshot=None
+):
     descriptor = _open_private_regular_file(lock_path, "stopped worker journal lock")
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -323,8 +325,15 @@ def _read_worker_database(path: Path, lock_path: Path, maximum_bytes: int):
         try:
             db.execute("PRAGMA query_only=ON")
             db.execute("BEGIN")
-            if db.execute("PRAGMA quick_check").fetchone() != ("ok",):
-                raise SuccessorAdapterError("stopped worker journal is corrupt")
+            if verified_snapshot is None:
+                if db.execute("PRAGMA quick_check").fetchone() != ("ok",):
+                    raise SuccessorAdapterError("stopped worker journal is corrupt")
+            else:
+                # Establish the SQLite read lease even when the full audit is
+                # reused. BEGIN alone does not acquire a shared database lock.
+                db.execute("SELECT rootpage FROM sqlite_master LIMIT 1").fetchone()
+                if _recovery_journal_snapshot(path) != verified_snapshot:
+                    raise SuccessorAdapterError("verified stopped worker journal changed")
             yield db
         finally:
             db.close()

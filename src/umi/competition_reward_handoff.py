@@ -10,6 +10,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from .competition_evidence_reader import evidence_reader
 from .competition_host_activation import selected_weight_state_root
@@ -20,6 +21,11 @@ from .competition_reward_handoff_models import (
     LegacyRewardHandoffPlan,
     VerifiedLegacyRewardHandoff,
     _issue_legacy_handoff,
+)
+from .competition_reward_handoff_reuse import (
+    LegacyHandoffVerification,
+    repair_required,
+    snapshot_identity,
 )
 from .competition_reward_legacy_recovery import (
     review_legacy_weight_expiry,
@@ -46,7 +52,7 @@ from .protocol import canonical_json_bytes
 _LOG = logging.getLogger(__name__)
 
 
-def _attempts(db, adapter):
+def _attempts(db, adapter, *, audit_evidence=True):
     ceiling = adapter.installation.worker_execution_limits
     count, maximum = db.execute(
         "SELECT COUNT(*),COALESCE(MAX(length(body)),0) FROM attempts"
@@ -59,6 +65,7 @@ def _attempts(db, adapter):
         validator_hotkey=adapter.config.validator_hotkey,
         maximum_attempts=ceiling.maximum_weight_attempts,
         maximum_evidence_bytes=ceiling.maximum_weight_evidence_bytes,
+        audit_evidence=audit_evidence,
     )
     attempts = []
     for key, raw, sha in db.execute("SELECT id,body,sha256 FROM attempts ORDER BY id"):
@@ -158,13 +165,34 @@ async def hold_legacy_reward_handoff(
             + limits.maximum_weight_attempts * _MAX_ATTEMPT_BYTES
             + 1024**2
         )
-        with _read_worker_database(path, lock, ceiling) as db:
+        verification = LegacyHandoffVerification(runtime, intent)
+        initial_weight_snapshot = _recovery_journal_snapshot(path)
+        context = {
+            "weight_journal": snapshot_identity(initial_weight_snapshot),
+            "registry": snapshot_identity(_recovery_journal_snapshot(adapter.path)),
+            "limits": digest(limits),
+            "adapter_binding": hashlib.sha256(adapter._binding).hexdigest(),
+        }
+        audited = verification.load("evidence_audit", "inventory", context)
+        completed = verification.load("completion", "inventory", context)
+        with _read_worker_database(
+            path,
+            lock,
+            ceiling,
+            verified_snapshot=None if audited is None else initial_weight_snapshot,
+        ) as db:
             # Both locks stay held across slow proof work and the caller's whole
             # execution lifetime. Snapshot guards also reject out-of-protocol edits.
             weight_snapshot = _recovery_journal_snapshot(path)
             registry_snapshot = _recovery_journal_snapshot(adapter.path)
+            if (
+                snapshot_identity(weight_snapshot) != context["weight_journal"]
+                or snapshot_identity(registry_snapshot) != context["registry"]
+            ):
+                raise repair_required("inputs_changed_during_lock_acquisition")
             lock_identity = (lock.stat().st_dev, lock.stat().st_ino)
             active = True
+            packages = {}
 
             def recheck():
                 if not active or not runtime._mutex.locked():
@@ -177,11 +205,47 @@ async def hold_legacy_reward_handoff(
                     or (lock.stat().st_dev, lock.stat().st_ino) != lock_identity
                 ):
                     raise ValueError("legacy handoff retained writer state changed")
+                for package, snapshot in packages.items():
+                    if snapshot_identity(_recovery_package_snapshot(package)) != snapshot:
+                        raise repair_required("retained_package_changed")
 
             try:
-                attempts, read = _attempts(db, adapter)
+                if completed is not None:
+                    with WorkProgress("legacy_handoff_restoration", 1, unit="inventories") as meter:
+                        packages = {
+                            Path(item["path"]): item["snapshot"] for item in completed["packages"]
+                        }
+                        for identity in completed["providers"]:
+                            provider = providers.get(identity)
+                            if (
+                                not isinstance(provider, HistoricalRewardControlProvider)
+                                or digest(provider.config) != identity
+                            ):
+                                raise ValueError("legacy handoff lacks the original chain provider")
+                        if (await adapter.container.status()).phase == "running":
+                            raise ValueError("legacy worker restarted during handoff restoration")
+                        recheck()
+                        meter.advance()
+                    _LOG.info(
+                        "legacy_handoff_inventory_restored attempts=%d", completed["attempts"]
+                    )
+                    yield _issue_legacy_handoff(
+                        intent,
+                        completed["inventory_sha256"],
+                        max(prepared.reviewed_at_block, completed["through_block"]),
+                        recheck,
+                    )
+                    return
+                with WorkProgress("legacy_handoff_inventory_audit", 1, unit="inventories") as meter:
+                    attempts, read = _attempts(db, adapter, audit_evidence=audited is None)
+                    recheck()
+                    if audited is None:
+                        verification.remember(
+                            "evidence_audit", "inventory", context, {"complete": True}
+                        )
+                    meter.advance()
                 _LOG.info("legacy_handoff_inventory attempts=%d", len(attempts))
-                targets, packages = {}, {}
+                targets = {}
                 replay = RecoveryPackageReplay()
                 records = adapter._records()
                 with (
@@ -190,24 +254,47 @@ async def hold_legacy_reward_handoff(
                 ):
                     for selection, files, restored in records.recovery_values():
                         snapshot = _recovery_package_snapshot(files.package_path)
-                        checked = adapter._verify(
-                            selection, files, recovery_packages=replay, recovery_history=restored
+                        package_context = {
+                            "snapshot": snapshot_identity(snapshot),
+                            "registry": snapshot_identity(registry_snapshot),
+                            "selection": selection.directive_sha256,
+                            "installation": adapter.installation.receipt_sha256,
+                        }
+                        retained = verification.load(
+                            "package", selection.directive_sha256, package_context
                         )
-                        if _recovery_package_snapshot(files.package_path) != snapshot:
-                            raise ValueError("legacy package changed during handoff replay")
-                        packages[files.package_path] = snapshot
-                        if checked.authorization is not None:
-                            auth = checked.authorization.authorization
-                            authority = (
-                                competition_weight_authorization_digest(auth),
-                                digest(checked.execution.weights.chain),
-                                auth.mortality_period,
+                        if retained is None:
+                            checked = adapter._verify(
+                                selection,
+                                files,
+                                recovery_packages=replay,
+                                recovery_history=restored,
                             )
-                            prior = targets.setdefault(auth.authorization_id, authority)
+                            if _recovery_package_snapshot(files.package_path) != snapshot:
+                                raise ValueError("legacy package changed during handoff replay")
+                            retained = {"authorization_id": None, "authority": None}
+                            if checked.authorization is not None:
+                                auth = checked.authorization.authorization
+                                retained = {
+                                    "authorization_id": auth.authorization_id,
+                                    "authority": [
+                                        competition_weight_authorization_digest(auth),
+                                        digest(checked.execution.weights.chain),
+                                        auth.mortality_period,
+                                    ],
+                                }
+                            recheck()
+                            verification.remember(
+                                "package", selection.directive_sha256, package_context, retained
+                            )
+                        packages[files.package_path] = snapshot_identity(snapshot)
+                        if retained["authorization_id"] is not None:
+                            authority = tuple(retained["authority"])
+                            prior = targets.setdefault(retained["authorization_id"], authority)
                             if prior != authority:
                                 raise ValueError("legacy handoff changes a retained authorization")
                         progress.advance()
-                receipts = []
+                expiry_blocks, selected_providers = [], set()
                 with (
                     work_heartbeats(),
                     WorkProgress(
@@ -226,8 +313,6 @@ async def hold_legacy_reward_handoff(
                             != adapter.installation.checkpoint_sha256
                         ):
                             raise ValueError("legacy attempt lacks its exact retained authority")
-                        chain = read(item.chain_evidence_sha256)
-                        metadata = read(json.loads(chain)["runtime_metadata_sha256"])
                         if item.signed_extrinsic is None:
                             # The original worker durably saves exact signed bytes
                             # before broadcasting. Under its continuously held lock,
@@ -246,43 +331,71 @@ async def hold_legacy_reward_handoff(
                             or digest(provider.config) != item.chain_config_sha256
                         ):
                             raise ValueError("legacy handoff lacks the original chain provider")
-                        result = await review_legacy_weight_expiry(
-                            provider,
-                            attempt=raw,
-                            chain=chain,
-                            metadata=metadata,
-                            validator_hotkey=runtime.config.validator_hotkey,
+                        selected_providers.add(item.chain_config_sha256)
+                        expiry_context = {
+                            "journal": snapshot_identity(weight_snapshot),
+                            "attempt": hashlib.sha256(raw).hexdigest(),
+                            "authority": targets[item.authorization_id],
+                            "provider": digest(provider.config),
+                        }
+                        retained = verification.load(
+                            "expiry", item.authorization_id, expiry_context
                         )
-                        if result is None:
-                            raise ValueError("legacy transaction remains live; handoff is pending")
-                        validate_legacy_weight_expiry(
-                            result,
-                            attempt=raw,
-                            chain_config_sha256=item.chain_config_sha256,
-                            validator_hotkey=runtime.config.validator_hotkey,
-                        )
+                        if retained is None:
+                            chain = read(item.chain_evidence_sha256)
+                            metadata = read(json.loads(chain)["runtime_metadata_sha256"])
+                            result = await review_legacy_weight_expiry(
+                                provider,
+                                attempt=raw,
+                                chain=chain,
+                                metadata=metadata,
+                                validator_hotkey=runtime.config.validator_hotkey,
+                            )
+                            if result is None:
+                                raise ValueError(
+                                    "legacy transaction remains live; handoff is pending"
+                                )
+                            validate_legacy_weight_expiry(
+                                result,
+                                attempt=raw,
+                                chain_config_sha256=item.chain_config_sha256,
+                                validator_hotkey=runtime.config.validator_hotkey,
+                            )
+                            recheck()
+                            retained = {"finalized_block": result.finalized.block_number}
+                            verification.remember(
+                                "expiry", item.authorization_id, expiry_context, retained
+                            )
                         recheck()
-                        receipts.append(result)
+                        expiry_blocks.append(retained["finalized_block"])
                         _LOG.info("legacy_handoff_expired index=%d total=%d", index, len(attempts))
                         progress.advance()
                 if (await adapter.container.status()).phase == "running":
                     raise ValueError("legacy worker restarted during handoff review")
-                for package, snapshot in packages.items():
-                    if _recovery_package_snapshot(package) != snapshot:
-                        raise ValueError("legacy package changed during handoff review")
                 recheck()
                 _LOG.info("legacy_handoff_inventory_verified attempts=%d", len(attempts))
-                yield _issue_legacy_handoff(
-                    intent,
-                    digest([hashlib.sha256(raw).hexdigest() for raw, _ in attempts]),
-                    max(
+                completed = {
+                    "inventory_sha256": digest(
+                        [hashlib.sha256(raw).hexdigest() for raw, _ in attempts]
+                    ),
+                    "through_block": max(
                         [
                             prepared.reviewed_at_block,
                             *(item.preflight_block for _, item in attempts),
-                            *(r.finalized.block_number for r in receipts),
+                            *expiry_blocks,
                         ]
                     ),
-                    recheck,
+                    "attempts": len(attempts),
+                    "packages": [
+                        {"path": str(path), "snapshot": snapshot}
+                        for path, snapshot in packages.items()
+                    ],
+                    "providers": sorted(selected_providers),
+                }
+                verification.remember("completion", "inventory", context, completed)
+                recheck()
+                yield _issue_legacy_handoff(
+                    intent, completed["inventory_sha256"], completed["through_block"], recheck
                 )
             finally:
                 active = False

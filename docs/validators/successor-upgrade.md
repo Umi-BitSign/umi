@@ -1453,6 +1453,26 @@ row is content-addressed; after 64 series, the oldest audit-only row is pruned
 while the immediate predecessor is always retained. Leaving the handoff context
 invalidates the process-local authorization.
 
+Legacy C4 handoff verification is retained separately from the process lease.
+The first pass checkpoints the evidence audit, each checked package and each
+proved transaction expiry, then records the complete inventory. Both supported
+inline and content-addressed SQLite evidence layouts use this path. An older
+installation without these receipts completes one native pass; interruption
+resumes at unfinished items. Existing signed bytes and the approved row remain
+unchanged.
+
+On restart, the host reacquires the original locks and checks the exact journal
+and sealed-package file identities, installation/plan, provider configuration and
+verification ABI. Matching completion skips payload reads, package replay and
+expiry proofs. It still performs current transaction ownership, nonce, finalized
+chain and rate-limit checks before a new submission. Leaving the context ends
+its fresh ownership capability. Keep `legacy-handoff-verification.json` and its
+selected private receipt directory with the supervisor's durable state; missing,
+damaged or changed records report repair instead of silently repeating approval
+work. Do not delete this retained state while a selected boot still consumes its
+legacy handoff plan. Supported source upgrades preserve the verification ABI for
+unchanged native semantics and select this reader without changing journal paths.
+
 During initial history/package replay, the original supervisor continues
 predecessor reconciliation. The durable handoff intent stops that continuation
 before successor signing, including after restart. A failed old feed does not

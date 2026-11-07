@@ -262,7 +262,7 @@ async def test_complete_native_inventory_stays_locked_and_preserved_across_resta
             assert (await runtime.reconcile()).reason == "standing_reward_handoff"
     assert c.item.worker.path.read_bytes() == before
     assert (Path(c.config.state_root) / "directive-state.json").read_bytes() == old
-    assert len(c.reviews) == len(c.validations) == 2
+    assert len(c.reviews) == len(c.validations) == 1
     assert len(c.item.encoded) == 1
 
 
@@ -442,3 +442,163 @@ async def test_even_terminal_unrecognized_second_attempt_prevents_handoff(migrat
             async with handoff.hold_legacy_reward_handoff(runtime, **c.args):
                 pytest.fail("a local terminal flag cannot hide an unreviewed transaction")
         assert (await runtime.reconcile()).reason == "standing_reward_handoff"
+
+
+@pytest.mark.parametrize("shared_directory", [False, True])
+async def test_completed_handoff_restores_without_inventory_or_proof_reads(
+    migration, monkeypatch, tmp_path, shared_directory
+):
+    if shared_directory:
+        monkeypatch.setenv(
+            "UMI_NATIVE_VERIFICATION_DIRECTORY", str(tmp_path / "shared-verification")
+        )
+    c = migration
+    await signed_attempt(c)
+    async with (
+        c.reopen() as runtime,
+        handoff.hold_legacy_reward_handoff(runtime, **c.args) as first,
+    ):
+        c.validate(first)
+        original_inventory = first.inventory_sha256
+
+    # Reconstruct the production adapter as a new host process would; retained
+    # file identities must survive its normal journal/schema initialization.
+    previous = c.adapter
+    c.adapter = adapters.ProductionSuccessorRuntimeAdapter(
+        installation=previous.installation,
+        materializer=previous.materializer,
+        observer=previous.observer,
+        container=previous.container,
+        limits=previous.limits,
+    )
+
+    def repeated(*args, **kwargs):
+        pytest.fail("completed native inventory or proof work repeated")
+
+    monkeypatch.setattr(handoff, "_attempts", repeated)
+    monkeypatch.setattr(c.adapter, "_verify", repeated)
+    monkeypatch.setattr(c.adapter, "_records", repeated)
+    monkeypatch.setattr(handoff, "review_legacy_weight_expiry", repeated)
+    async with (
+        c.reopen() as runtime,
+        handoff.hold_legacy_reward_handoff(runtime, **c.args) as restored,
+    ):
+        c.validate(restored)
+        assert restored.inventory_sha256 == original_inventory
+        with (
+            sqlite3.connect(c.item.worker.path, timeout=0) as concurrent,
+            pytest.raises(sqlite3.OperationalError, match="locked"),
+        ):
+            concurrent.execute("PRAGMA user_version=1")
+        assert_locked(c.item.worker.lock_path)
+        assert_locked(Path(c.config.state_root) / "supervisor-process.lock")
+    assert len(c.reviews) == 1
+
+
+@pytest.mark.parametrize("failure", [OSError, asyncio.CancelledError])
+async def test_completed_items_survive_interrupted_inventory_commit(
+    migration, monkeypatch, failure
+):
+    c = migration
+    await signed_attempt(c)
+    original = handoff.LegacyHandoffVerification.remember
+
+    def interrupt(self, stage, *args):
+        if stage == "completion":
+            raise failure("fixture completion write interrupted")
+        return original(self, stage, *args)
+
+    monkeypatch.setattr(handoff.LegacyHandoffVerification, "remember", interrupt)
+    async with c.reopen() as runtime:
+        with pytest.raises(failure, match="write interrupted"):
+            async with handoff.hold_legacy_reward_handoff(runtime, **c.args):
+                pytest.fail("unfinished completion must not grant ownership")
+    monkeypatch.setattr(handoff.LegacyHandoffVerification, "remember", original)
+
+    def repeated(*args, **kwargs):
+        pytest.fail("completed package or expiry proof repeated")
+
+    monkeypatch.setattr(c.adapter, "_verify", repeated)
+    monkeypatch.setattr(handoff, "review_legacy_weight_expiry", repeated)
+    attempts = handoff._attempts
+    audits = []
+
+    def read_attempts(db, adapter, *, audit_evidence=True):
+        audits.append(audit_evidence)
+        return attempts(db, adapter, audit_evidence=audit_evidence)
+
+    monkeypatch.setattr(handoff, "_attempts", read_attempts)
+    async with (
+        c.reopen() as runtime,
+        handoff.hold_legacy_reward_handoff(runtime, **c.args) as result,
+    ):
+        c.validate(result)
+    assert audits == [False]
+    assert len(c.reviews) == 1
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "completion_missing",
+        "completion_corrupt",
+        "directory_missing",
+        "journal",
+        "package",
+        "provider",
+    ],
+)
+async def test_restored_handoff_refuses_changed_or_damaged_dependencies(
+    migration, monkeypatch, damage
+):
+    import shutil
+
+    from umi.competition_verification_reuse import VerificationReceiptUnavailable
+
+    c = migration
+    await signed_attempt(c)
+    async with c.reopen() as runtime, handoff.hold_legacy_reward_handoff(runtime, **c.args):
+        store = handoff.LegacyHandoffVerification(runtime, runtime._standing_handoff_intent())
+        receipt = store.reuse.directory / (store._key("completion", "inventory") + ".json")
+        if damage == "package":
+            package = next(c.adapter._records().recovery_values())[1].package_path
+    if damage == "completion_missing":
+        receipt.unlink()
+    elif damage == "completion_corrupt":
+        receipt.write_bytes(b"damaged completion")
+    elif damage == "directory_missing":
+        shutil.rmtree(store.reuse.directory)
+    elif damage == "journal":
+        c.item.worker.path.touch()
+    elif damage == "package":
+        package.touch()
+    elif damage == "provider":
+        c.providers.clear()
+
+    def repeated(*args, **kwargs):
+        pytest.fail("damaged completion silently replayed old proofs")
+
+    monkeypatch.setattr(handoff, "_attempts", repeated)
+    monkeypatch.setattr(c.adapter, "_verify", repeated)
+    monkeypatch.setattr(handoff, "review_legacy_weight_expiry", repeated)
+    async with c.reopen() as runtime:
+        with pytest.raises((VerificationReceiptUnavailable, ValueError)):
+            async with handoff.hold_legacy_reward_handoff(runtime, **c.args):
+                pytest.fail("changed retained inputs granted writer ownership")
+
+
+async def test_restored_handoff_checks_package_throughout_new_lease(migration):
+    from umi.competition_verification_reuse import VerificationReceiptUnavailable
+
+    c = migration
+    await signed_attempt(c)
+    async with c.reopen() as runtime, handoff.hold_legacy_reward_handoff(runtime, **c.args):
+        package = next(c.adapter._records().recovery_values())[1].package_path
+    async with (
+        c.reopen() as runtime,
+        handoff.hold_legacy_reward_handoff(runtime, **c.args) as result,
+    ):
+        c.validate(result)
+        package.touch()
+        with pytest.raises(VerificationReceiptUnavailable, match="retained_package_changed"):
+            c.validate(result)
