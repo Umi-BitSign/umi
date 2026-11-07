@@ -138,6 +138,17 @@ retained report or zero exit status alone does not authorize ServiceHold. This
 interface supplies a completion channel; the separate supervised launcher,
 resource qualification and pre-hold integration remain required.
 
+`render_legacy_preparation_service` renders that separate service from a typed,
+inspected namespace. It retains installed user/group, mount mappings and the
+verification/RPC configuration paths, replaces only the signed maintenance mount,
+and adds the selected source, root control and disjoint provider directory.
+The service enforces the selected memory cap, zero swap and CPU placement, and
+owns its RuntimeDirectory and private temporary files. It inherits no writer
+cleanup commands or dependencies that could stop the writer. Its controller must
+verify the published unit, namespace and admission before starting it. The service becomes inactive on completion so systemd releases its scratch.
+The controller must retain the successful invocation observation and explicitly
+invoke preparation again for a fresh native check before a later handoff attempt. Rendering and unit validation alone do not establish deployment.
+
 ### Challenge execution lanes
 
 The host's model lane ceiling comes from the available CPU affinity and cgroup
