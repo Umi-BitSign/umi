@@ -62,6 +62,12 @@ from .competition_cpu_efficiency_policy import (
 from .competition_evaluation_runtime import authorize_evaluation_runtime
 from .competition_execution import execution_boundary
 from .competition_forecast import ForecastAttempt, ForecastCapacityRequired, ForecastLedger
+from .competition_forecast_maintenance import maintain_forecasts
+from .competition_forecast_storage import (
+    ForecastArchiveConfig,
+    forecast_credential_paths,
+    forecast_remote,
+)
 from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
 from .competition_remote_proof_store import ProofArchiveStores
 from .competition_round_journal import RoundJournal
@@ -93,6 +99,8 @@ class LifecycleHostConfig(StrictProtocolModel):
     sample_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     maximum_state_bytes: Annotated[int, Field(ge=1024**2, le=16 * 1024**3)] = 1024**3
     forecast_accounting_bytes: Annotated[int, Field(ge=64 * 1024, le=1024**3)] = 32 * 1024**2
+    forecast_archive: ForecastArchiveConfig | None = None
+    forecast_retention_index_bytes: Annotated[int, Field(ge=64 * 1024, le=1024**3)] = 512 * 1024**2
     request_tail_operator_token_file: Directory | None = None
     automatic_progression_hold_cohorts: tuple[Hex32, ...] = ()
     held_intake_sampling_cohorts: tuple[Hex32, ...] = ()
@@ -104,6 +112,10 @@ class LifecycleHostConfig(StrictProtocolModel):
     @model_serializer(mode="wrap")
     def preserve_legacy(self, handler):
         value = handler(self)
+        if self.forecast_archive is None:
+            value.pop("forecast_archive", None)
+        if self.forecast_retention_index_bytes == 512 * 1024**2:
+            value.pop("forecast_retention_index_bytes", None)
         if self.forecast_accounting_bytes == 32 * 1024**2:
             value.pop("forecast_accounting_bytes", None)
         if self.proof_stores is None:
@@ -198,6 +210,7 @@ class LifecycleHostConfig(StrictProtocolModel):
                 self.settlement_history_directory,
                 self.proof_export_directory,
                 *(self.proof_stores.credential_paths() if self.proof_stores else ()),
+                *forecast_credential_paths(self.forecast_archive, self.proof_stores),
                 self.sources.round_directory,
                 self.sources.objects_directory,
                 self.sources.transport_directory,
@@ -255,10 +268,28 @@ class LifecycleHost:
         self.credentials, self.sign = credentials, sign
         self.sign_digest = sign_digest
         self.root = Path(c.directory) / digest(service.config.series)
+        self.proofs = SettlementRegistrationFiles(
+            self.provider,
+            inbox=self.root / "proof-inbox",
+            outbox=Path(c.proof_export_directory),
+            proof_stores=c.proof_stores,
+        )
         self.forecast_ledger = None
         try:
+            remote = forecast_remote(self.root, c.forecast_archive, self.proofs.outbox.remote)
             self.forecast_ledger = ForecastLedger(
-                self.root / "forecast-accounting", maximum_bytes=c.forecast_accounting_bytes
+                self.root / "forecast-accounting",
+                maximum_bytes=c.forecast_accounting_bytes,
+                remote_store=remote,
+                ledger_sha256=digest(
+                    {
+                        "schema": "umi-forecast-ledger-owner/1",
+                        "series_sha256": digest(service.config.series),
+                    }
+                )
+                if remote is not None
+                else None,
+                maximum_index_bytes=c.forecast_retention_index_bytes,
             )
             resources.callback(self.forecast_ledger.close)
         except ForecastCapacityRequired:
@@ -282,12 +313,6 @@ class LifecycleHost:
         )
         self.files = RequestCompletionFiles(
             Path(c.request_completion_directory), maximum_bytes=owner.request_replay_bytes
-        )
-        self.proofs = SettlementRegistrationFiles(
-            self.provider,
-            inbox=self.root / "proof-inbox",
-            outbox=Path(c.proof_export_directory),
-            proof_stores=c.proof_stores,
         )
         self.stores, self.nodes, self.requests = {}, {}, {}
         self.last_reports = {}
@@ -705,6 +730,18 @@ class LifecycleHost:
         self.nodes[cohort] = node
         return node
 
+    async def _forecast_retention_loop(self, stop):
+        def report(status):
+            logger.info("cohort_forecast_retention %s", canonical_json_bytes(status).decode())
+            for plan in self.service.config.series.cohorts:
+                PUBLIC_COHORT_PROGRESS.record(
+                    "forecast_accounting", dict(status, cohort_sha256=digest(plan))
+                )
+
+        await maintain_forecasts(
+            self.forecast_ledger, stop, poll_seconds=self.config.poll_seconds, report=report
+        )
+
     async def run(self, stop):
         async def execution_progress_loop():
             # Export metadata is sampled independently of long native lifecycle
@@ -930,6 +967,9 @@ class LifecycleHost:
             for p in self.service.config.series.cohorts
             if stage is None or digest(p) == stage.cohort_sha256
         ]
+        forecast = getattr(self, "forecast_ledger", None)
+        if forecast is not None and forecast.retention is not None:
+            tasks.append(asyncio.create_task(self._forecast_retention_loop(stop)))
         tasks.append(asyncio.create_task(execution_progress_loop()))
         tasks.append(asyncio.create_task(settlement_progress_loop()))
         try:

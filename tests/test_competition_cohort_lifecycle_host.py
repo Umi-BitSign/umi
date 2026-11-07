@@ -686,6 +686,7 @@ def test_progression_hold_configuration_preserves_legacy_bytes(lifecycle, tmp_pa
     assert b"automatic_progression_hold_cohorts" not in old
     assert b"held_intake_sampling_cohorts" not in old
     assert b"forecast_accounting_bytes" not in old
+    assert b"forecast_retention_index_bytes" not in old
     assert canonical_json_bytes(LifecycleHostConfig.model_validate_json(old)) == old
     expanded = LifecycleHostConfig.model_validate_json(
         canonical_json_bytes(config.model_copy(update={"forecast_accounting_bytes": 64 * 1024**2}))

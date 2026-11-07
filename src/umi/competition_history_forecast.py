@@ -14,7 +14,9 @@ import time
 import uuid
 
 from .competition_forecast import ForecastCapacityRequired, ForecastLedger
+from .competition_forecast_maintenance import log_retention, own_forecast_maintenance
 from .competition_forecast_scoring import population_sha256
+from .competition_forecast_storage import forecast_remote
 from .open_competition import digest
 
 logger = logging.getLogger("umi.competition_reward_history_progress")
@@ -26,7 +28,9 @@ DEFAULT_HISTORY_FORECAST_BYTES = 512 * 1024**2
 _INVOCATION = uuid.uuid4().hex
 
 
-def select_history_forecasts(reader, *, root, config, resources, role, predecessor=False):
+def select_history_forecasts(
+    reader, *, root, config, resources, role, predecessor=False, remote_store=None, stop=None
+):
     """Select diagnostics only after the caller acquired the real owning lease."""
     try:
         prefix = "predecessor_" if predecessor else ""
@@ -50,11 +54,37 @@ def select_history_forecasts(reader, *, root, config, resources, role, predecess
                 }
             ),
         }
+        remote_store = forecast_remote(
+            root, getattr(config, "forecast_archive", None), remote_store
+        )
         ledger = ForecastLedger(
             root / "history-forecast-accounting",
             maximum_bytes=config.forecast_accounting_bytes,
+            remote_store=remote_store,
+            ledger_sha256=None
+            if remote_store is None
+            else digest(
+                {
+                    "schema": "umi-native-history-forecast-owner/1",
+                    "series_sha256": identity["series_sha256"],
+                    "chain_config_sha256": reader.config_sha256,
+                    "checkpoint_owner": reader.checkpoints.owner,
+                    "role": role,
+                }
+            ),
+            maximum_index_bytes=getattr(config, "forecast_retention_index_bytes", 512 * 1024**2),
         )
         resources.callback(ledger.close)
+        if remote_store is not None:
+            if stop is None or not hasattr(resources, "push_async_callback"):
+                raise ValueError("archived history forecasts require owned async maintenance")
+            own_forecast_maintenance(
+                ledger,
+                resources,
+                stop,
+                poll_seconds=config.service.poll_seconds,
+                report=log_retention,
+            )
         reader.progress.forecast = HistoryForecast(ledger, identity)
     except ForecastCapacityRequired:
         reader.progress.forecast_health = "capacity_required"
@@ -63,7 +93,8 @@ def select_history_forecasts(reader, *, root, config, resources, role, predecess
     if reader.progress.forecast_health is not None:
         logger.warning(
             "native_history_forecast_accounting status=%s "
-            "eta_basis=restore_or_expand_diagnostic_accounting certification_authority=false",
+            "eta_basis=resume_retention_or_explicit_accounting_repair "
+            "certification_authority=false",
             reader.progress.forecast_health,
         )
 

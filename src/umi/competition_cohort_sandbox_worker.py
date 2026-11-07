@@ -9,6 +9,7 @@ import signal
 import sys
 from pathlib import Path
 
+from .competition_cohort_public_progress import execution_job_scope
 from .competition_cohort_sandbox import CohortCpuSandbox
 from .competition_cohort_sandbox_process import (
     MAX_REQUEST_BYTES,
@@ -16,6 +17,7 @@ from .competition_cohort_sandbox_process import (
     TimedSandboxRequest,
     TimedSandboxResponse,
 )
+from .competition_cohort_sandbox_progress import child_progress
 from .competition_progress import configure_progress_logging, report_execution_retry
 from .host_model_execution import ModelExecutionAdmission
 from .open_competition import digest
@@ -36,20 +38,23 @@ async def execute_request(request):
     for signum in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signum, current.cancel)
     try:
-        admission = ModelExecutionAdmission(request.admission, request.policy, reattach_worker=True)
-        sandbox = CohortCpuSandbox(
-            request.policy,
-            archive=Path(request.archive),
-            videos=Path(request.videos),
-            workspace=Path(request.workspace),
-            execution_admission=admission,
-            suite_candidates=request.suite_candidates,
-            _isolate_timed=False,
-        )
-        result = await sandbox._invoke(request.job, request.attempt, sandbox.archive)
-        return TimedSandboxResponse(
-            schema="umi-timed-sandbox-response/1", request_sha256=digest(request), result=result
-        )
+        with execution_job_scope(request.attempt.job_sha256):
+            admission = ModelExecutionAdmission(
+                request.admission, request.policy, reattach_worker=True
+            )
+            sandbox = CohortCpuSandbox(
+                request.policy,
+                archive=Path(request.archive),
+                videos=Path(request.videos),
+                workspace=Path(request.workspace),
+                execution_admission=admission,
+                suite_candidates=request.suite_candidates,
+                _isolate_timed=False,
+            )
+            result = await sandbox._invoke(request.job, request.attempt, sandbox.archive)
+            return TimedSandboxResponse(
+                schema="umi-timed-sandbox-response/1", request_sha256=digest(request), result=result
+            )
     except Exception as error:
         report_execution_retry(slot=None, error=error)
         reason = getattr(error, "reason_code", "timed_host_worker_failed")
@@ -70,6 +75,7 @@ def main():
         raise RuntimeError("timed host worker requires isolated Python without bytecode")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--parent-pid", type=int, required=True)
+    parser.add_argument("--progress-fd", type=int)
     args = parser.parse_args()
     bind_parent(args.parent_pid)
     configure_progress_logging()
@@ -82,7 +88,8 @@ def main():
         report_execution_retry(slot=None, error=error)
         return 2
     try:
-        response = asyncio.run(execute_request(request))
+        with child_progress(args.progress_fd, digest(request), request.attempt.job_sha256):
+            response = asyncio.run(execute_request(request))
     except asyncio.CancelledError:
         return 130
     body = canonical_json_bytes(response)

@@ -24,7 +24,12 @@ from pydantic import Field, ValidationError, model_validator
 from .competition_cohort_public_progress import is_cached_cohort_progress_request
 from .competition_progress import _failure_details
 from .concurrency import run_owned_thread
-from .host_memory_admission import HostMemoryAdmission, HostMemoryLease, _absolute
+from .host_memory_admission import (
+    HostMemoryAdmission,
+    HostMemoryLease,
+    HostMemoryStartupPending,
+    _absolute,
+)
 from .host_memory_request_bounds import stage_evidence_budget
 from .host_memory_workload_profile import (
     WorkloadQualificationPending,
@@ -45,6 +50,34 @@ class HostMemoryAdmissionSelection(StrictProtocolModel):
         _absolute(self.policy_path)
         _absolute(self.host_identity_path)
         return self
+
+
+def probe_memory_startup(selection: HostMemoryAdmissionSelection | None):
+    """Validate actual policy/host/slot bindings and sample the native startup gate.
+
+    This does not reserve memory or start a runtime. A caller must remeasure
+    before handoff; ordinary service startup and every later grant still check.
+    Malformed or mismatched bindings remain errors, not capacity wait reports.
+    """
+    if selection is None:
+        return dict(status="not_selected", capacity_reserved=False)
+    try:
+        controller = HostMemoryAdmission(
+            Path(selection.policy_path),
+            expected_sha256=selection.policy_sha256,
+            host_identity_path=Path(selection.host_identity_path),
+        )
+    except HostMemoryStartupPending as error:
+        return dict(error.observation)
+    return (
+        dict(controller.startup_observation)
+        if controller.startup_observation is not None
+        else dict(
+            status="startup_gate_not_required",
+            policy_sha256=selection.policy_sha256,
+            capacity_reserved=False,
+        )
+    )
 
 
 _selected: ContextVar[HostMemoryAdmission | None] = ContextVar(

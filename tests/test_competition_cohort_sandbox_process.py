@@ -14,11 +14,13 @@ from pydantic import ValidationError
 from umi import competition_cohort_sandbox as sandbox
 from umi import competition_cohort_sandbox_process as process
 from umi import competition_cohort_sandbox_worker as worker
+from umi.competition_cohort_public_progress import EXECUTION_JOB_SCOPE
 from umi.competition_cpu_efficiency_policy import (
     CohortCpuEfficiencyAdoption,
     SignedCohortCpuEfficiencyAdoption,
 )
 from umi.competition_cpu_timing import CpuTimingInfrastructureError
+from umi.competition_transport_verification import TransferProgress
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
 
@@ -103,6 +105,7 @@ async def test_selected_worker_uses_isolated_interpreter_and_safe_failure(timed)
 class Child:
     def __init__(self, body=b"", *, hold_send=False, hold_exit=False):
         self.returncode = None
+        self.pid = os.getpid()
         self.stdout = asyncio.StreamReader()
         self.stdout.feed_data(body)
         self.stdout.feed_eof()
@@ -231,6 +234,7 @@ async def test_child_owns_native_admission_and_preserves_result(timed, scenario,
     def admit(selection, policy, *, reattach_worker):
         assert reattach_worker
         assert selection == timed.admission and policy == timed.policy
+        assert EXECUTION_JOB_SCOPE.get() == timed.attempt.job_sha256
         calls.append("admission")
         return admission
 
@@ -238,12 +242,15 @@ async def test_child_owns_native_admission_and_preserves_result(timed, scenario,
         assert not port._isolate_timed
         assert port.execution_admission is admission
         assert job == timed.job and attempt == timed.attempt
+        assert TransferProgress("worker_scope_probe", 1).job_sha256 == timed.attempt.job_sha256
         calls.append("invoke")
         return result
 
     monkeypatch.setattr(worker, "ModelExecutionAdmission", admit)
     monkeypatch.setattr(worker.CohortCpuSandbox, "_invoke", invoke)
+    assert EXECUTION_JOB_SCOPE.get() is None
     response = await worker.execute_request(timed)
+    assert EXECUTION_JOB_SCOPE.get() is None
     assert calls == ["admission", "invoke"]
     assert response.request_sha256 == digest(timed)
     assert canonical_json_bytes(response.result) == canonical_json_bytes(result)
@@ -356,3 +363,35 @@ async def test_parent_death_delivers_cooperative_shutdown(tmp_path):
         if child_pid is not None:
             with suppress(ProcessLookupError):
                 os.kill(child_pid, signal.SIGTERM)
+
+
+@pytest.mark.parametrize("failure", ["create", "listen"])
+async def test_diagnostic_socket_failure_does_not_replace_native_result(
+    timed, scenario, monkeypatch, failure
+):
+    result = scenario["artifacts"][0].steps[0].execution
+    child = Child(
+        canonical_json_bytes(
+            process.TimedSandboxResponse(
+                schema="umi-timed-sandbox-response/1",
+                request_sha256=digest(timed),
+                result=result,
+            )
+        )
+    )
+
+    async def spawn(*args, **kwargs):
+        if failure == "create":
+            assert "--progress-fd" not in args and kwargs["pass_fds"] == ()
+        return child
+
+    def unavailable(*args, **kwargs):
+        raise OSError("diagnostic socket unavailable")
+
+    monkeypatch.setattr(process.asyncio, "create_subprocess_exec", spawn)
+    if failure == "create":
+        monkeypatch.setattr(process, "ParentProgress", unavailable)
+    else:
+        monkeypatch.setattr(process.ParentProgress, "start", unavailable)
+    assert await process.run_timed_sandbox(timed) == result
+    assert child.returncode == 0

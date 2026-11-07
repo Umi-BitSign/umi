@@ -34,6 +34,10 @@ from .competition_cohort_model_transport_selection import (
     requires_direct_model_review,
     selected_direct_model_review,
 )
+from .competition_forecast_storage import (
+    ForecastArchiveConfig,
+    forecast_credential_paths,
+)
 from .competition_history_forecast import DEFAULT_HISTORY_FORECAST_BYTES, select_history_forecasts
 from .competition_host_activation import _read_root_control_path
 from .competition_host_anchor import MaterializedSuccessorAnchor
@@ -131,6 +135,9 @@ class StandingRewardBootConfig(StrictProtocolModel):
     forecast_accounting_bytes: Annotated[int, Field(ge=64 * 1024, le=1024**3)] = (
         DEFAULT_HISTORY_FORECAST_BYTES
     )
+    forecast_archive: ForecastArchiveConfig | None = None
+    forecast_retention_index_bytes: Annotated[int, Field(ge=64 * 1024, le=1024**3)] = 512 * 1024**2
+
     runtime_proof_reads: bool = False
     direct_model_review: DirectModelReviewSourceConfig | None = None
     model_delivery_adoptions: ModelDeliveryAdoptionSelections = ()
@@ -152,6 +159,10 @@ class StandingRewardBootConfig(StrictProtocolModel):
         value = handler(self)
         if self.forecast_accounting_bytes == DEFAULT_HISTORY_FORECAST_BYTES:
             value.pop("forecast_accounting_bytes", None)
+        if self.forecast_archive is None:
+            value.pop("forecast_archive", None)
+        if self.forecast_retention_index_bytes == 512 * 1024**2:
+            value.pop("forecast_retention_index_bytes", None)
         if self.proof_stores is None:
             value.pop("proof_stores", None)
         if self.host_memory_admission is None:
@@ -286,6 +297,7 @@ class StandingRewardBootConfig(StrictProtocolModel):
                 self.promotion_directory,
                 self.proof_import_directory,
                 *(self.proof_stores.credential_paths() if self.proof_stores else ()),
+                *forecast_credential_paths(self.forecast_archive, self.proof_stores),
                 self.proof_export_directory,
                 *(c.resources.state_directory for c in self.legacy_chains),
                 *(self.direct_model_review.stores() if self.direct_model_review else ()),
@@ -538,7 +550,13 @@ async def _run_owned_standing_inputs(host, config, stop, *, runtime=None, credit
         if model_artifacts is not None:
             constructing.callback(model_artifacts.release_frozen_reference)
         select_history_forecasts(
-            history, root=root, config=config, resources=constructing, role="reward_writer"
+            history,
+            root=root,
+            config=config,
+            resources=constructing,
+            role="reward_writer",
+            remote_store=exported.remote,
+            stop=stop,
         )
         constructing.enter_context(
             memory_runtime(
@@ -614,6 +632,8 @@ async def _run_owned_standing_inputs(host, config, stop, *, runtime=None, credit
                 resources=constructing,
                 role="reward_writer",
                 predecessor=True,
+                remote_store=exported.remote,
+                stop=stop,
             )
             old_preparation = StandingRewardPreparation(
                 old_reader,

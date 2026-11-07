@@ -1,10 +1,16 @@
 """Bounded snapshot hashing and copying, independent of payload caches."""
 
 import hashlib
+import json
 import os
 import stat
 
 CHUNK_BYTES = 64 * 1024
+
+
+def encode_forecast_json(value):
+    """Preserve the original diagnostic event encoding and hash-chain bytes."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
 def stream_file(path, *, maximum_bytes, destination=None, sync=False):
