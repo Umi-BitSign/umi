@@ -157,6 +157,54 @@ def test_three_model_live_gate_and_settlement_backpressure_use_current_reservati
                 lease.close()
 
 
+def test_staggered_models_remeasure_growth_and_do_not_credit_logical_release(pool, monkeypatch):
+    # Use current allowances, with the startup gate satisfied separately.
+    body = pool.policy.model_dump(mode="json", by_alias=True)
+    body["background_reservation_bytes"] = 2 * GIB
+    for slot in body["slots"]:
+        if slot["lane"] == "settlement_retained":
+            slot["reservation_bytes"] = 8 * GIB
+    body["incremental_budget_bytes"] = 41 * GIB
+    pool.fixture.selection = pool.fixture.selection.model_copy(
+        update={"policy_sha256": pool.write(body)}
+    )
+    controllers = [pool.controller() for _ in range(3)]
+    available = 31 * GIB
+    monkeypatch.setattr(native, "_available_memory", lambda: available)
+    leases, containers = [], []
+    try:
+        for index in range(2):
+            controller = controllers[index]
+            lease = controller.try_acquire_group("transient", 1)
+            assert lease is not None
+            leases.append(lease)
+            cid = "ab"[index] * 64
+            target = pool.container(cid)
+            containers.append(target)
+            assert controller.bind_model_container(lease, cid, target)
+            # Synthetic full allocation after admission; no real memory consumed.
+            available -= 8 * GIB
+        third = controllers[2]
+        assert third.try_acquire_group("transient", 1) is None
+        assert third.last_model_admission["available_bytes"] == 15 * GIB
+        assert third.last_model_admission["required_available_bytes"] == 30 * GIB
+        assert third.last_model_admission["exclusive_orphan_hold"] is False
+        # A closed lease and empty cgroup cannot invent returned resident pages.
+        (containers[0] / "cgroup.events").write_text("populated 0\n")
+        leases[0].close()
+        assert third.try_acquire_group("transient", 1) is None
+        assert third.last_model_admission["required_available_bytes"] == 22 * GIB
+        assert third.last_model_admission["shortfall_bytes"] == 7 * GIB
+        # Only the next native memory sample establishes actual returned space.
+        available += 8 * GIB
+        replacement = third.try_acquire_group("transient", 1)
+        assert replacement is not None
+        leases.append(replacement)
+    finally:
+        for lease in leases:
+            lease.close()
+
+
 @pytest.mark.parametrize("change", ["closed", "cleared", "inode", "ceiling", "unbound"])
 def test_unknown_changed_or_expired_container_never_receives_peer_credit(pool, change):
     first, second = pool.controller(), pool.controller()

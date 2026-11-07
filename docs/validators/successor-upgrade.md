@@ -139,6 +139,14 @@ restart, alongside simultaneous timing and resource limits. These witnesses
 resolve live peer identity; they do not lower startup reserves, qualify physical
 core exclusivity or establish the memory headroom for a larger pool.
 
+Qualify admission after earlier models have allocated memory, as well as before
+allocation. Every grant charges busy reservations above the current available
+memory sample. A configured slot count or an initial group grant therefore does
+not establish sustained concurrency. Closing a lease removes its reservation;
+only a fresh memory sample establishes returned space. Startup also constructs
+providers and retained metadata outside individual model leases, so a lower
+startup envelope needs separate qualification of those allocations.
+
 Timed inference also requires a matching qualified CPU slot for every admitted
 model slot. More benchmark tasks or unused memory slots do not add timed capacity.
 Keep completed baseline observations only when their measurement profile remains
