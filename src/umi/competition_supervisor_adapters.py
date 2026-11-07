@@ -302,6 +302,99 @@ class _RetainedRuns(Mapping):
             yield _decode_record(raw, recovery_history=self._history)
 
 
+def _read_registry_records(db, binding, limits):
+    if db.execute("SELECT id,body FROM binding").fetchall() != [(1, binding)]:
+        raise SuccessorAdapterError("adapter registry binding changed")
+    count, total, maximum = db.execute(
+        "SELECT COUNT(*),COALESCE(SUM(length(body)),0),COALESCE(MAX(length(body)),0) FROM runs"
+    ).fetchone()
+    node_count, node_total, node_maximum = db.execute(
+        "SELECT COUNT(*),COALESCE(SUM(length(body)),0),"
+        "COALESCE(MAX(length(body)),0) FROM history_nodes"
+    ).fetchone()
+    if (
+        count > limits.maximum_retained_runs
+        or node_count > MAX_SUCCESSOR_HISTORY_RECORDS + limits.maximum_retained_runs
+        or total + node_total > limits.maximum_registry_bytes
+    ):
+        raise SuccessorAdapterError("adapter registry capacity exhausted")
+    if count and not 0 < maximum <= limits.maximum_registry_bytes:
+        raise SuccessorAdapterError("adapter registry record is malformed")
+    if node_count and not 0 < node_maximum <= MAX_HISTORY_NODE_BYTES:
+        raise SuccessorAdapterError("adapter registry history node is malformed")
+    history = RecoveryHistoryReplay(dict(db.execute("SELECT id,body FROM history_nodes")))
+    nodes, prefixes = history.nodes, history.prefixes
+    result = {}
+    for identity, raw, checksum in db.execute("SELECT id,body,sha FROM runs"):
+        if not isinstance(raw, bytes) or hashlib.sha256(raw).hexdigest() != checksum:
+            raise SuccessorAdapterError("adapter registry record is corrupt")
+        selection, _ = _decode_record(
+            raw, history_nodes=nodes, history_prefixes=prefixes, metadata_only=True
+        )
+        if selection.directive_sha256 != identity:
+            raise SuccessorAdapterError("adapter registry directive binding changed")
+        result[identity] = raw
+    return _RetainedRuns(result, history, total + node_total)
+
+
+@dataclass(frozen=True, slots=True)
+class RetainedAdapterInventory:
+    """Bounded source metadata for preparation, never writer or replay authority."""
+
+    path: Path
+    snapshot: tuple
+    binding_sha256: str
+    runs: Mapping
+
+
+def read_retained_adapter_inventory(
+    installation: AuthenticatedSuccessorWorkerInputs,
+    limits: SuccessorAdapterLimits,
+) -> RetainedAdapterInventory:
+    """Read an installed legacy registry without constructing its writable owner.
+
+    Existing inline and shared-history rows use the same native decoder as the
+    live adapter. This opens no package, worker, wallet or RPC provider and takes
+    no process/weight lock. A preparation consumer must retain the returned file
+    identity and check it again before reusing work. It cannot authorize a handoff.
+    Supported adapter registries use DELETE journals; other modes or an active
+    journal require explicit repair and are refused before SQLite is opened.
+    """
+    validate_authenticated_successor_installation(installation)
+    if type(limits) is not SuccessorAdapterLimits:
+        raise TypeError("native adapter limits required")
+    binding = retained_adapter_binding(installation, limits)
+    path = Path(installation.config.state_root) / "successor-adapter" / "registry.sqlite3"
+    with WorkProgress("legacy_adapter_inventory_preparation", 1, unit="registries") as meter:
+        snapshot = _recovery_journal_snapshot(path)
+        if any(identity is not None for suffix, identity in snapshot[1] if suffix):
+            raise SuccessorAdapterError(
+                "read-only registry preparation requires a stable DELETE journal"
+            )
+        descriptor = _open_private_regular_file(path, "retained adapter registry")
+        try:
+            header = os.read(descriptor, 20)
+        finally:
+            os.close(descriptor)
+        if header[:16] != b"SQLite format 3\x00" or header[18:20] != b"\x01\x01":
+            raise SuccessorAdapterError(
+                "read-only registry preparation requires a stable DELETE journal"
+            )
+        db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)
+        try:
+            db.execute("PRAGMA query_only=ON")
+            db.execute("BEGIN")
+            runs = _read_registry_records(db, binding, limits)
+            if _recovery_journal_snapshot(path) != snapshot:
+                raise SuccessorAdapterError("retained registry changed during preparation")
+        finally:
+            db.close()
+        if _recovery_journal_snapshot(path) != snapshot:
+            raise SuccessorAdapterError("retained registry changed during preparation")
+        meter.advance()
+        return RetainedAdapterInventory(path, snapshot, hashlib.sha256(binding).hexdigest(), runs)
+
+
 @contextmanager
 def _read_worker_database(
     path: Path, lock_path: Path, maximum_bytes: int, *, verified_snapshot=None
@@ -489,39 +582,7 @@ class ProductionSuccessorRuntimeAdapter:
 
     def _records(self):
         with self._registry() as db:
-            if db.execute("SELECT id,body FROM binding").fetchall() != [(1, self._binding)]:
-                raise SuccessorAdapterError("adapter registry binding changed")
-            count, total, maximum = db.execute(
-                "SELECT COUNT(*),COALESCE(SUM(length(body)),0),"
-                "COALESCE(MAX(length(body)),0) FROM runs"
-            ).fetchone()
-            node_count, node_total, node_maximum = db.execute(
-                "SELECT COUNT(*),COALESCE(SUM(length(body)),0),"
-                "COALESCE(MAX(length(body)),0) FROM history_nodes"
-            ).fetchone()
-            if (
-                count > self.limits.maximum_retained_runs
-                or node_count > MAX_SUCCESSOR_HISTORY_RECORDS + self.limits.maximum_retained_runs
-                or total + node_total > self.limits.maximum_registry_bytes
-            ):
-                raise SuccessorAdapterError("adapter registry capacity exhausted")
-            if count and not 0 < maximum <= self.limits.maximum_registry_bytes:
-                raise SuccessorAdapterError("adapter registry record is malformed")
-            if node_count and not 0 < node_maximum <= MAX_HISTORY_NODE_BYTES:
-                raise SuccessorAdapterError("adapter registry history node is malformed")
-            history = RecoveryHistoryReplay(dict(db.execute("SELECT id,body FROM history_nodes")))
-            nodes, prefixes = history.nodes, history.prefixes
-            result = {}
-            for identity, raw, checksum in db.execute("SELECT id,body,sha FROM runs"):
-                if not isinstance(raw, bytes) or hashlib.sha256(raw).hexdigest() != checksum:
-                    raise SuccessorAdapterError("adapter registry record is corrupt")
-                selection, _ = _decode_record(
-                    raw, history_nodes=nodes, history_prefixes=prefixes, metadata_only=True
-                )
-                if selection.directive_sha256 != identity:
-                    raise SuccessorAdapterError("adapter registry directive binding changed")
-                result[identity] = raw
-            return _RetainedRuns(result, history, total + node_total)
+            return _read_registry_records(db, self._binding, self.limits)
 
     def _retain(self, prepared):
         records = self._records()

@@ -1532,6 +1532,17 @@ work. Do not delete this retained state while a selected boot still consumes its
 legacy handoff plan. Supported source upgrades preserve the verification ABI for
 unchanged native semantics and select this reader without changing journal paths.
 
+Pre-stop preparation can read the installed adapter registry through
+`read_retained_adapter_inventory(installation, limits)` without constructing a
+writable adapter, acquiring writer locks or opening packages. Both inline and
+shared-history records use the live adapter's bounded decoder. The returned
+source identity must still match when preparation is consumed. This metadata
+inventory grants no verification or transaction authority. Existing adapter
+registries use DELETE journals; active journals, other SQLite modes, changed
+bindings and changed file identities require explicit repair. The reader does
+not convert them or create a missing database. Its progress scope is registry
+preparation, separate from package/expiry verification and writer handoff.
+
 During initial history/package replay, the original supervisor continues
 predecessor reconciliation. The durable handoff intent stops that continuation
 before successor signing, including after restart. A failed old feed does not
