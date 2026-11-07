@@ -17,6 +17,7 @@ from .chain_evidence import FinalizedSnapshotRef
 from .concurrency import run_owned_thread
 from .finalized_ancestry import MAXIMUM_HEADER_BYTES, MAXIMUM_PATH_BYTES, encode_rpc_header
 from .grandpa_finality import EVIDENCE_CLASS, _decode_header
+from .historical_header_capacity import hint_payload_usage
 from .historical_header_progress import HeaderRecoveryTelemetry
 from .validator_plans import VerifiedFinalizedBlock
 
@@ -159,9 +160,9 @@ class HistoricalHeaderRecovery:
                     if old[0] != encoded:
                         raise ValueError("historical header hint changed")
                 else:
-                    used = db.execute(
-                        "SELECT COALESCE(SUM(length(encoded)),0) FROM historical_header_hints"
-                    ).fetchone()[0]
+                    used = hint_payload_usage(
+                        db, additional_bytes=len(encoded), maximum_bytes=self.maximum_bytes
+                    )
                     if used + len(encoded) > self.maximum_bytes:
                         raise HistoricalHeaderRecoveryPending(
                             "historical header cache needs capacity"
@@ -210,10 +211,11 @@ class HistoricalHeaderRecovery:
                     else:
                         additions.append((key, encoded))
                 if additions:
-                    used = db.execute(
-                        "SELECT COALESCE(SUM(length(encoded)),0) FROM historical_header_hints"
-                    ).fetchone()[0]
-                    if used + sum(len(encoded) for _, encoded in additions) > self.maximum_bytes:
+                    added_bytes = sum(len(encoded) for _, encoded in additions)
+                    used = hint_payload_usage(
+                        db, additional_bytes=added_bytes, maximum_bytes=self.maximum_bytes
+                    )
+                    if used + added_bytes > self.maximum_bytes:
                         raise HistoricalHeaderRecoveryPending(
                             "historical header cache needs capacity"
                         )

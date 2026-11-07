@@ -1675,6 +1675,14 @@ supported owner commits; missing main databases, unsafe modes and symlinks still
 fail. On older readers without this compatibility fix, finish the import before
 retrying the original provider against its retained directory.
 
+Header recovery and online hint import use the same payload-capacity check under
+their insertion transaction. When SQLite's total page bytes plus the pending
+headers fit the payload ceiling, that conservative bound avoids a full hint scan.
+Near the ceiling, they compute exact payload usage before accepting or refusing
+the insertion. Unrelated tables, indexes and free pages cannot cause a false
+capacity refusal. Existing hint databases and concurrently opened older writers
+remain compatible; no new accounting schema or trusted ancestry is introduced.
+
 During initial history/package replay, the original supervisor continues
 predecessor reconciliation. The durable handoff intent stops that continuation
 before successor signing, including after restart. A failed old feed does not
