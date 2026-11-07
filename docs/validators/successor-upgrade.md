@@ -4409,6 +4409,9 @@ Current authority-history reads use a query-only SQLite snapshot, so admission
 or model-preservation work does not own their application lock. Each snapshot
 binds the published history and its supporting records, checks the original
 private file identity and configuration, and cannot write or repair state.
+Model-certification inventory polling reads the accepted submissions and certificate
+counts in one query-only snapshot, without waiting for the intake writer. Counts
+describe committed state and do not grant roster or certification authority.
 Admission-status, reviewer-queue and intake-readiness reads use the same snapshot
 path. They can finish while a publisher owns the writer gate, and a later read
 sees newly committed certificates and intake fences. Certificate assembly and

@@ -743,6 +743,21 @@ def test_ready_page_is_bounded_and_does_not_authorize_invalid_certificate(prepar
     assert owner.intent(cohort, digest(sub)) is None
 
 
+def test_certification_inventory_reads_committed_state_during_writer(prepared):
+    owner, cohort, _, _ = prepared
+    expected = owner.certification_inventory(cohort)
+    assert expected["total"] == 2
+    with ThreadPoolExecutor(max_workers=2) as pool, owner.intake._connection() as (db, _):
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            db.execute("DELETE FROM cohort_consents WHERE cohort=?", (cohort,))
+            calls = [pool.submit(owner.certification_inventory, cohort) for _ in range(2)]
+            assert [call.result(timeout=10) for call in calls] == [expected] * 2
+        finally:
+            db.rollback()
+    assert owner.certification_inventory(cohort) == expected
+
+
 async def test_intake_certifies_replacement_before_closure_and_reuses_after_restart(
     prepared, tmp_path, monkeypatch
 ):
