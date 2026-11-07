@@ -25,7 +25,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
-from . import host_memory_peer
+from . import host_memory_graph_peer, host_memory_peer
 from .protocol import StrictProtocolModel
 
 Lane = Literal["owner_export", "transient", "settlement_retained"]
@@ -291,6 +291,7 @@ class HostMemoryLease:
         self._creator_pid = os.getpid()
         self._generation = object()
         self._model_container = None
+        self._graph_binding = None
         self._peer_witness = False
         self.service_bounded = False
 
@@ -316,6 +317,8 @@ class HostMemoryLease:
         binding, self._model_container = self._model_container, None
         if binding is not None:
             os.close(binding[2])
+        graph, self._graph_binding = self._graph_binding, None
+        host_memory_graph_peer.close(graph)
 
     def __del__(self):
         self.close()
@@ -575,6 +578,7 @@ class HostMemoryAdmission:
         self, parent: int, selected: HostMemorySlot, *, service_bounded=False
     ) -> HostMemoryLease | None:
         descriptor = self._open_slot(parent, selected)
+        graph_binding = None
         try:
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -595,6 +599,8 @@ class HostMemoryAdmission:
                 if service_bounded
                 else selected.reservation_bytes
             )
+            if service_bounded:
+                graph_binding = host_memory_graph_peer.own_binding(self, selected)
             pending = selected_bytes
             busy = set()
             for slot in self.policy.slots:
@@ -609,6 +615,10 @@ class HostMemoryAdmission:
                         busy.add((slot.device, slot.inode))
                 finally:
                     os.close(other)
+            graph_discount = host_memory_graph_peer.discount(
+                self, parent, busy, selected=graph_binding, selected_bytes=selected_bytes
+            )
+            pending -= graph_discount
             containers = self._model_container_reservations(busy)
             available = _available_memory()
             required = (
@@ -628,6 +638,7 @@ class HostMemoryAdmission:
                     selected_reservation_bytes=selected_bytes,
                     selected_slot_reservation_bytes=selected.reservation_bytes,
                     selected_service_bounded=selected_bytes < selected.reservation_bytes,
+                    shared_graph_ceiling_discount_bytes=graph_discount,
                 )
             if self.joint_execution_stage:
                 # A dead owner releases flock before a surviving rootless
@@ -642,13 +653,22 @@ class HostMemoryAdmission:
                     return None
             if available < required:
                 return None
+            if graph_binding is not None:
+                host_memory_peer.bind(descriptor, graph_binding[2])
             lease = HostMemoryLease(descriptor, selected)
             lease.service_bounded = selected_bytes < selected.reservation_bytes
+            if graph_binding is not None:
+                lease._peer_witness = True
+                lease._graph_binding, graph_binding = graph_binding, None
+                # A graph witness is never reusable as a model-container grant,
+                # even when its whole-service cap equals the historical slot.
+                lease.service_bounded = True
             if self.model_execution_stage:
                 self._model_leases.add(lease)
             descriptor = None
             return lease
         finally:
+            host_memory_graph_peer.close(graph_binding)
             if descriptor is not None:
                 os.close(descriptor)
 

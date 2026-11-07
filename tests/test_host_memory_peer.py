@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from umi import host_memory_admission as native
+from umi import host_memory_graph_peer as graph_peer
 from umi import host_memory_peer as peer
 from umi import host_memory_startup as startup
 from umi.host_execution_memory import expanded_execution_policy
@@ -176,6 +177,10 @@ async def test_preparation_checkpoint_cannot_release_another_tasks_lease(pool):
 
 @pytest.fixture
 def pool(parallel_joint, provisioned, tmp_path, monkeypatch):
+    native_graph_binding = graph_peer.own_binding
+    # These older tests provide synthetic service limits. Do not combine those
+    # with the test runner's unrelated real cgroup identity/ceiling.
+    monkeypatch.setattr(graph_peer, "own_binding", lambda controller, slot: None)
     fixture, _, previous = parallel_joint
     root, _, _, write, _ = provisioned
     slot = root / "third-model.slot"
@@ -222,6 +227,7 @@ def pool(parallel_joint, provisioned, tmp_path, monkeypatch):
         policy=policy,
         write=write,
         fixture=fixture,
+        native_graph_binding=native_graph_binding,
     )
 
 

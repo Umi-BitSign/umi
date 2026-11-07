@@ -89,6 +89,7 @@ seeds = [
     # external owned controllers; retain their previously guarded source pins.
     "competition_reward_preparation_service",
     "host_memory_peer",
+    "host_memory_graph_peer",
 ]
 modules = set()
 external_imports = set()

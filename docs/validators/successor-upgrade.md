@@ -243,9 +243,15 @@ their own graph acquisition at the smaller of the slot reservation and current
 enforced service ceiling. The service must retain zero swap and a ceiling within
 its selected startup budget. Unsupported or enlarged caps keep the full charge.
 This uses the existing whole-service limit, including current allocations and
-failure cleanup; it does not subtract sampled resident pages. Peers continue to
-charge the full historical slot, so mixed source versions remain conservative.
-Model group grants always retain their full signed allowance, and a reduced
+failure cleanup; it does not subtract sampled resident pages. Updated readers
+charge concurrent graph grants in one service no more than its enforced ceiling.
+Each grant binds a distinct kernel control-file inode to its native lease; the
+reader verifies the live flock owner, matching cgroup, operator-owned limit and
+zero swap. Missing or changed witnesses keep the full historical charges.
+Older `/2` readers recognize distinct witnesses but retain full slot charges;
+they neither credit these as model containers nor require a state migration.
+The numeric admission observation reports `shared_graph_ceiling_discount_bytes`.
+Model group grants always retain their full signed allowance, and a witnessed
 graph grant cannot be rebound to a model container. Drain owned work before
 changing a service limit or moving workers outside its cgroup. Carry the source
 update through the existing validator host maintenance path; miners need no

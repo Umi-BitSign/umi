@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
+from . import host_memory_graph_peer
 from .competition_transport_verification import TransferProgress
 from .host_memory_admission import (
     CAPACITY_RETRY_SECONDS,
@@ -194,6 +195,8 @@ def probe_startup_reservation(controller):
                     busy.add((slot.device, slot.inode))
             finally:
                 os.close(descriptor)
+        graph_discount = host_memory_graph_peer.discount(controller, root, busy)
+        pending -= graph_discount
         containers = controller._model_container_reservations(busy)
     finally:
         if transaction is not None:
@@ -216,6 +219,7 @@ def probe_startup_reservation(controller):
         shortfall_bytes=max(0, required - available),
         startup_memory_bytes=controller.startup_reservation_bytes,
         pending_reservation_bytes=pending,
+        shared_graph_ceiling_discount_bytes=graph_discount,
         capacity_reserved=False,
         eta_seconds=0 if available >= required else None,
         eta_basis="startup_reservation_probe_actual_grant_required_before_construction",
