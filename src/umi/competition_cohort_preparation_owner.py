@@ -204,84 +204,7 @@ class CohortPreparation:
         with self._retained_lock:
             cached = self._retained_cache.get(key)
             if cached is not None:
-                queue, intake = self.queue, self.queue.intake
-                intake._allowed(cohort)
-                # This path only checks an existing immutable round. Keep its
-                # current authority and row in one native read-only snapshot;
-                # do not queue behind the admission owner's exclusive gate.
-                with intake._connection(prefer_history=True) as (db, store):
-                    history = store.published_history(cohort)
-                    if history_tip(history) != expected_tip_sha256:
-                        raise ValueError(
-                            "intake history changed before preparation; retry current history"
-                        )
-                    view = verify_cohort_history(
-                        history,
-                        queue.policy,
-                        expected_tip_sha256=expected_tip_sha256,
-                        current_block=current_block,
-                    )
-                    if view.state.phase in {"intake", "revoked"}:
-                        raise ValueError(
-                            "round preparation requires certified intake and active authority"
-                        )
-                    closing = view.closure("intake")
-                    if (
-                        digest(closing) != cached.value.roster.round.intake_closure_sha256
-                        or digest(history.plan) != cached.value.roster.round.cohort_sha256
-                        or not closing.observed_at_block
-                        <= cached.value.observation.block
-                        <= current_block
-                    ):
-                        raise ValueError("retained preparation differs from current intake history")
-                    row = db.execute(
-                        "SELECT digest,substr(body,1,?),observed "
-                        "FROM cohort_prepared_rounds WHERE cohort=?",
-                        (self.maximum_bytes + 1, cohort),
-                    ).fetchone()
-                    if (
-                        row is None
-                        or row[1] != cached.raw
-                        or row[0] != cached.sha256
-                        or row[2] != cached.value.observation.block
-                    ):
-                        self._retained_bytes -= len(self._retained_cache.pop(key).raw)
-                        raise ValueError("retained preparation changed after verified replay")
-                    if cached.tip_sha256 != expected_tip_sha256:
-                        # A new signed tip must replay its timing/decision
-                        # evidence, but cannot alter the already verified
-                        # original participants, baseline or observation.
-                        decisions: dict[str, CohortDecisionInput] = {}
-
-                        def decision(sha: str) -> CohortDecisionInput:
-                            if sha not in decisions:
-                                value = store.source(cohort, sha, CohortDecisionInput)
-                                if digest(value) != sha:
-                                    raise ValueError("preparation decision changed its identity")
-                                decisions[sha] = value
-                            return decisions[sha]
-
-                        state, _, _ = replay_cohort_decisions(history, queue.policy, decision)
-                        if state != view.state:
-                            raise ValueError(
-                                "preparation history differs from native decision replay"
-                            )
-                        if view.state.phase != "preparation":
-                            prepared = view.closure("preparation")
-                            if (
-                                cached.value.observation.block > prepared.observed_at_block
-                                or decision(
-                                    prepared.evidence_sha256
-                                ).progress.progress.phase_result_sha256
-                                != cached.round_sha256
-                            ):
-                                raise ValueError(
-                                    "prepared round differs from certified preparation"
-                                )
-                        cached = replace(cached, tip_sha256=expected_tip_sha256)
-                        self._retained_cache[key] = cached
-                self._retained_cache.move_to_end(key)
-                return cached
+                return self._reuse_retained(cohort, cached, expected_tip_sha256, current_block)
             saved = self._prepare(
                 cohort,
                 observation,
@@ -289,7 +212,80 @@ class CohortPreparation:
                 current_block=current_block,
             )
             self._remember(key, saved)
+            if observation is None:
+                # The cold snapshot may outlive a concurrent publication. Reuse
+                # its completed replay under the ordinary fresh authority/row
+                # fence before returning or releasing the cache lock.
+                return self._reuse_retained(cohort, saved, expected_tip_sha256, current_block)
             return saved
+
+    def _reuse_retained(self, cohort, cached, expected_tip_sha256, current_block):
+        queue, intake = self.queue, self.queue.intake
+        intake._allowed(cohort)
+        # This path only checks an existing immutable round. Keep its
+        # current authority and row in one native read-only snapshot;
+        # do not queue behind the admission owner's exclusive gate.
+        with intake._connection(prefer_history=True) as (db, store):
+            history = store.published_history(cohort)
+            if history_tip(history) != expected_tip_sha256:
+                raise ValueError("intake history changed before preparation; retry current history")
+            view = verify_cohort_history(
+                history,
+                queue.policy,
+                expected_tip_sha256=expected_tip_sha256,
+                current_block=current_block,
+            )
+            if view.state.phase in {"intake", "revoked"}:
+                raise ValueError("round preparation requires certified intake and active authority")
+            closing = view.closure("intake")
+            if (
+                digest(closing) != cached.value.roster.round.intake_closure_sha256
+                or digest(history.plan) != cached.value.roster.round.cohort_sha256
+                or not closing.observed_at_block <= cached.value.observation.block <= current_block
+            ):
+                raise ValueError("retained preparation differs from current intake history")
+            row = db.execute(
+                "SELECT digest,substr(body,1,?),observed "
+                "FROM cohort_prepared_rounds WHERE cohort=?",
+                (self.maximum_bytes + 1, cohort),
+            ).fetchone()
+            if (
+                row is None
+                or row[1] != cached.raw
+                or row[0] != cached.sha256
+                or row[2] != cached.value.observation.block
+            ):
+                self._retained_bytes -= len(self._retained_cache.pop(cohort).raw)
+                raise ValueError("retained preparation changed after verified replay")
+            if cached.tip_sha256 != expected_tip_sha256:
+                # A new signed tip must replay its timing/decision
+                # evidence, but cannot alter the already verified
+                # original participants, baseline or observation.
+                decisions: dict[str, CohortDecisionInput] = {}
+
+                def decision(sha: str) -> CohortDecisionInput:
+                    if sha not in decisions:
+                        value = store.source(cohort, sha, CohortDecisionInput)
+                        if digest(value) != sha:
+                            raise ValueError("preparation decision changed its identity")
+                        decisions[sha] = value
+                    return decisions[sha]
+
+                state, _, _ = replay_cohort_decisions(history, queue.policy, decision)
+                if state != view.state:
+                    raise ValueError("preparation history differs from native decision replay")
+                if view.state.phase != "preparation":
+                    prepared = view.closure("preparation")
+                    if (
+                        cached.value.observation.block > prepared.observed_at_block
+                        or decision(prepared.evidence_sha256).progress.progress.phase_result_sha256
+                        != cached.round_sha256
+                    ):
+                        raise ValueError("prepared round differs from certified preparation")
+                cached = replace(cached, tip_sha256=expected_tip_sha256)
+                self._retained_cache[cohort] = cached
+        self._retained_cache.move_to_end(cohort)
+        return cached
 
     def _remember(self, key, saved):
         previous = self._retained_cache.pop(key, None)
@@ -311,7 +307,13 @@ class CohortPreparation:
     ) -> _VerifiedRound:
         queue, intake = self.queue, self.queue.intake
         intake._allowed(cohort)
-        with queue._connection() as (db, store):
+        # Restart replay cannot publish a new round without an observation.
+        # Keep its retained inputs in one read snapshot instead of holding the
+        # intake writer gate through the whole roster's native verification.
+        connection = (
+            intake._connection(prefer_history=True) if observation is None else queue._connection()
+        )
+        with connection as (db, store):
             history = store.published_history(cohort)
             if history_tip(history) != expected_tip_sha256:
                 raise ValueError("intake history changed before preparation; retry current history")
@@ -327,11 +329,21 @@ class CohortPreparation:
             seal = intake._seal(db, history, closing.predecessor_sha256)
             if seal is None:
                 raise FileNotFoundError("certified intake seal is not retained yet")
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS cohort_prepared_rounds "
-                "(cohort TEXT PRIMARY KEY, digest TEXT NOT NULL, "
-                "observed INTEGER NOT NULL, body BLOB NOT NULL)"
-            )
+            if observation is None:
+                if (
+                    db.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' "
+                        "AND name='cohort_prepared_rounds'"
+                    ).fetchone()
+                    is None
+                ):
+                    raise FileNotFoundError("original prepared round is not retained yet")
+            else:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS cohort_prepared_rounds "
+                    "(cohort TEXT PRIMARY KEY, digest TEXT NOT NULL, "
+                    "observed INTEGER NOT NULL, body BLOB NOT NULL)"
+                )
             row = db.execute(
                 "SELECT digest,substr(body,1,?),observed "
                 "FROM cohort_prepared_rounds WHERE cohort=?",

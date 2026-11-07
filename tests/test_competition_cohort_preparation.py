@@ -155,12 +155,15 @@ def test_retained_round_reuses_private_object_with_fresh_authority(preparation, 
     assert len(h.owner._retained_cache) == 1
 
 
-def test_cached_preparation_does_not_wait_for_intake_writer(preparation):
+@pytest.mark.parametrize("restart", [False, True])
+def test_retained_preparation_does_not_wait_for_intake_writer(preparation, restart):
     h = preparation
     h.certify()
     first = run(h)
     expected = history_tip(h.history)
     assert h.owner.retained(h.cohort, expected_tip_sha256=expected, current_block=340) == first
+    if restart:
+        h.owner = CohortPreparation(h.queue, h.store)
     with ThreadPoolExecutor(max_workers=1) as pool, h.intake._connection() as (db, _):
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -170,6 +173,37 @@ def test_cached_preparation_does_not_wait_for_intake_writer(preparation):
             assert reading.result(timeout=60) == first
         finally:
             db.rollback()
+
+
+def test_missing_retained_preparation_does_not_create_state(preparation):
+    h = preparation
+    h.certify()
+    with pytest.raises(FileNotFoundError, match="original prepared round is not retained"):
+        h.owner.retained(h.cohort, expected_tip_sha256=history_tip(h.history), current_block=340)
+    with h.intake._connection(prefer_history=True) as (db, _):
+        assert (
+            db.execute("SELECT 1 FROM sqlite_master WHERE name='cohort_prepared_rounds'").fetchone()
+            is None
+        )
+
+
+def test_restart_replay_rechecks_row_after_releasing_snapshot(preparation, monkeypatch):
+    h = preparation
+    h.certify()
+    run(h)
+    owner = CohortPreparation(h.queue, h.store)
+    replay = owner._prepare
+
+    def changed_after_snapshot(*args, **kwargs):
+        saved = replay(*args, **kwargs)
+        with h.intake._connection() as (db, _):
+            db.execute("DELETE FROM cohort_prepared_rounds WHERE cohort=?", (h.cohort,))
+        return saved
+
+    monkeypatch.setattr(owner, "_prepare", changed_after_snapshot)
+    with pytest.raises(ValueError, match="changed after verified replay"):
+        owner.retained(h.cohort, expected_tip_sha256=history_tip(h.history), current_block=350)
+    assert not owner._retained_cache
 
 
 @pytest.mark.parametrize("one_round_budget", [False, True])

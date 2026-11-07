@@ -73,6 +73,13 @@ requiring the previous service to be running for a new preflight. These checks
 apply to native host maintenance; upload-only miners retain their existing
 client update path and signed submission bytes.
 
+Retained round replay after an owner restart reads one consistent intake snapshot,
+including its original roster and certificates. It does not hold the intake writer
+gate while verifying that roster. New preparation still owns the writer gate and
+requires its original finalized observation. This behavior follows the existing
+owner source maintenance path; no miner submission or retained round migration is
+required. Select the source in every preparation owner before claiming adoption.
+
 Order selection restores a missing evaluation-suite declaration from the configured
 `evaluation_suite_adoption_candidates` entry for that cohort. The candidate must
 match the exact suite in the retained certified preparation. Restoration publishes
