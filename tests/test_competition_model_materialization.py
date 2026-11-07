@@ -418,3 +418,36 @@ async def test_bytes_complete_still_reports_unfinished_finalization(transfer, mo
     assert seen[0]["completed_units"] == seen[0]["total_units"]
     assert seen[0]["completed_operations"] + 1 == seen[0]["total_operations"]
     assert seen[0]["status"] != "completed" and seen[0]["percent"] < 100
+
+
+async def test_transfer_drops_each_range_before_yield_and_reuses_completed_bytes(
+    transfer, monkeypatch
+):
+    ranges = []
+    original = materialization._RemoteModelRanges
+
+    class ObservedRanges(original):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            ranges.append(self)
+
+    yielded = []
+
+    async def checkpoint():
+        active = ranges[-1]
+        assert active.buffer == b"" and active.position == 0
+        yielded.append(active.offset)
+        # Unbuffered writes have completed before the memory grant is released.
+        written = sum(path.stat().st_size for path in transfer.model.rglob("*.bin"))
+        assert written == active.offset
+
+    monkeypatch.setattr(materialization, "_RemoteModelRanges", ObservedRanges)
+    monkeypatch.setattr(materialization, "yield_model_preparation_capacity", checkpoint)
+    await transfer.run()
+    assert yielded == list(range(16, transfer.payload.total_bytes + 1, 16))
+    reads = list(transfer.multipart.reads)
+    for name, expected in transfer.contents.items():
+        assert (transfer.model / name).read_bytes() == expected
+    yielded.clear()
+    await transfer.run()
+    assert yielded == [] and transfer.multipart.reads == reads

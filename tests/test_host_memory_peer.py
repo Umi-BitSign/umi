@@ -1,5 +1,6 @@
 """Real native leases/OFD lifetimes with an explicitly synthetic cgroup mount."""
 
+import asyncio
 import fcntl
 import os
 import signal
@@ -11,6 +12,7 @@ from umi import host_memory_admission as native
 from umi import host_memory_peer as peer
 from umi import host_memory_startup as startup
 from umi.host_execution_memory import expanded_execution_policy
+from umi.host_model_execution import ModelExecutionAdmission, yield_model_preparation_capacity
 
 from .test_host_execution_memory import joint as joint
 from .test_host_execution_memory import parallel_joint as parallel_joint
@@ -95,6 +97,81 @@ def test_startup_probe_uses_selected_graph_budget_and_waits_for_consistent_slot_
             os.close(transaction)
         os.close(root)
         lease.close()
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_transfer_yields_to_export_and_cancellation_cannot_grant_later(pool, cancel):
+    model = ModelExecutionAdmission(pool.fixture.selection, pool.fixture.policy)
+    peer_controller = pool.controller()
+    entered = asyncio.Event()
+    resumed = asyncio.Event()
+
+    async def transfer():
+        async with model.hold(pool.fixture.runtime, preparation=True):
+            entered.set()
+            await yield_model_preparation_capacity()
+            resumed.set()
+
+    task = asyncio.create_task(transfer())
+    await asyncio.wait_for(entered.wait(), 1)
+    export = peer_controller.try_acquire("owner_export")
+    assert export is not None
+    try:
+        await asyncio.sleep(0.15)
+        assert not resumed.is_set()
+        if cancel:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    finally:
+        export.close()
+    if not cancel:
+        await asyncio.wait_for(task, 1)
+        assert resumed.is_set()
+    next_export = peer_controller.try_acquire("owner_export")
+    assert next_export is not None
+    next_export.close()
+
+
+async def test_second_transfer_waits_without_occupying_yielded_export_slot(pool):
+    model = ModelExecutionAdmission(pool.fixture.selection, pool.fixture.policy)
+    entered, finish = asyncio.Event(), asyncio.Event()
+    second_entered = asyncio.Event()
+
+    async def first():
+        async with model.hold(pool.fixture.runtime, preparation=True):
+            entered.set()
+            await yield_model_preparation_capacity()
+            await finish.wait()
+
+    async def second():
+        async with model.hold(pool.fixture.runtime, preparation=True):
+            second_entered.set()
+
+    first_task = asyncio.create_task(first())
+    await asyncio.wait_for(entered.wait(), 1)
+    second_task = asyncio.create_task(second())
+    await asyncio.sleep(0)
+    peer_controller = pool.controller()
+    export = peer_controller.try_acquire("owner_export")
+    try:
+        assert export is not None
+        await asyncio.sleep(0.15)
+        assert not second_entered.is_set()
+    finally:
+        if export is not None:
+            export.close()
+        finish.set()
+        await asyncio.wait_for(asyncio.gather(first_task, second_task), 1)
+    assert second_entered.is_set()
+
+
+async def test_preparation_checkpoint_cannot_release_another_tasks_lease(pool):
+    model = ModelExecutionAdmission(pool.fixture.selection, pool.fixture.policy)
+    async with model.hold(pool.fixture.runtime, preparation=True):
+        with pytest.raises(RuntimeError, match="another task"):
+            await asyncio.create_task(yield_model_preparation_capacity())
+        assert pool.controller().try_acquire("owner_export") is None
 
 
 @pytest.fixture

@@ -80,6 +80,16 @@ requires its original finalized observation. This behavior follows the existing
 owner source maintenance path; no miner submission or retained round migration is
 required. Select the source in every preparation owner before claiming adoption.
 
+On joint execution hosts, remote model restoration releases its export slot after
+writing each complete range and dropping that range's buffer. It reacquires native
+capacity before fetching the next range. This lets owner metadata and history
+exports proceed during large downloads. Transfers within one evaluator remain
+serialized so a waiting transfer cannot occupy the slot while needing a suspended
+transfer's path lock. Timed inference retains its original uninterrupted lease.
+Install this through the evaluator source maintenance path; it preserves model
+bytes, partial-file checkpoints and signed execution inputs. Upload-only miners
+need no configuration migration.
+
 Order selection restores a missing evaluation-suite declaration from the configured
 `evaluation_suite_adoption_candidates` entry for that cohort. The candidate must
 match the exact suite in the retained certified preparation. Restoration publishes

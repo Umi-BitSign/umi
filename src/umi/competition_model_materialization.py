@@ -14,6 +14,7 @@ from .competition_artifacts import _artifact, _directory, _file_identity
 from .competition_remote_model_verification import _RemoteModelRanges
 from .competition_transport_verification import ByteCheckpoints, verifier_semantics
 from .concurrency import run_owned_thread
+from .host_model_execution import yield_model_preparation_capacity
 from .open_competition import digest
 from .private_files import ensure_private_directory, publish_private_model, read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -259,6 +260,13 @@ async def materialize_model_files(
                         remaining -= size
                         progress.advance(size, restored=restored)
                         del data
+                        if not local_file and ranges.position == len(ranges.buffer):
+                            # All reads/writes above are drained. Drop the full
+                            # range before lending this shared slot to exports;
+                            # resume authenticating the same payload afterward.
+                            ranges.buffer = b""
+                            ranges.position = 0
+                            await yield_model_preparation_capacity()
                     if output is not None:
                         await run_owned_thread(output.flush)
                         os.fchmod(output.fileno(), 0o400)
