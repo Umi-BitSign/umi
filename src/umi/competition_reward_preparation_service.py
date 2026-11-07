@@ -54,7 +54,12 @@ class PreparationMount(StrictProtocolModel):
         return _path(value)
 
     def systemd(self) -> str:
-        return _literal(self.source + ":" + self.target + ("" if self.recursive else ":norbind"))
+        return (
+            _literal(self.source)
+            + ":"
+            + _literal(self.target)
+            + (":rbind" if self.recursive else ":norbind")
+        )
 
 
 class LegacyPreparationNamespace(StrictProtocolModel):
@@ -196,7 +201,7 @@ def render_legacy_preparation_service(
         "User=" + namespace.user,
         "Group=" + namespace.group,
         "SupplementaryGroups=" + " ".join(namespace.supplementary_groups),
-        "RootDirectory=" + _literal(namespace.root_directory),
+        "RootDirectory=" + namespace.root_directory,
         "BindPaths=" + " ".join(m.systemd() for m in writable),
         "BindReadOnlyPaths=" + " ".join(m.systemd() for m in readonly),
         "Environment="

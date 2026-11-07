@@ -69,6 +69,7 @@ def test_render_preserves_namespace_selects_signed_command_and_owns_scratch(sele
     raw = render_legacy_preparation_service(selection, namespace, **options).decode()
     lines = raw.splitlines()
     for expected in (
+        "RootDirectory=/var/lib/umi-installed-root",
         "User=umi-validator",
         "Group=umi-validator",
         "SupplementaryGroups=umi-readers",
@@ -94,16 +95,17 @@ def test_render_preserves_namespace_selects_signed_command_and_owns_scratch(sele
         next(line.split("=", 1)[1] for line in lines if line.startswith("BindReadOnlyPaths="))
     )
     assert (
-        "/controls/new-maintenance.json:/etc/umi/validator-supervisor-maintenance.json" in read_only
+        "/controls/new-maintenance.json:/etc/umi/validator-supervisor-maintenance.json:rbind"
+        in read_only
     )
-    assert "/original/config.json:/etc/umi/validator-supervisor.json" in read_only
+    assert "/original/config.json:/etc/umi/validator-supervisor.json:rbind" in read_only
     assert "/opt/original host:/opt/original host:norbind" in read_only
     writable = shlex.split(
         next(line.split("=", 1)[1] for line in lines if line.startswith("BindPaths="))
     )
     assert writable == [
-        "/var/lib/original-state:/state",
-        "/var/lib/umi-independent-providers:/var/lib/umi-preparation/providers",
+        "/var/lib/original-state:/state:rbind",
+        "/var/lib/umi-independent-providers:/var/lib/umi-preparation/providers:rbind",
     ]
     command = shlex.split(
         next(line.split("=", 1)[1] for line in lines if line.startswith("ExecStart="))

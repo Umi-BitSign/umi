@@ -145,9 +145,17 @@ and adds the selected source, root control and disjoint provider directory.
 The service enforces the selected memory cap, zero swap and CPU placement, and
 owns its RuntimeDirectory and private temporary files. It inherits no writer
 cleanup commands or dependencies that could stop the writer. Its controller must
-verify the published unit, namespace and admission before starting it. The service becomes inactive on completion so systemd releases its scratch.
-The controller must retain the successful invocation observation and explicitly
-invoke preparation again for a fresh native check before a later handoff attempt. Rendering and unit validation alone do not establish deployment.
+verify the published unit, namespace and admission before starting it. Bind mount
+source and target paths are quoted separately; `RootDirectory` is emitted as its
+validated single path. Check the loaded mappings, not only the unit text.
+The service becomes inactive on completion so systemd releases its scratch.
+Retain the unit through a service-manager reference while reading its successful
+invocation and empty cgroup; inactive unit metadata can otherwise be collected.
+The controller must explicitly invoke preparation again for a fresh native check
+before a later handoff attempt. Include the preparation's remaining memory cap
+alongside writer growth and host reserves, then recheck native startup admission
+and finalized renewal before the hold. Rendering and unit validation alone do
+not establish deployment.
 
 ### Challenge execution lanes
 
