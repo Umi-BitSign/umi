@@ -29,6 +29,46 @@ _MAXIMUM_RECORD_BYTES = 64 * 1024
 _LOGGER = logging.getLogger(__name__)
 
 
+def audit_frontier_disk_usage(parent: int, name: str) -> int:
+    """Account private audit metadata without opening SQLite or evidence files."""
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    try:
+        root = os.fstat(fd)
+        if root.st_uid != os.getuid() or stat.S_IMODE(root.st_mode) != 0o700:
+            raise FinalityFrontierError("unsafe_frontier_path")
+        total = 0
+        with os.scandir(fd) as entries:
+            for index, entry in enumerate(entries):
+                # Normally three records plus one publication in flight. Bound
+                # inspection even if interrupted older owners left temp files.
+                if index >= 67:
+                    raise FinalityFrontierError("frontier_publication_cleanup_required")
+                temporary = entry.name.startswith(".completion-")
+                if (
+                    entry.name not in {"owner.lock", "completed.json", "audit-progress.json"}
+                    and not temporary
+                ):
+                    raise FinalityFrontierError("unknown_frontier_entry")
+                try:
+                    info = os.stat(entry.name, dir_fd=fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    if temporary:
+                        continue
+                    raise
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_nlink != 1
+                    or info.st_size > (0 if entry.name == "owner.lock" else _MAXIMUM_RECORD_BYTES)
+                ):
+                    raise FinalityFrontierError("unsafe_frontier_path")
+                total += info.st_size
+        return total
+    finally:
+        os.close(fd)
+
+
 class FinalityFrontierError(ValueError):
     """The native mutation owner cannot establish its retained completion."""
 
@@ -81,6 +121,16 @@ class FinalityAuditFrontier:
                     time.sleep(min(0.01, max(0, deadline - time.monotonic())))
             if _identity(self.root, directory=True) != root_identity or _identity(lock) != before:
                 raise FinalityFrontierError("frontier_owner_replaced")
+            # An abrupt process death can leave an unpublished atomic-write
+            # temporary. Only the selected records grant reuse; the next owner
+            # releases these incomplete files under the same exclusive lock.
+            for index, path in enumerate(self.root.iterdir()):
+                if index >= 67:
+                    raise FinalityFrontierError("frontier_publication_cleanup_required")
+                if path.name.startswith(".completion-"):
+                    if int(_identity(path)[5]) > _MAXIMUM_RECORD_BYTES:
+                        raise FinalityFrontierError("frontier_record_oversized")
+                    path.unlink()
             self._owned = True
             try:
                 yield

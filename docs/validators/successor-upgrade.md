@@ -1651,6 +1651,13 @@ checkpointing from changing the retained identity. SQLite `data_version` and
 file-identity checks reject unrelated writes during publication. A successfully
 rolled-back native attempt retains the original completed audit.
 
+Weight-cache accounting includes these private metadata files in both legacy and
+namespaced layouts. Unknown entries, unsafe ownership, links and oversized records
+still refuse admission. The native owner removes unpublished atomic-write temporary
+files under its exclusive lock; committed audit records remain intact. Older cache
+readers do not recognize this directory, so qualify cache accounting with the
+frontier capability before selecting it for a historical reward provider.
+
 Unchanged startup reuses the retained conclusion without replaying evidence.
 Missing, damaged or changed completion enters a reported repair audit; failed
 audits cannot publish completion. Original schema-2 accounting migration and
