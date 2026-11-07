@@ -82,7 +82,13 @@ required. Select the source in every preparation owner before claiming adoption.
 
 On joint execution hosts, remote model restoration releases its export slot after
 writing each complete range and dropping that range's buffer. It reacquires native
-capacity before fetching the next range. This lets owner metadata and history
+capacity before fetching the next range. Waiting exports publish a kernel-lived
+demand marker on the existing transaction file. A drained transfer gives that
+waiter up to one additional second before competing again; the marker owns no
+capacity and disappears on cancellation or process exit. This bounded yield
+cannot shorten inference or leave a download waiting indefinitely. Existing
+readers ignore the marker and retain their ordinary admission checks.
+This lets owner metadata and history
 exports proceed during large downloads. Transfers within one evaluator remain
 serialized so a waiting transfer cannot occupy the slot while needing a suspended
 transfer's path lock. Timed inference retains its original uninterrupted lease.

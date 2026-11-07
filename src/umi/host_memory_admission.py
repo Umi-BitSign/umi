@@ -26,6 +26,7 @@ from typing import Annotated, Literal
 from pydantic import Field, model_validator
 
 from . import host_memory_graph_peer, host_memory_peer
+from .host_memory_export_wait import export_waiter
 from .protocol import StrictProtocolModel
 
 Lane = Literal["owner_export", "transient", "settlement_retained"]
@@ -1013,6 +1014,12 @@ class HostMemoryAdmission:
     async def acquire(
         self, lane: Lane, *, operation=None, cohort=None, phase=None, stop=None
     ) -> HostMemoryLease | None:
+        with export_waiter(self, lane):
+            return await self._acquire(
+                lane, operation=operation, cohort=cohort, phase=phase, stop=stop
+            )
+
+    async def _acquire(self, lane, *, operation, cohort, phase, stop):
         # No blocking flock in a worker thread: cancellation cannot leave a
         # future acquisition running after the waiter has abandoned ownership.
         started, last_report = time.monotonic(), None

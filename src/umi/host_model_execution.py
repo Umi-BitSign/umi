@@ -21,6 +21,7 @@ from .host_memory_admission import (
     HostMemorySlot,
     _absolute,
 )
+from .host_memory_export_wait import yield_to_export
 from .open_competition import digest
 from .protocol import Hex32, StrictProtocolModel
 
@@ -366,6 +367,7 @@ class ModelExecutionAdmission:
                 # Let queued exports reach their existing native retry before this
                 # download competes again. No memory or CPU budget is enlarged.
                 await asyncio.sleep(CAPACITY_RETRY_SECONDS)
+                await yield_to_export(self.controller, CAPACITY_RETRY_SECONDS)
                 lease = await self._acquire_capacity(lane, count, preparation=True)
 
             token = preparation_token = None
