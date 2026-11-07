@@ -128,6 +128,16 @@ cleanup under the actual service limits before selecting additional CPU slots.
 The original single-slot installation controls do not perform a live timed-pool
 expansion; do not rerun them against an active challenge cohort.
 
+`expanded_cpu_timing_profile` prepares an additive profile: it preserves original
+slot locks and account parents, takes extra CPUs from the existing background
+partition, and retains the measurement identity used by completed baselines.
+It requires equal runtime CPU allowances and service accounts, distinct native
+locks and nonoverlapping account parents. This constructor performs no kernel
+change and supplies no qualification verdict. The expansion controller must
+retain actual overlapping model intervals for each account on every slot, plus
+native timing comparability, memory admission and cleanup evidence. Concurrent
+helper launches alone do not demonstrate simultaneous model execution.
+
 Prepare a prospective policy using the qualified host interpreter:
 
 ```sh
