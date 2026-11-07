@@ -19,6 +19,7 @@ from bisect import bisect_right
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import nullcontext
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from threading import Lock
 from typing import Annotated, Literal
@@ -1402,9 +1403,14 @@ class DirectModelUploadOwner:
 
         _at(now_unix_ms)
         async with self._promotion_mutex:
-            acceptance, bundle, payload, reservation_sha256, source_key, completed = (
-                self._promotion_source(publication)
-            )
+            (
+                acceptance,
+                bundle,
+                payload,
+                reservation_sha256,
+                source_key,
+                completed,
+            ) = await run_owned_thread(self._promotion_source, publication)
             acceptance_sha256 = digest(acceptance)
             preserved_key = preserved_model_object_key(
                 acceptance.cohort_sha256,
@@ -1414,8 +1420,13 @@ class DirectModelUploadOwner:
             expected_source = R2ObjectHead(
                 size_bytes=payload.total_bytes, etag=completed.provider_etag
             )
-            retained = self._retained_promotion(
-                acceptance, payload, reservation_sha256, source_key, preserved_key
+            retained = await run_owned_thread(
+                self._retained_promotion,
+                acceptance,
+                payload,
+                reservation_sha256,
+                source_key,
+                preserved_key,
             )
             if retained is not None:
                 head = await self.multipart.head(preserved_key)
@@ -1424,14 +1435,20 @@ class DirectModelUploadOwner:
                     retained.provider_etag,
                 ):
                     raise ValueError("preserved direct model changed after promotion")
-                require_remote_model_bytes(
-                    self.multipart,
-                    preserved_key,
-                    bundle,
-                    payload,
-                    root=Path(self.config.directory) / "byte-verification",
-                    context=self._byte_context(),
-                    head=head,
+                # Durable completion reads can wait on disk. Keep HTTP and
+                # capacity waiters responsive while the promotion mutex owns
+                # the worker through completion, including cancellation.
+                await run_owned_thread(
+                    partial(
+                        require_remote_model_bytes,
+                        self.multipart,
+                        preserved_key,
+                        bundle,
+                        payload,
+                        root=Path(self.config.directory) / "byte-verification",
+                        context=self._byte_context(),
+                        head=head,
+                    )
                 )
                 source_head = await self.multipart.head(source_key)
                 if source_head is not None:
@@ -1486,7 +1503,7 @@ class DirectModelUploadOwner:
                 provider_etag=verified_head.etag,
                 promoted_at_unix_ms=now_unix_ms,
             )
-            self.journal.put("direct-promotion", acceptance_sha256, receipt)
+            await run_owned_thread(self.journal.put, "direct-promotion", acceptance_sha256, receipt)
             await self.multipart.delete_object(source_key)
             if await self.multipart.head(source_key) is not None:
                 raise OSError("direct model staging cleanup is incomplete")

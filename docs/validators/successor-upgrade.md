@@ -4250,6 +4250,11 @@ also capped by the signed delivery profile. The owner drains a failed wave and
 retains its upload ID and completed parts for retry. New owner-created copies
 reuse verified source bytes through durable copy lineage; old destinations
 without that lineage retain their native verification or completed byte result.
+Promotion source, retained-receipt and completed-byte reads, and the final receipt
+write, run in owned worker threads. Disk waits therefore leave the intake event
+loop available for HTTP and capacity wakeups. Cancellation drains the current
+metadata operation before releasing the promotion mutex; a committed receipt
+remains reusable without another copy or payload-verification pass.
 The source verification and copy-proof requirements are described in the
 [settlement operations guide](../operators/settlement.md).
 

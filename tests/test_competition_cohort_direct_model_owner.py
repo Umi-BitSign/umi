@@ -1117,6 +1117,77 @@ async def test_promotion_verifies_canonical_copy_before_resumable_staging_cleanu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["source", "retained", "bytes", "receipt"])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_promotion_metadata_keeps_loop_responsive_and_drains_cancellation(
+    direct, monkeypatch, boundary, cancel
+):
+    from umi import competition_cohort_direct_model_owner as owner_module
+
+    reservation = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    completed = await direct.owner.complete(
+        signed_completion(reservation, direct.payload.payload),
+        now_unix_ms=1_800_000_010_000,
+    )
+    await direct.owner.verify(completed.reservation_sha256, now_unix_ms=1_800_000_011_000)
+    publication = promotion_publication(direct, reservation)
+    if boundary != "receipt":
+        await direct.owner.promote(publication, now_unix_ms=1_800_000_012_000)
+    loop, main_thread = asyncio.get_running_loop(), threading.get_ident()
+    entered, heartbeat = asyncio.Event(), asyncio.Event()
+    release, finished = threading.Event(), threading.Event()
+    target, name = {
+        "source": (direct.owner, "_promotion_source"),
+        "retained": (direct.owner, "_retained_promotion"),
+        "bytes": (owner_module, "require_remote_model_bytes"),
+        "receipt": (direct.owner.journal, "put"),
+    }[boundary]
+    original = getattr(target, name)
+
+    def blocked(*args, **kwargs):
+        if boundary == "receipt" and args[0] != "direct-promotion":
+            return original(*args, **kwargs)
+        assert threading.get_ident() != main_thread
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5), "test must release the owned metadata operation"
+        try:
+            return original(*args, **kwargs)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(target, name, blocked)
+    task = asyncio.create_task(direct.owner.promote(publication, now_unix_ms=1_800_000_013_000))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        loop.call_soon(heartbeat.set)
+        await asyncio.wait_for(heartbeat.wait(), 1)
+        assert direct.owner._promotion_mutex.locked()
+        if cancel:
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
+        assert not task.done() and not finished.is_set()
+        assert direct.owner._promotion_mutex.locked()
+    finally:
+        release.set()
+    if cancel:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        await task
+    assert finished.is_set() and not direct.owner._promotion_mutex.locked()
+    # A committed receipt survives cancellation. Repeating promotion must reuse
+    # its original copy and completed byte verification, then finish cleanup.
+    copies, reads = list(direct.multipart.copy_calls), direct.multipart.read_calls
+    receipt = await direct.owner.promote(publication, now_unix_ms=1_800_000_014_000)
+    assert receipt.model_sha256 == reservation.reservation.payload.model_sha256
+    assert direct.multipart.copy_calls == copies and direct.multipart.read_calls == reads
+
+
+@pytest.mark.asyncio
 async def test_promotion_copy_bounds_parallel_parts_and_preserves_completion_order(
     receipt_scenario,
 ):
