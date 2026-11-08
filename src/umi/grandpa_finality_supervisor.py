@@ -52,6 +52,7 @@ from .grandpa_finality import (
     GrandpaFinalityObserverError,
 )
 from .grandpa_finality_accounting import AccountingError, install_accounting, read_usage
+from .grandpa_finality_checkpoint import checkpoint_wal
 from .grandpa_finality_frontier import FinalityAuditFrontier, FinalityFrontierError
 from .policy import LiveChainObservationPin, ScoringPolicy, scoring_policy_hash
 from .protocol import canonical_json_bytes
@@ -1160,6 +1161,11 @@ class DurableGrandpaFinalityPort:
                         or connection.in_transaction
                     ):
                         raise
+                # End the keeper snapshot before owned maintenance, but keep
+                # its connection alive through writer close. Otherwise each
+                # reopen can replay an ever-growing WAL into the database.
+                keeper.rollback()
+                checkpoint_wal(connection, self._path)
                 after = self._frontier.snapshot()
                 if connection.execute("PRAGMA data_version").fetchone()[0] != version:
                     raise FinalityFrontierError("database_changed_outside_native_owner")

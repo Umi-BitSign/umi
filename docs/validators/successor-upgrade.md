@@ -985,6 +985,17 @@ switching configurations and reopening an earlier namespace preserves its stored
 proofs and binding without resetting or rewriting them. Aggregate cache checks
 and the root-exclusive lease still apply.
 
+Finality stores checkpoint a WAL of at least 4 MiB after a native commit, under
+the same mutation owner that publishes the retained audit identity. The keeper
+snapshot ends before checkpointing, and its read-only connection stays open
+through writer close. A busy reader defers reclamation to the next native
+mutation without waiting or rejecting the accepted block. Progress appears as
+`umi-finality-wal-maintenance/1`. This bounds repeated checkpoint writes without
+changing proof bytes, receipt semantics or storage allowances. The shared native
+provider applies this maintenance to miners, validators, reviewers and intake
+when they adopt the updated runtime through their supported installer or host
+source update; existing stores require no reset or schema migration.
+
 Renewed controls do not require hashing every older staged package during cache
 lookup. The supervisor checks sealed metadata and compares the small control
 files first, then verifies the complete matching stage before reuse. All retained
