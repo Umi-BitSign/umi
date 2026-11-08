@@ -1312,6 +1312,7 @@ async def test_direct_model_only_review_boot_omits_endpoint_path(selected, provi
         assert app.state.endpoint is None
         assert isinstance(app.state.benchmark.sandbox, DirectCohortCpuSandbox)
         assert app.state.benchmark.worker.defer_endpoint_until_terminal is False
+        assert app.state.benchmark.worker.eligible_tracks == ("model",)
         assert app.state.benchmark.sandbox.artifacts.config.r2_bucket == "umi-model-artifacts"
 
 

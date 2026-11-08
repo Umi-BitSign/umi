@@ -518,6 +518,7 @@ class CohortExecutionWorker:
         batch_size=16,
         concurrency=4,
         defer_endpoint_until_terminal=False,
+        eligible_tracks=("endpoint", "model"),
         maintenance=None,
     ):
         if (
@@ -532,6 +533,9 @@ class CohortExecutionWorker:
             or type(concurrency) is not int
             or not 1 <= concurrency <= 32
             or type(defer_endpoint_until_terminal) is not bool
+            or not eligible_tracks
+            or tuple(eligible_tracks) != tuple(sorted(set(eligible_tracks)))
+            or not set(eligible_tracks) <= {"endpoint", "model"}
         ):
             raise ValueError("execution worker capacity is outside bounds")
         if (
@@ -543,6 +547,7 @@ class CohortExecutionWorker:
         self.inbox, self.executor, self.batch_size = inbox, executor, batch_size
         self.concurrency = concurrency
         self.defer_endpoint_until_terminal = defer_endpoint_until_terminal
+        self.eligible_tracks = tuple(eligible_tracks)
         self.maintenance = maintenance
         self.capacity = asyncio.Semaphore(concurrency)
         # All assignments share one private inbox lock. Parallel sandbox jobs
@@ -704,6 +709,7 @@ class CohortExecutionWorker:
                 "jobs_complete": sum(r[1] == "complete" for r in results),
                 "steps_advanced": sum(r[1] == "progress" for r in results),
                 "jobs_deferred": len(deferred),
+                "jobs_unselected": sum(r[1] == "unselected" for r in results),
                 "retry_count": len(pending),
                 "last_retry_slot": pending[-1][0] if pending else "",
                 "last_retry_type": pending[-1][2] if pending else "",
@@ -717,6 +723,11 @@ class CohortExecutionWorker:
             try:
                 async with self.inbox_reads:
                     assignment = await run_owned_thread(self.inbox.assignment, slot)
+                # Local scheduling selection does not cancel or rewrite the
+                # retained signed assignment. Re-enabling its track resumes it.
+                track = assignment.certificate.order.submission.submission.track
+                if track not in self.eligible_tracks:
+                    return slot, "unselected", "track_not_selected"
                 if self.defer_endpoint_until_terminal:
                     job = await run_owned_thread(
                         self.executor.journal.validate_assignment, assignment
@@ -810,6 +821,7 @@ class CohortExecutionWorker:
             "jobs_complete": sum(r[1] == "complete" for r in results),
             "steps_advanced": sum(r[1] == "progress" for r in results),
             "jobs_deferred": len(deferred),
+            "jobs_unselected": sum(r[1] == "unselected" for r in results),
             "in_flight_operations": len(active),
             "retry_count": len(pending),
             "last_retry_slot": pending[-1][0] if pending else "",

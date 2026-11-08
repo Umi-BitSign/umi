@@ -1922,6 +1922,8 @@ drains those operations before releasing the scheduler owner; restart replays
 the same signed requests and completed responses. A single `poll_once` remains
 a bounded batch observation for callers that explicitly request one.
 
+A model-only reviewer (`eligible_tracks: ["model"]`, with no `endpoint` configuration) skips retained endpoint assignments before history requests or CPU execution. Signed assignments and journals remain intact; selecting the endpoint track again resumes unfinished work. This local scheduling choice does not certify or close a cohort.
+
 The endpoint worker starts alongside CPU execution and completion exports. It
 delivers requests, retrieves retained responses, obtains independent retirement
 votes and resumes certified replacements. Missing inputs or unavailable peers
