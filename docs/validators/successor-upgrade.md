@@ -290,9 +290,11 @@ cancellation and other timing failures release residency through the existing
 scheduler. Ordinary attempts may overlap. After a pressure rejection, that
 executor queues the retry behind its running attempts and temporarily admits
 retries one at a time, in queue order, before accepting new ordinary attempts.
-Waiting consumes the same bounded recovery allowance. If it expires before
-admission, no new attempt is recorded. `timing_attempt_admission` reports the
-wait and its expiry through the standard competition progress logger enabled by
+Rejected retries spend the same bounded recovery allowance while waiting.
+Ordinary jobs waiting behind recovery retain their configured read allowance;
+they have not failed and do not use a rejected attempt's shorter budget. If an
+admission allowance expires, no new attempt is recorded. `timing_attempt_admission`
+reports the wait and its expiry through the standard competition progress logger enabled by
 the reviewer CLI. The gate covers the ordinary fresh-authority step and stays
 held until its owned invocation drains. It is local to one executor; other
 processes, downloads and services still require the unchanged host-condition

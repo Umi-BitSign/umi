@@ -538,5 +538,29 @@ async def test_measured_retry_allowance_is_frozen_and_read_bounded(clock):
     with retry.resident_execution_retries("ab" * 32, 180):
         assert await retry.retry_resident_timing(operation, admission=Admission()) == "accepted"
     assert allowances == [(120, 180)]
-    assert waits == [(False, 120), (True, 175), (True, 155)]
+    assert waits == [(False, 180), (True, 175), (True, 155)]
     assert clock.sleeps == [5, 10]
+
+
+async def test_ordinary_wait_preserves_read_budget_behind_quiet_recovery(monkeypatch):
+    from umi.competition_timing_admission import TimingAttemptAdmission
+
+    # An immediately exhausted failed-attempt allowance must not terminate an
+    # ordinary job that still has its read budget and a loaded model reservation.
+    monkeypatch.setattr(retry, "MAX_RESIDENT_RETRY_SECONDS", 0)
+    gate = TimingAttemptAdmission()
+    calls = []
+
+    async def operation():
+        calls.append("native_attempt")
+        return "accepted"
+
+    async with gate.attempt(quiet=True, timeout=1):
+        with retry.resident_execution_retries("ab" * 32, 1):
+            task = asyncio.create_task(retry.retry_resident_timing(operation, admission=gate))
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert not task.done()
+        assert calls == []
+    assert await asyncio.wait_for(task, 1) == "accepted"
+    assert calls == ["native_attempt"]

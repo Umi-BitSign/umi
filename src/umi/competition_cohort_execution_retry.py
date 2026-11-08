@@ -71,8 +71,10 @@ async def retry_resident_timing(operation, *, admission=None):
         try:
             if admission is None:
                 return await operation()
+            # Ordinary queued work has not failed. Preserve its existing read
+            # allowance while a rejected sibling gets its bounded recovery turn.
             remaining = (
-                allowance
+                state.read_timeout
                 if started is None
                 else max(0.0, allowance - (asyncio.get_running_loop().time() - started))
             )
