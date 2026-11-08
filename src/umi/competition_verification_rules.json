@@ -672,7 +672,7 @@
     "finalized_ancestry.py": "eb797cba3f1ccfcc8a31b3389fe74bde3a46214c745216dc5a5a679b788e98f0",
     "grandpa_finality.py": "9aa7a6c1fa46d6f2db8d4c1352ccd19df4bafd5f2e5de46796c38fef993360e9",
     "grandpa_finality_accounting.py": "48eeb65bc6bc432a58910e9f0b17249172f1905c806c1f35e82ae69c8302e859",
-    "grandpa_finality_checkpoint.py": "6091735fff8d969cf502e3f38ee88bbacd74832669768c057d0c8babbb7a744e",
+    "grandpa_finality_checkpoint.py": "01c03bb0754f9ecbc470754f95f88621e641cfb72082ee830e6ec66cd2968652",
     "grandpa_finality_frontier.py": "5cb0764e6c7ed90b75de5385c31a87fc4de2ef424e628c881c60ed5dd2274b50",
     "grandpa_finality_supervisor.py": "83bf17489c6b5e9d5df448039bad76738cee4a16790e424a86902057839f24fb",
     "grandpa_finality_wal_open.py": "b7834cda70eb57df1be3bed24e8ff660287237b62ee32b26ada6e732060dad7b",

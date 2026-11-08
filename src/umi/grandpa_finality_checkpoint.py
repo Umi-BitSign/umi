@@ -7,7 +7,8 @@ from pathlib import Path
 
 # A maintenance trigger, not a new evidence or database capacity limit.
 CHECKPOINT_BYTES = 4 * 1024**2
-_LOGGER = logging.getLogger(__name__)
+# Existing miner/validator entrypoints configure this parent explicitly.
+_LOGGER = logging.getLogger("umi.grandpa_finality_supervisor.checkpoint")
 
 
 def checkpoint_wal(connection, database):

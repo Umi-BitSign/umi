@@ -62,7 +62,7 @@ def test_busy_reader_defers_checkpoint_without_losing_native_completion(
     with port._connect(read_only=True) as reader:
         reader.execute("BEGIN")
         reader.execute("SELECT COUNT(*) FROM finalized_headers").fetchall()
-        with caplog.at_level("INFO", logger=checkpoint.__name__):
+        with caplog.at_level("INFO", logger=supervisor.__name__):
             port.accept_attestation(binding, following(port, observer, binding, original))
         assert port.persisted_head().height == 11
         with port._frontier.owner():
@@ -70,7 +70,7 @@ def test_busy_reader_defers_checkpoint_without_losing_native_completion(
     messages = [
         json.loads(record.message)
         for record in caplog.records
-        if record.name == checkpoint.__name__
+        if record.name == checkpoint._LOGGER.name
     ]
     assert any(row.get("status") == "retrying" for row in messages)
     # The next native scope retries maintenance without replaying an accepted
@@ -124,7 +124,7 @@ def test_checkpoint_failure_requires_repair_before_committed_head_reuse(
 
     monkeypatch.setattr(supervisor, "checkpoint_wal", denied)
     with (
-        caplog.at_level("INFO", logger=checkpoint.__name__),
+        caplog.at_level("INFO", logger=supervisor.__name__),
         pytest.raises(supervisor.GrandpaFinalityStoreCorruption, match="sqlite_write_failed"),
     ):
         port.accept_attestation(binding, following(port, observer, binding, original))
