@@ -373,6 +373,10 @@ async def test_cancellation_drains_contended_result_before_releasing_owner(
     monkeypatch.setattr(h.executor.journal, "observe", observe)
     task = asyncio.create_task(h.executor.advance_batch(h.e.assignment))
     await asyncio.wait_for(entered.wait(), 10)
+    assert h.executor.timing_admission.active == 0
+    async with h.executor.timing_admission.attempt(quiet=True, timeout=0):
+        # Another timing turn can run while this exact result is retained.
+        assert h.scope.active and len(h.e.calls) == 1
     task.cancel()
     await asyncio.sleep(0)
     assert not task.done() and h.scope.active
@@ -386,6 +390,37 @@ async def test_cancellation_drains_contended_result_before_releasing_owner(
     assert h.executor.journal.result(h.e.job, attempt) is not None
     assert await h.executor.advance_batch(h.e.assignment) is not None
     assert len(h.e.calls) == step_count(h.e.job) and not h.e.stops
+
+
+async def test_cancellation_during_early_release_still_retains_native_result(resident, monkeypatch):
+    h = resident
+    gate = h.executor.timing_admission
+    original = h.e.port.invoke
+    entered = asyncio.Event()
+
+    async def invoke(job, attempt):
+        result = await original(job, attempt)
+        await gate.condition.acquire()
+        entered.set()
+        return result
+
+    monkeypatch.setattr(h.e.port, "invoke", invoke)
+    task = asyncio.create_task(h.executor.advance_batch(h.e.assignment))
+    await asyncio.wait_for(entered.wait(), 10)
+    for _ in range(2):
+        task.cancel()
+        for _ in range(10):
+            await asyncio.sleep(0)
+    assert not task.done() and h.scope.active
+    gate.condition.release()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not h.scope.active and gate.active == 0 and not gate.quiet
+    assert len(h.e.calls) == 1
+    assert h.executor.journal.result(h.e.job, h.e.calls[0]) is not None
+    monkeypatch.setattr(h.e.port, "invoke", original)
+    assert await h.executor.advance_batch(h.e.assignment) is not None
+    assert len(h.e.calls) == step_count(h.e.job)
 
 
 async def test_pressure_retry_has_bounded_residency(clock, caplog):

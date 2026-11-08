@@ -102,9 +102,13 @@ class TimingAttemptAdmission:
     async def attempt(self, *, quiet, timeout):
         await self._acquire(quiet, max(0.0, timeout))
         started = self.clock()
-        try:
-            yield
-        finally:
+        released = False
+
+        async def release():
+            nonlocal released
+            if released:
+                return
+            released = True
             if not quiet:
                 self.observed_ordinary_seconds = max(
                     self.observed_ordinary_seconds, max(0.0, self.clock() - started)
@@ -112,6 +116,13 @@ class TimingAttemptAdmission:
             # A second cancellation during lock acquisition cannot strand the
             # admission count and block every subsequent timing attempt.
             await await_owned_task(asyncio.create_task(self._release(quiet)))
+
+        try:
+            # The executor can release after the native sandbox has drained;
+            # journal persistence and final authority checks need no quiet turn.
+            yield release
+        finally:
+            await release()
 
     async def _release(self, quiet):
         async with self.condition:

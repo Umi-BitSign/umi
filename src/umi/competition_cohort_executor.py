@@ -27,6 +27,7 @@ from .competition_cohort_execution_journal import (
 )
 from .competition_cohort_execution_retry import (
     ResidentTimingPressure,
+    release_resident_timing,
     resident_execution_retries,
     retry_resident_operation,
     retry_resident_timing,
@@ -468,18 +469,22 @@ class CohortExecutor(CohortExecutionAuthority):
                         if error.reason_code == "cpu_condition_external_pressure":
                             raise ResidentTimingPressure() from error
                         raise
-                    # Drain the owned persistence attempt before cancellation
-                    # releases the job lock; recovery reuses the exact result,
-                    # exhaustion preserves the existing failure path.
-                    await await_owned_task(
-                        asyncio.create_task(
-                            retry_resident_operation(
+
+                    async def retain_result():
+                        try:
+                            # invoke has drained native cleanup and timing checks.
+                            await release_resident_timing()
+                        finally:
+                            await retry_resident_operation(
                                 lambda: self._journal_progress(
                                     job, self.journal.observe, job, attempt, result
                                 )
                             )
-                        )
-                    )
+
+                    # Drain the owned persistence attempt before cancellation
+                    # releases the job lock; recovery reuses the exact result,
+                    # exhaustion preserves the existing failure path.
+                    await await_owned_task(asyncio.create_task(retain_result()))
 
                 # Restoration and shared cache queues precede inference. Give
                 # them the configured read budget without consuming the signed

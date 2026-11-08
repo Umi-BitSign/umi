@@ -181,6 +181,7 @@ async def test_measured_ordinary_duration_extends_retry_without_exceeding_read_b
     async with gate.attempt(quiet=False, timeout=1):
         now[0] += 200
     assert gate.retry_allowance(120, 1000) == 250
+
     assert gate.retry_allowance(120, 180) == 180
     # Retrying or waiting cannot inflate later allowances indefinitely.
     async with gate.attempt(quiet=True, timeout=1):
@@ -188,4 +189,18 @@ async def test_measured_ordinary_duration_extends_retry_without_exceeding_read_b
     assert gate.retry_allowance(120, 1000) == 250
     async with gate.attempt(quiet=False, timeout=1):
         now[0] += 50
+    assert gate.retry_allowance(120, 1000) == 250
+
+
+async def test_drained_turn_releases_before_retention_and_only_once():
+    now = [0.0]
+    gate = TimingAttemptAdmission(clock=lambda: now[0])
+    async with gate.attempt(quiet=False, timeout=1) as release:
+        now[0] = 200
+        await release()
+        async with gate.attempt(quiet=True, timeout=0):
+            await release()
+            assert gate.active == 1 and gate.quiet
+        now[0] = 2000  # Later retention cannot inflate the timing retry allowance.
+    assert gate.active == 0 and not gate.quiet
     assert gate.retry_allowance(120, 1000) == 250

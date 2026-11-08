@@ -28,6 +28,7 @@ class _ResidentRetry:
 
 
 _RESIDENT_RETRY = ContextVar("cohort_resident_execution_retry", default=None)
+_TIMING_RELEASE = ContextVar("cohort_resident_timing_release", default=None)
 # Default transient recovery is two minutes. Timing retries may need an observed
 # sibling step plus headroom to drain the queue. Their measured allowance remains
 # bounded by the configured read budget and never cancels owned execution.
@@ -39,6 +40,13 @@ class ResidentTimingPressure(CpuTimingInfrastructureError):
 
     def __init__(self):
         super().__init__("cpu_condition_external_pressure")
+
+
+async def release_resident_timing():
+    """Release only a drained sandbox's local timing turn, before result retention."""
+    release = _TIMING_RELEASE.get()
+    if release is not None:
+        await release()
 
 
 @contextmanager
@@ -78,8 +86,12 @@ async def retry_resident_timing(operation, *, admission=None):
                 if started is None
                 else max(0.0, allowance - (asyncio.get_running_loop().time() - started))
             )
-            async with admission.attempt(quiet=failures > 0, timeout=remaining):
-                return await operation()
+            async with admission.attempt(quiet=failures > 0, timeout=remaining) as release:
+                token = _TIMING_RELEASE.set(release)
+                try:
+                    return await operation()
+                finally:
+                    _TIMING_RELEASE.reset(token)
         except TimingAdmissionTimeout:
             # The rejected attempt remains the failure authority. Waiting
             # for siblings never fabricates another failed native attempt.
