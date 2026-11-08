@@ -1,0 +1,22 @@
+[Unit]
+Description=Reclaim clean file cache from idle UMI CPU slots
+Requires=umi-cpu-partition.service
+After=umi-cpu-partition.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=@PYTHON@ -I -B -m umi.host_cpu_cache_reclaim --policy @MEMORY_POLICY@ --sha256 @MEMORY_POLICY_SHA256@
+MemoryMax=128M
+MemorySwapMax=0
+CPUQuota=25%
+AllowedCPUs=@BACKGROUND_CPUS@
+TasksMax=16
+TimeoutStartSec=30
+TimeoutStopSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/sys/fs/cgroup/umiexecution.slice/umi-cpu-partition.service/models
+UMask=0077

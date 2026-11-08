@@ -436,6 +436,16 @@ selection and restoration dependencies until every reader using them has moved.
 
 ### CPU-efficiency readers
 
+CPU hosts may install the bounded idle-slot cache maintenance command and timer
+described in [CPU partition provisioning](../operators/settlement.md#cpu-partition-provisioning-and-qualification).
+Select the helper's qualified immutable source and exact current pool policy;
+update that binding on pool expansion. This host maintenance needs no evaluator
+restart, new signed contract, miner upload change or reward-writer handoff.
+Existing miner and validator evidence readers retain their formats and verdicts.
+Publishing the helper in an installer source does not enable its root timer:
+verify the installed unit, selected policy, native reclaimed-byte result and next
+timer activation separately.
+
 Scheduler-based timing requires readers for `umi-cpu-timing-evidence/2` and the
 signed `umi-exclusive-cold-model-cpu-timing/2` measurement semantics in every
 execution, certification and reward-replay consumer. Upgrade those readers

@@ -2770,6 +2770,26 @@ and its `libpod-<CID>` payload. Do not set a 64 MiB service-wide MemoryMax on th
 partition service: its model descendants share that service. Limit only the
 setup leaf and restorer process.
 
+Empty CPU-slot parents can retain file-cache charges after their containers exit.
+Use `umi.host_cpu_cache_reclaim --policy <selected-memory-policy> --sha256 <sha256>`
+with the installed interpreter and `-I -B` for bounded root maintenance. The
+command loads the native policy and CPU profile, takes every existing timed-slot
+lock without waiting, and skips live or surviving containers. It reclaims at most
+256 MiB from one empty, clean parent per pass. It never changes resource limits,
+model files, signed cache checks or completed evidence. Dirty, anonymous and
+shared-memory accounting excludes a parent from that pass.
+
+For unattended maintenance, render `umi-cpu-cache-reclaim.service.in` and install
+its timer from `deploy/cpu-timing/`. Bind the exact selected memory-policy digest,
+installed Python and background CPUs. Qualify the actual command under its
+128 MiB service cap before enabling the timer. Each invocation reports its wait
+reason or reclaimed bytes and elapsed time; the timer retries skipped passes.
+Keep the partition service running during installation. A pool expansion or
+account-layout change makes an old selection fail before reclaim; update the
+maintenance policy binding as part of the supported pool handoff. Cohort changes
+using the same pool need no new helper, service or code change. Older hosts without
+CPU timing retain their existing operation and do not install this maintenance.
+
 Run the restorer with `--resident` under `Type=notify`. It sends readiness after
 restoring the full slot map, releases admission locks, then sleeps in the setup
 leaf so systemd retains the delegated cgroup between model invocations. An
