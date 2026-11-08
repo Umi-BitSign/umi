@@ -21,7 +21,7 @@ from .host_memory_admission import (
     HostMemorySlot,
     _absolute,
 )
-from .host_memory_export_wait import yield_to_export
+from .host_memory_export_wait import model_waiter, yield_to_export
 from .open_competition import digest
 from .protocol import Hex32, StrictProtocolModel
 
@@ -301,7 +301,10 @@ class ModelExecutionAdmission:
 
     async def _acquire_capacity(self, lane, count, *, preparation):
         started = time.monotonic()
-        with TransferProgress("model_execution_capacity", count, unit="slots") as progress:
+        with (
+            model_waiter(self.controller, lane),
+            TransferProgress("model_execution_capacity", count, unit="slots") as progress,
+        ):
             last_wait = None
             while True:
                 options = (

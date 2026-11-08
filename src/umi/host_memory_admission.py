@@ -26,7 +26,7 @@ from typing import Annotated, Literal
 from pydantic import Field, model_validator
 
 from . import host_memory_graph_peer, host_memory_peer
-from .host_memory_export_wait import export_waiter
+from .host_memory_export_wait import export_waiter, yield_to_models
 from .protocol import StrictProtocolModel
 
 Lane = Literal["owner_export", "transient", "settlement_retained"]
@@ -1034,6 +1034,9 @@ class HostMemoryAdmission:
         # future acquisition running after the waiter has abandoned ownership.
         started, last_report = time.monotonic(), None
         while True:
+            if stop is not None and stop.is_set():
+                return None
+            await yield_to_models(self, lane, CAPACITY_RETRY_SECONDS)
             if stop is not None and stop.is_set():
                 return None
             lease = (

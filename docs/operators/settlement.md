@@ -6079,10 +6079,19 @@ state, replica restart and recovery under the actual account/mount/cgroup limits
 before cutover; do not infer these bounds from aggregate file sizes alone.
 
 Graph work and model inference sharing a transient slot retry admission at the
-same 100 ms interval. This avoids giving graph consumers a faster polling cadence;
-it does not provide FIFO scheduling or reserve a slot for inference. When diagnosing
+same 100 ms interval. Ready model invocations publish a kernel-lived demand marker
+until grant, cancellation or process exit. New graph acquisitions yield for at
+most one second per attempt while that demand remains, then retry their ordinary
+admission. Existing graphs drain normally. Retained settlement work and exports
+do not yield; model transfers publish no invocation demand. A model that cannot
+fit cannot indefinitely delay a graph's next admission attempt. This is bounded
+scheduling courtesy, not FIFO scheduling or extra memory reservation. When diagnosing
 evaluation throughput, separate model subprocess time, capacity waits and authority
 work. An idle model CPU can still be waiting for another consumer's memory lease.
+`graph_model_turn` reports the counted courtesy, elapsed time and scoped ETA.
+Older hosts ignore the additive marker; select the updated evaluator and graph
+consumers through their supported source handoffs to enable the behavior. Signed
+clocks, CPU timing resources, concurrency and model memory allowances are unchanged.
 
 A settlement service with an active retained graph reservation can run its graph
 operations under that same reservation, leaving transient slots available to
