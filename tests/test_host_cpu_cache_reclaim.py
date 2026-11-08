@@ -14,6 +14,7 @@ from umi import host_cpu_cache_reclaim as module
 def pool(tmp_path, monkeypatch):
     locks = tmp_path / "locks"
     locks.mkdir()
+    (locks / "transaction").touch()
     partition = tmp_path / "models"
     slots, selected, parents = [], [], []
     for name in ("a", "b"):
@@ -38,12 +39,24 @@ def pool(tmp_path, monkeypatch):
                 lock_name=name, parents=[SimpleNamespace(path=str(parent), uid=os.getuid())]
             )
         )
+
+    def transaction(root):
+        fd = os.open("transaction", os.O_RDONLY, dir_fd=root)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            return None
+        return fd
+
     controller = SimpleNamespace(
         policy_sha256="a" * 64,
         policy=SimpleNamespace(slots=slots),
         _open_root=lambda: os.open(locks, os.O_RDONLY | os.O_DIRECTORY),
         _open_slot=lambda root, slot: os.open(slot.name, os.O_RDONLY, dir_fd=root),
         _model_container_reservations=lambda: 0,
+        _transaction=transaction,
+        peer_execution_stage=False,
     )
     profile = SimpleNamespace(partition=SimpleNamespace(path=str(partition)), slots=selected)
     monkeypatch.setattr(module, "_require_cgroup2", lambda fd: None)
@@ -83,6 +96,37 @@ def test_busy_later_slot_releases_earlier_lock_without_reclaim(pool):
         assert module.reclaim_once(controller, profile)["reason"] == "pool_busy"
         with (locks / "a").open() as earlier:
             fcntl.flock(earlier, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    assert all(not (p / "memory.reclaim").read_bytes() for p in parents)
+    released(locks)
+
+
+def test_witnessed_graph_can_continue_but_new_grants_are_excluded(pool, monkeypatch):
+    controller, profile, locks, _ = pool
+    monkeypatch.setattr(module, "_graph_owned", lambda *args: True)
+    original = module.os.write
+
+    def write(fd, raw):
+        with (locks / "transaction").open() as stream, pytest.raises(BlockingIOError):
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return original(fd, raw)
+
+    monkeypatch.setattr(module.os, "write", write)
+    with (locks / "b").open() as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        result = module.reclaim_once(controller, profile)
+        assert result["reason"] == "bounded_reclaim"
+        assert result["witnessed_graph_slots"] == ["b"]
+    released(locks)
+
+
+def test_transaction_contention_never_takes_a_model_slot(pool):
+    controller, profile, locks, parents = pool
+    with (locks / "transaction").open() as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        assert module.reclaim_once(controller, profile)["reason"] == "admission_transaction_busy"
+        for name in ("a", "b"):
+            with (locks / name).open() as slot:
+                fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
     assert all(not (p / "memory.reclaim").read_bytes() for p in parents)
     released(locks)
 
@@ -164,3 +208,25 @@ def test_kernel_partial_or_failed_reclaim_releases_all_locks(pool, monkeypatch, 
         with pytest.raises(OSError):
             module.reclaim_once(controller, profile)
     released(locks)
+
+
+@pytest.mark.parametrize("witness_kind", ["graph", "directory", "cleared"])
+def test_actual_kernel_witness_distinguishes_graph_from_model(tmp_path, witness_kind):
+    group = module.host_memory_graph_peer._membership(os.getpid())
+    ceiling = (group / "memory.max").read_text().strip()
+    if not ceiling.isdecimal() or (group / "memory.swap.max").read_text().strip() != "0":
+        pytest.skip("requires an explicitly capped, zero-swap test service")
+    path = tmp_path / "slot"
+    path.touch()
+    info = path.stat()
+    slot = SimpleNamespace(
+        name="slot", device=info.st_dev, inode=info.st_ino, reservation_bytes=int(ceiling)
+    )
+    controller = SimpleNamespace(peer_execution_stage=True, policy=SimpleNamespace(slots=[slot]))
+    with path.open() as owner, path.open() as reader:
+        fcntl.flock(owner, fcntl.LOCK_EX)
+        target = group / "memory.current" if witness_kind != "directory" else group
+        module.host_memory_peer.bind(owner.fileno(), target.stat().st_ino)
+        if witness_kind == "cleared":
+            module.host_memory_peer.clear(owner.fileno())
+        assert module._graph_owned(controller, slot, reader.fileno()) == (witness_kind == "graph")

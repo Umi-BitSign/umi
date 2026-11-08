@@ -1,8 +1,9 @@
 """Reclaim idle CPU-slot file cache under the existing native pool leases.
 
 This root maintenance command allocates no model capacity and changes no limits.
-It skips a busy pool, including surviving containers whose leases were lost.
-All timed slots stay locked until the bounded kernel reclaim has returned.
+It skips model grants, including surviving containers whose leases were lost.
+The native transaction blocks new grants until bounded reclaim returns; existing
+graph work may continue only with its exact kernel control-file witness.
 """
 
 import argparse
@@ -13,6 +14,7 @@ import os
 import time
 from pathlib import Path
 
+from . import host_memory_graph_peer, host_memory_peer
 from .host_cpu_timing import load_cpu_timing_profile
 from .host_memory_admission import (
     AdmissionBindingError,
@@ -24,6 +26,30 @@ from .host_memory_admission import (
 
 MAXIMUM_RECLAIM_BYTES = 256 * 1024**2
 MINIMUM_CACHE_BYTES = 64 * 1024**2
+
+
+def _graph_owned(controller, slot, descriptor):
+    """Prove an existing non-model grant while the native transaction is held.
+
+    Reuse admission's owner, control-file and OFD witness checks. A graph grant
+    cannot bind a model container; its replacement must acquire the transaction
+    lock that the maintenance caller retains through reclaim.
+    """
+    binding = None
+    try:
+        if not controller.peer_execution_stage:
+            return False
+        marker = host_memory_graph_peer._marker(controller.policy, slot)
+        owner = host_memory_graph_peer._lock_owners().get((slot.device, slot.inode))
+        witness = host_memory_peer.observed_inode(descriptor)
+        if marker is None or owner is None or witness is None:
+            return False
+        binding = host_memory_graph_peer._open_group(owner, marker, slot.reservation_bytes)
+        return binding[2] == witness == host_memory_peer.observed_inode(descriptor)
+    except (OSError, ValueError):
+        return False
+    finally:
+        host_memory_graph_peer.close(binding)
 
 
 def _sample(descriptor, ceiling):
@@ -72,15 +98,25 @@ def reclaim_once(controller, profile):
             raise AdmissionBindingError("idle cache maintenance requires the complete timed pool")
         root = controller._open_root()
         descriptors.append(root)
-        # This uses the exact locks held through invocation and cleanup. Never
-        # retain a subset while waiting for another slot; normal work wins.
+        transaction = controller._transaction(root)
+        if transaction is None:
+            result["reason"] = "admission_transaction_busy"
+            return result
+        descriptors.append(transaction)
+        # Prevent every new grant, then own each free slot or prove it belongs
+        # to an existing non-model graph grant. Existing models still block
+        # maintenance, including the interval before their container exists.
+        graph_slots = []
         for slot in sorted(slots.values(), key=lambda item: item.name):
             descriptor = controller._open_slot(root, slot)
             descriptors.append(descriptor)
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                return result
+                if not _graph_owned(controller, slot, descriptor):
+                    return result
+                graph_slots.append(slot.name)
+        result["witnessed_graph_slots"] = graph_slots
         if controller._model_container_reservations():
             result["reason"] = "surviving_native_container"
             return result

@@ -2773,8 +2773,11 @@ setup leaf and restorer process.
 Empty CPU-slot parents can retain file-cache charges after their containers exit.
 Use `umi.host_cpu_cache_reclaim --policy <selected-memory-policy> --sha256 <sha256>`
 with the installed interpreter and `-I -B` for bounded root maintenance. The
-command loads the native policy and CPU profile, takes every existing timed-slot
-lock without waiting, and skips live or surviving containers. It reclaims at most
+command loads the native policy and CPU profile, blocks new grants with the
+existing admission transaction, and skips live or surviving containers. Free
+slots are locked; existing graph grants may continue only with their exact native
+control-file witnesses. An unbound or uncertain model grant skips maintenance,
+including before its container starts. The command reclaims at most
 256 MiB from one empty, clean parent per pass. It never changes resource limits,
 model files, signed cache checks or completed evidence. Dirty, anonymous and
 shared-memory accounting excludes a parent from that pass.
