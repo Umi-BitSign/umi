@@ -153,3 +153,17 @@ def test_additive_shared_incumbent_semantics_are_guarded_without_invalidating_le
     manifest["extensions"] = {}
     with pytest.raises(RuntimeError, match="qualified dependency manifest"):
         rules.verify_dependency_manifest(source, manifest)
+
+
+def test_archival_wire_extension_keeps_unchanged_native_receipts():
+    source = Path(rules.__file__).parent
+    manifest = json.loads((source / "competition_verification_rules.json").read_bytes())
+    assert manifest["extensions"]["cohort_model_delivery_adoption_v3"] == (
+        "umi-native-archival-model-storage/1"
+    )
+    assert rules.verify_dependency_manifest(source, manifest) == hashlib.sha256(
+        b"umi-native-request-verification/1"
+    ).hexdigest()
+    del manifest["extensions"]["cohort_model_delivery_adoption_v3"]
+    with pytest.raises(RuntimeError, match="qualified dependency manifest"):
+        rules.verify_dependency_manifest(source, manifest)

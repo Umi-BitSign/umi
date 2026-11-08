@@ -261,6 +261,7 @@ def authenticate_legacy_storage_proposal(
         legacy_inventory_sha256=adoption.legacy_inventory_sha256,
         preservation_inventory_sha256=adoption.preservation_inventory_sha256,
         model_only=adoption.eligible_tracks == ("model",),
+        storage_only=adoption.storage_only,
     )
     if expected != transition:
         raise ValueError("legacy storage proposal differs from native original history")

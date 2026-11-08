@@ -106,6 +106,7 @@ def prepare_model_delivery_adoption(
     legacy_inventory_sha256: str,
     preservation_inventory_sha256: str,
     model_only: bool = False,
+    storage_only: bool = False,
 ) -> CohortRecoveryTransition:
     """Prepare exact unsigned bytes after native inventory/restore verification.
 
@@ -122,10 +123,16 @@ def prepare_model_delivery_adoption(
         expected_tip_sha256=expected_tip_sha256,
         current_block=current_block,
     ).state
-    if type(model_only) is not bool:
-        raise ValueError("model-only profile selection must be explicit")
+    if (
+        type(model_only) is not bool
+        or type(storage_only) is not bool
+        or (model_only and storage_only)
+    ):
+        raise ValueError("model-only and archival profile selections must be explicit and disjoint")
     adoption = CohortModelDeliveryAdoption(
-        schema="umi-cohort-model-delivery-adoption/2"
+        schema="umi-cohort-model-delivery-adoption/3"
+        if storage_only
+        else "umi-cohort-model-delivery-adoption/2"
         if model_only
         else "umi-cohort-model-delivery-adoption/1",
         original_plan=history.plan,

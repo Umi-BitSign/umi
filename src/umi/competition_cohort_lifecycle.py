@@ -268,7 +268,9 @@ class CohortLifecycleService:
         self._log_lifecycle("phase_decision_review_completed")
         return result
 
-    async def _publish(self, history: CohortRecoveryHistory) -> None:
+    async def _publish(
+        self, history: CohortRecoveryHistory, *, publish_closed_results: bool = True
+    ) -> None:
         # Publish authority first. A result publisher sees the same selected
         # history as admission and rejects revocation or a conflicting change.
         self._remember_state(self.controller.store.status(self.cohort)[0])
@@ -286,6 +288,10 @@ class CohortLifecycleService:
                 cohort=self.cohort,
             )
         self._log_lifecycle("history_publication_completed")
+        if not publish_closed_results:
+            # A storage-only amendment cannot change retained phase results.
+            # Its explicit commit must not instantiate historical work drivers.
+            return
         if any(t.transition.operation == "revoke" for t in history.transitions):
             return
         for signed in history.transitions:

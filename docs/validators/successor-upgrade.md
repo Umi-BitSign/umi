@@ -32,6 +32,15 @@ existing owners cannot be restarted by dependency-install hooks.
 
 ## Intake runtime maintenance
 
+Before publishing a storage-only model adoption (`umi-cohort-model-delivery-adoption/3`),
+update the selected owner, reviewer, settlement, reward and miner readers through
+their supported runtime paths. Older readers reject this signed format. Preserve
+their original cohort bindings and completed verification records. The archival
+format adds an authenticated R2 storage selection after request closure; it does
+not change the upload profile or restart the cohort. See the
+[storage adoption procedure](../operators/settlement.md#model-delivery-before-recoverable-enrollment)
+for the inventory, quorum and consumer-release requirements.
+
 An intake runtime repair does not require a new public deployment, cohort,
 miner enrollment or public launch. Keep the existing `public_deployment` and
 accepted journals unchanged. The private intake configuration may select a

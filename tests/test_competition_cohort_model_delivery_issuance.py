@@ -48,7 +48,13 @@ from umi.competition_cohort_model_delivery_reservation import (
 )
 from umi.competition_cohort_model_upload import CohortModelUploads, ModelUploadConfig
 from umi.competition_cohort_progress_signer import CohortProgressSigner, CohortProgressSignerConfig
-from umi.competition_cohort_recovery import ModelDeliveryProfile, admit_recoverable_cohort
+from umi.competition_cohort_recovery import (
+    ModelDeliveryProfile,
+    admit_recoverable_cohort,
+    apply_recovery_transition,
+    cohort_model_delivery,
+    propose_recovery_transition,
+)
 from umi.competition_cohort_recovery_store import CohortRecoveryStore
 from umi.competition_cohort_request_rule import prepare_request_tail_adoption_at_block
 from umi.competition_reward_decisions import StandingRewardSeries
@@ -68,7 +74,7 @@ from .test_competition_cohort_legacy_model_storage import receipt_scenario as re
 from .test_competition_cohort_legacy_model_storage import recovery as legacy_recovery
 from .test_competition_cohort_legacy_model_storage import runtime as runtime
 from .test_competition_cohort_model_acceptance import certify
-from .test_competition_cohort_recovery import signatures
+from .test_competition_cohort_recovery import signatures, signed_transition
 from .test_competition_cohort_request_rule_api import post
 from .test_open_competition import wallet
 
@@ -80,6 +86,11 @@ pytestmark = [
 
 @pytest.fixture
 def model_only(request):
+    return getattr(request, "param", False)
+
+
+@pytest.fixture
+def storage_only(request):
     return getattr(request, "param", False)
 
 
@@ -103,7 +114,7 @@ def recovery(policy, request, model_only):
 
 
 @pytest.fixture
-def issuance(case, tmp_path, request, model_only):
+def issuance(case, tmp_path, request, model_only, storage_only):
     c = case
     prefix = getattr(request, "param", "")
     if prefix:
@@ -166,7 +177,114 @@ def issuance(case, tmp_path, request, model_only):
     )
     for request in c.requests:
         uploads.reserve(request.record.request, capture_at(220))
-    transition = candidate.prepare(c.history, 221)
+    block, decision_inputs = 221, ()
+    if storage_only:
+        # Close the actual native prefix, retaining every signed upload and
+        # acceptance byte. Only the new inventory's predecessor changes.
+        from umi.competition_cohort_coordinator import (
+            AttestedCohortPhaseProgress,
+            CohortDecisionInput,
+            CohortPhaseProgress,
+        )
+        from umi.competition_cohort_history import verify_cohort_history
+        from umi.competition_execution import execution_boundary
+
+        from .test_competition_cohort_intake import seal_and_close
+        from .test_competition_cohort_legacy_model_storage import retain
+
+        second = c.owner.publish(
+            certify(
+                c.owner, c.cohort, c.subs[1], c.owner.intent(c.cohort, digest(c.subs[1])).inputs
+            ),
+            capture_at(220),
+        )
+        key = retain(c.objects, second.certificate)
+        original = root / "objects" / (key + ".json")
+        original.write_bytes(c.objects[key])
+        original.chmod(0o600)
+        c.legacy = c.legacy.model_copy(
+            update={
+                "entries": tuple(
+                    entry.model_copy(update={"certificate_raw_sha256": key})
+                    if entry.request_sha256 == digest(c.requests[1].record.request)
+                    else entry
+                    for entry in c.legacy.entries
+                )
+            }
+        )
+        c.history, intake_evidence, _ = seal_and_close(
+            c.owner.intake,
+            {
+                "intake_history": c.history,
+                "policy": c.policy,
+            },
+        )
+        evidence = [intake_evidence]
+
+        state = verify_cohort_history(
+            c.history, c.policy, expected_tip_sha256=history_tip(c.history), current_block=300
+        ).state
+        transitions = list(c.history.transitions)
+        while state.phase != "reference_reveal":
+            block = next(t.target_block for t in state.targets if t.phase == state.phase)
+            progress = CohortPhaseProgress(
+                schema="umi-cohort-phase-progress/1",
+                cohort_sha256=c.cohort,
+                recovery_tip_sha256=state.tip_sha256,
+                phase=state.phase,
+                observed_at_block=block,
+                unavailable_blocks=0,
+                completion="complete",
+                phase_result_sha256="42" * 32,
+                evidence_sha256="43" * 32,
+            )
+            item = CohortDecisionInput(
+                schema="umi-cohort-decision-input/1",
+                progress=AttestedCohortPhaseProgress(
+                    progress=progress, signatures=signatures(progress)
+                ),
+                observation=execution_boundary(capture_at(block)),
+            )
+            evidence.append(item)
+            signed = signed_transition(
+                propose_recovery_transition(
+                    state,
+                    c.history.authority.authority,
+                    operation="close_phase",
+                    observed_at_block=block,
+                    evidence_sha256=digest(item),
+                )
+            )
+            state = apply_recovery_transition(state, signed, c.history.authority, c.policy)
+            transitions.append(signed)
+        block += 1
+        decision_inputs = tuple(evidence)
+        c.history = c.history.model_copy(update={"transitions": tuple(transitions)})
+        c.owner.intake.publish(c.history, capture_at(block), decision_inputs=decision_inputs)
+        c.legacy = c.legacy.model_copy(
+            update={
+                "predecessor_sha256": history_tip(c.history),
+                "captured_at_block": block,
+            }
+        )
+        c.preservation = c.preservation.model_copy(
+            update={
+                "predecessor_sha256": history_tip(c.history),
+                "legacy_inventory_sha256": digest(c.legacy),
+            }
+        )
+        # These are unpublished fixture inputs, not a prior signed selection.
+        (root / "legacy-inventory.json").write_bytes(canonical_json_bytes(c.legacy))
+        (root / "preservation-inventory.json").write_bytes(canonical_json_bytes(c.preservation))
+        config = ModelDeliveryAdoptionCandidateConfig.model_validate(
+            config.model_dump(by_alias=True)
+            | {
+                "storage_only": True,
+                "delivery": cohort_model_delivery(c.history.plan),
+            }
+        )
+        candidate = ModelDeliveryAdoptionCandidate(config, c.policy, multipart=remote)
+    transition = candidate.prepare(c.history, block)
     return SimpleNamespace(
         case=c,
         config=config,
@@ -175,6 +293,8 @@ def issuance(case, tmp_path, request, model_only):
         transition=transition,
         root=root,
         remote=remote,
+        block=block,
+        decision_inputs=decision_inputs,
     )
 
 
@@ -263,7 +383,9 @@ def owner_api(issuance, tmp_path):
     i, c = issuance, issuance.case
     db = sqlite3.connect(tmp_path / "control.sqlite3")
     store = CohortRecoveryStore(db)
-    store.publish_history(c.history, c.policy, current_block=221)
+    store.publish_history(c.history, c.policy, current_block=i.block)
+    for evidence in i.decision_inputs:
+        store.retain_source(c.cohort, evidence)
     series = StandingRewardSeries(
         schema="umi-standing-reward-series/1",
         genesis_hash=FINNEY_GENESIS_HASH,
@@ -284,13 +406,15 @@ def owner_api(issuance, tmp_path):
         return sign_object(body, wallet("Charlie"))
 
     async def current_block():
-        return 221
+        return i.block
 
     async def unused():
         pytest.fail("explicit held adoption must not run an automatic lifecycle stage")
 
     async def publish(history):
-        c.owner.intake.publish(history, capture_at(221))
+        c.owner.intake.publish(
+            history, capture_at(i.block), decision_inputs=i.decision_inputs or None
+        )
 
     provider = SimpleNamespace(policy=c.policy, current_finalized_block=current_block)
     node = CohortLifecycleService(
@@ -407,9 +531,10 @@ async def test_normal_owner_routes_review_quorum_commit_and_repeat(owner_api, tm
                 votes.append(await peer.certify(p))
                 assert await peer.certify(p) == votes[-1]
         certificate = assemble_model_delivery_adoption(p, votes, i.case.policy)
-        other = prepare_request_tail_adoption_at_block(i.case.history, i.case.policy, 221)
-        with pytest.raises(ValueError, match="reserved for another body"):
-            await signers[0].certify_request_tail_adoption(other)
+        if not i.config.storage_only:
+            other = prepare_request_tail_adoption_at_block(i.case.history, i.case.policy, 221)
+            with pytest.raises(ValueError, match="reserved for another body"):
+                await signers[0].certify_request_tail_adoption(other)
         commit = ModelDeliveryAdoptionCommit(
             schema="umi-model-delivery-adoption-commit/1",
             series_sha256=digest(a.series),
@@ -420,6 +545,26 @@ async def test_normal_owner_routes_review_quorum_commit_and_repeat(owner_api, tm
         assert i.case.owner.intake.pending_policy_adoption(i.case.cohort) is None
         assert i.case.owner.intake.history(i.case.cohort).plan == i.case.history.plan
         assert i.case.cohort in a.host.config.automatic_progression_hold_cohorts
+
+
+@pytest.mark.parametrize("storage_only", [True], indirect=True)
+async def test_archival_owner_quorum_commit_restart_and_unchanged_remote_bytes(owner_api, tmp_path):
+    a, i = owner_api, owner_api.i
+    original = canonical_json_bytes(i.case.history)
+    await i.candidate.verify(i.case.history, i.transition)
+    reads = tuple(i.remote.reads)
+    restarted = ModelDeliveryAdoptionCandidate(i.config, i.case.policy, multipart=i.remote)
+    await restarted.verify(i.case.history, i.transition)
+    assert tuple(i.remote.reads) == reads
+    await test_normal_owner_routes_review_quorum_commit_and_repeat(a, tmp_path)
+    assert canonical_json_bytes(i.case.history) == original
+    history = i.case.owner.intake.history(i.case.cohort)
+    adoption = history.transitions[-1].transition.model_delivery_adoption
+    assert adoption.storage_only
+    assert adoption.delivery == cohort_model_delivery(history.plan)
+    assert adoption.eligible_tracks is None and adoption.service_pool_bps is None
+    assert history.transitions[:-1] == i.case.history.transitions
+    assert tuple(i.remote.reads) == reads
 
 
 @pytest.mark.parametrize("model_only", [True], indirect=True)

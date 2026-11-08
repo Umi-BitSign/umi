@@ -4857,13 +4857,35 @@ signing. Adoption does not itself migrate old archives, release reservations or
 authorize eviction. Keep the original artifacts and consumer bindings until their
 supported storage migration and restore qualification complete.
 
+For a legacy cohort whose authenticated requests have closed, select
+`storage_only: true` with its unchanged `coordinator_chunked_v1` delivery profile
+on the owner and each independent reviewer. This issues
+`umi-cohort-model-delivery-adoption/3` under its standing recovery authority,
+including authority `/2`. It binds archival inventories without changing upload
+transport, tracks, rewards, signed history or clocks. The phase must be
+`reference_reveal` through `first_admission`; completed or revoked authority
+cannot issue this amendment. This option cannot be combined with `model_only`.
+
+Use the same preflight, fenced census, reservation, quorum and commit routes
+described below. Preserve the retained intake seal and phase decision evidence
+when publishing the amended history. Select its committed history and legacy
+storage sources on every consumer before enabling native local retirement. Keep
+the existing bounded R2 review configuration for archived model readers, even
+though upload discovery still returns the original chunked profile. The archival
+commit publishes history without constructing the old phase drivers or repeating
+their result publication. Keep
+the original upload owner for exact retries. Retirement still requires complete
+remote preservation, restore availability and live consumer release; an archival
+signature alone never permits unlinking payloads. Existing `/1` and `/2`
+adoptions remain intake-only and retain their original serialized bytes.
+
 The normal issuance routes are on the existing private admission and reviewer
 listeners under `/internal/cohorts/model-delivery-adoption`. Enable owner mutations
 with `lifecycle.model_delivery_operator_token_file`, separate from export and vote
 credentials. Select the same cohort-sorted `model_delivery_adoption_candidates` on
 that lifecycle and each independent phase reviewer. Each
 `umi-model-delivery-adoption-candidate/1` contains a `source` with the existing
-legacy source schema, the exact direct-R2 `delivery` profile, `r2_credentials_file`,
+legacy source schema, the selected `delivery` profile, `r2_credentials_file`,
 `r2_bucket`, a separate durable `verification_directory`, and optional
 `r2_timeout_seconds`. A selected `phase_review_budget` is required on the owner
 and reviewers. Size its `replay_seconds` for the complete retained R2 model set;
