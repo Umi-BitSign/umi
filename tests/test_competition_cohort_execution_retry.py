@@ -338,3 +338,144 @@ async def test_cancellation_drains_contended_result_before_releasing_owner(
     assert h.executor.journal.result(h.e.job, attempt) is not None
     assert await h.executor.advance_batch(h.e.assignment) is not None
     assert len(h.e.calls) == step_count(h.e.job) and not h.e.stops
+
+
+async def test_pressure_retry_has_bounded_residency(clock, caplog):
+    caplog.set_level(logging.WARNING, logger="umi.competition.progress")
+    error = retry.ResidentTimingPressure()
+    calls = 0
+
+    async def operation():
+        nonlocal calls
+        calls += 1
+        raise error
+
+    with retry.resident_execution_retries("ab" * 32, 12), pytest.raises(type(error)):
+        await retry.retry_resident_timing(operation)
+    assert calls == 3 and clock.sleeps == [5, 7]
+    events = [json.loads(r.message) for r in caplog.records if r.message.startswith("{")]
+    assert events[-1]["retry_remaining_seconds"] == 0
+    assert events[-1]["certification_authority"] is False
+
+
+async def test_pressure_recovery_does_not_cancel_owned_attempt(clock):
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def operation():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise retry.ResidentTimingPressure()
+        entered.set()
+        await release.wait()
+        return "accepted"
+
+    with retry.resident_execution_retries("ab" * 32, 10):
+        task = asyncio.create_task(retry.retry_resident_timing(operation))
+        await asyncio.wait_for(entered.wait(), 2)
+        clock.now += 1000
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        assert await task == "accepted"
+
+
+async def test_unmarked_pressure_failure_is_not_a_retry(clock):
+    # A stored evidence failure outside sandbox.invoke is not new contention.
+    error = retry.CpuTimingInfrastructureError("cpu_condition_external_pressure")
+
+    async def operation():
+        raise error
+
+    with retry.resident_execution_retries("ab" * 32, 10), pytest.raises(type(error)) as raised:
+        await retry.retry_resident_timing(operation)
+    assert raised.value is error and not clock.sleeps
+
+
+async def test_pressure_retry_reconciles_and_rechecks_with_fresh_attempt(
+    resident, clock, monkeypatch
+):
+    h = resident
+    original = h.e.port.invoke
+    failed = []
+
+    async def invoke(job, attempt):
+        assert h.scope.active
+        if not failed:
+            failed.append(attempt)
+            h.e.calls.append(attempt)
+            raise retry.CpuTimingInfrastructureError("cpu_condition_external_pressure")
+        return await original(job, attempt)
+
+    monkeypatch.setattr(h.e.port, "invoke", invoke)
+    assert await h.executor.advance_batch(h.e.assignment) is not None
+    assert len(h.e.calls) == step_count(h.e.job) + 1
+    assert h.e.stops == failed
+    assert h.e.calls[0] != h.e.calls[1]
+    assert h.executor.journal.result(h.e.job, failed[0]) is None
+    assert h.scope.entered == h.scope.released == 1 and clock.sleeps == [5]
+
+
+async def test_pressure_retry_refuses_changed_authority(resident, clock, monkeypatch):
+    h = resident
+    original = h.executor.current
+
+    async def current(assignment):
+        if h.e.calls:
+            raise ValueError("fresh authority no longer permits the attempt")
+        return await original(assignment)
+
+    async def invoke(job, attempt):
+        h.e.calls.append(attempt)
+        raise retry.CpuTimingInfrastructureError("cpu_condition_external_pressure")
+
+    monkeypatch.setattr(h.executor, "current", current)
+    monkeypatch.setattr(h.e.port, "invoke", invoke)
+    with pytest.raises(ValueError, match="fresh authority"):
+        await h.executor.advance_batch(h.e.assignment)
+    assert len(h.e.calls) == 1 and not h.scope.active
+    assert h.scope.entered == h.scope.released == 1
+
+
+async def test_pressure_exhaustion_releases_pair_for_other_jobs(resident, clock, monkeypatch):
+    h = resident
+    monkeypatch.setattr(retry, "MAX_RESIDENT_RETRY_SECONDS", 5)
+
+    async def invoke(job, attempt):
+        h.e.calls.append(attempt)
+        raise retry.CpuTimingInfrastructureError("cpu_condition_external_pressure")
+
+    monkeypatch.setattr(h.e.port, "invoke", invoke)
+    _, state, kind = await h.worker._one(h.e.r.slot)
+    assert (state, kind) == ("pending", "ResidentTimingPressure")
+    assert len(h.e.calls) == 2 and len(h.e.stops) == 1
+    assert not h.scope.active and not h.worker.capacity.locked()
+    assert h.scope.entered == h.scope.released == 1
+
+
+async def test_cancellation_during_pressure_wait_keeps_recoverable_attempt(
+    resident, clock, monkeypatch
+):
+    h = resident
+    entered = asyncio.Event()
+
+    async def wait(delay):
+        entered.set()
+        await asyncio.Event().wait()
+
+    async def invoke(job, attempt):
+        h.e.calls.append(attempt)
+        raise retry.CpuTimingInfrastructureError("cpu_condition_external_pressure")
+
+    monkeypatch.setattr(retry.asyncio, "sleep", wait)
+    monkeypatch.setattr(h.e.port, "invoke", invoke)
+    task = asyncio.create_task(h.executor.advance_batch(h.e.assignment))
+    await asyncio.wait_for(entered.wait(), 10)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(h.e.calls) == 1 and not h.scope.active
+    assert h.executor.journal.result(h.e.job, h.e.calls[0]) is None
+    with h.executor.journal.locked(h.e.r.slot):
+        pass

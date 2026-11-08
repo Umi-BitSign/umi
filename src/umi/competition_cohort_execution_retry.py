@@ -1,8 +1,9 @@
-"""Retry failed transport/result retention while an existing model stays resident.
+"""Bound transient recovery while an existing model stays resident.
 
-This never repeats inference, grants authority, or retries an execution decision.
-Each failed operation has a short recovery allowance within the existing read
-budget; exhaustion returns its original failure to the ordinary scheduler.
+Transport/result retention never repeats inference. External timing pressure can
+retry the ordinary fresh-attempt path, preserving its authority and cleanup checks.
+Each allowance fits within the existing read budget; exhaustion returns the
+failure to ordinary scheduling without accepting unusable timing.
 """
 
 import asyncio
@@ -13,6 +14,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from .competition_cpu_timing import CpuTimingInfrastructureError
 from .competition_progress import report_execution_retry
 from .sqlite_contention import is_sqlite_contention
 
@@ -30,6 +32,13 @@ _RESIDENT_RETRY = ContextVar("cohort_resident_execution_retry", default=None)
 MAX_RESIDENT_RETRY_SECONDS = 120.0
 
 
+class ResidentTimingPressure(CpuTimingInfrastructureError):
+    """External pressure rejected this invocation, before result retention."""
+
+    def __init__(self):
+        super().__init__("cpu_condition_external_pressure")
+
+
 @contextmanager
 def resident_execution_retries(slot, timeout):
     token = _RESIDENT_RETRY.set(_ResidentRetry(slot, min(timeout, MAX_RESIDENT_RETRY_SECONDS)))
@@ -37,6 +46,43 @@ def resident_execution_retries(slot, timeout):
         yield
     finally:
         _RESIDENT_RETRY.reset(token)
+
+
+async def retry_resident_timing(operation):
+    """Keep residency for a bounded retry of rejected external-pressure timing.
+
+    The operation must be ordinary executor.advance, not sandbox.invoke: every
+    retry reconciles the old attempt, reads fresh authority and creates a new
+    native attempt. No failed result or timing evidence is reused. This never
+    cancels an owned invocation when its recovery allowance expires.
+    """
+    state = _RESIDENT_RETRY.get()
+    if state is None:
+        return await operation()
+    started = None
+    failures = 0
+    while True:
+        try:
+            return await operation()
+        except ResidentTimingPressure as error:
+            now = asyncio.get_running_loop().time()
+            if started is None:
+                started = now
+            elapsed = now - started
+            remaining = max(0.0, state.timeout - elapsed)
+            failures += 1
+            report_execution_retry(
+                slot=state.slot,
+                error=error,
+                retry_count=failures,
+                retry_elapsed_seconds=elapsed,
+                retry_remaining_seconds=remaining,
+            )
+            if remaining <= 0:
+                raise
+            # Avoid immediate retry bursts, while bounding idle residency and
+            # retaining the ordinary per-invocation timeout on the next attempt.
+            await asyncio.sleep(min(5.0 * 2 ** min(failures - 1, 3), 30.0, remaining))
 
 
 async def retry_resident_operation(operation, *, history=False):

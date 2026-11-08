@@ -26,8 +26,10 @@ from .competition_cohort_execution_journal import (
     step_count,
 )
 from .competition_cohort_execution_retry import (
+    ResidentTimingPressure,
     resident_execution_retries,
     retry_resident_operation,
+    retry_resident_timing,
 )
 from .competition_cohort_order_inbox import CohortOrderInbox
 from .competition_cohort_order_signer import (
@@ -38,6 +40,7 @@ from .competition_cohort_order_signer import (
     remember_order_history,
     review_order,
 )
+from .competition_cpu_timing import CpuTimingInfrastructureError
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_progress import report_execution_retry
 from .competition_round_journal import FinalizedHeadRegression
@@ -345,7 +348,7 @@ class CohortExecutor(CohortExecutionAuthority):
                 # iteration covers an already-complete retained job; this is a
                 # finite scheduling batch, not a new deadline or protocol gate.
                 for _ in range(total - restored + 1):
-                    result = await self.advance(assignment)
+                    result = await retry_resident_timing(lambda: self.advance(assignment))
                     completed = await self._journal_progress(
                         job, self.journal.checkpoint_count, job
                     )
@@ -444,11 +447,16 @@ class CohortExecutor(CohortExecutionAuthority):
                 )
 
                 async def invoke_and_retain():
-                    result = await await_progress(
-                        self.sandbox.invoke(job, attempt),
-                        stage="execution_sandbox",
-                        cohort=job.round.cohort_sha256,
-                    )
+                    try:
+                        result = await await_progress(
+                            self.sandbox.invoke(job, attempt),
+                            stage="execution_sandbox",
+                            cohort=job.round.cohort_sha256,
+                        )
+                    except CpuTimingInfrastructureError as error:
+                        if error.reason_code == "cpu_condition_external_pressure":
+                            raise ResidentTimingPressure() from error
+                        raise
                     # Drain the owned persistence attempt before cancellation
                     # releases the job lock; recovery reuses the exact result,
                     # exhaustion preserves the existing failure path.

@@ -276,6 +276,15 @@ adoption, since more overlapping containers alone do not prove higher throughput
 `umi-cpu-pressure-rejection/1` reports the failed pressure field, measured interval,
 exact counter deltas and the unchanged signed threshold. It is diagnostic evidence;
 a rejected timing still requires a valid retry and cannot become a neutral score.
+External-pressure rejection during a resident model invocation gets a bounded
+retry before releasing its model reservation. The next ordinary executor step
+reconciles the failed attempt, checks fresh authority and starts a new attempt;
+it does not reuse failed output or timing. Backoff grows from 5 to 30 seconds,
+within the smaller of the configured read allowance and 120 seconds. An owned
+invocation drains normally even if that recovery allowance expires. Exhaustion,
+cancellation and other timing failures release residency through the existing
+scheduler. Deploy through validator source maintenance; miner submissions,
+signed clocks, timing limits and retained result readers need no migration.
 
 Startup preflight uses the selected bounded budget and samples busy slots under
 the native admission transaction. A competing transaction reports a retry without
