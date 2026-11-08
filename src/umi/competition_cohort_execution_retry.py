@@ -111,7 +111,7 @@ async def retry_resident_timing(operation, *, admission=None):
 
 
 async def retry_resident_operation(operation, *, history=False):
-    """Retry only a failed fresh history fetch or idempotent result persistence.
+    """Retry fresh history or exact, rollback-safe journal persistence.
 
     No timeout cancels an owned operation. Cancellation at a retry wait propagates;
     the caller retains responsibility for draining its threads and sandbox result.

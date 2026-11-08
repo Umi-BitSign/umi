@@ -273,6 +273,12 @@ use the existing allocation and restoration path. This scheduler update uses the
 same validator source-maintenance path; miner inputs and verification receipts
 need no migration. Observe accepted cases and timing-pressure retries after
 adoption, since more overlapping containers alone do not prove higher throughput.
+The same update retains residency across transient SQLite contention when
+recording an attempt. It retries the exact reservation under the existing
+120-second recovery allowance, capped by the configured read budget. Journal
+heads, holds and original attempt inputs remain checked; inference starts only
+after commit. Exhausted recovery returns to ordinary scheduling. Existing miner
+and validator evidence readers require no schema migration.
 `umi-cpu-pressure-rejection/1` reports the failed pressure field, measured interval,
 exact counter deltas and the unchanged signed threshold. It is diagnostic evidence;
 a rejected timing still requires a valid retry and cannot become a neutral score.

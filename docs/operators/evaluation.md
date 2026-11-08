@@ -803,6 +803,11 @@ evidence/reuse pass supplies this private scheduling decision, including after
 restart. A readiness hint alone cannot omit the reference, and the first source
 producer and legacy independent jobs retain both models. Each step still
 uses its original authority checks, inference deadline and durable result.
+SQLite contention while recording a new attempt retries the exact native
+reservation inside the resident scope, for up to 120 seconds or the shorter
+configured read allowance. The failed transaction rolls back; retries recheck
+journal heads and holds and reuse any retained reservation. No inference starts
+until its attempt commits. Exhaustion releases the model to ordinary scheduling.
 Candidate observations are never borrowed from another assignment. The original
 `archive` slot and interrupted transfers stay in place across upgrades. The idle
 `standby` slot and managed parallel slots may be evicted when a pair cannot fit;

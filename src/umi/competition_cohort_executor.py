@@ -446,8 +446,15 @@ class CohortExecutor(CohortExecutionAuthority):
                     )
                     await self._journal_progress(job, self.journal.stopped, attempt)
                     source, started = await self.current(assignment)
-                attempt = await self._journal_progress(
-                    job, self.journal.begin, job, index, source, started
+                # A contended transaction rolls back before publishing its
+                # attempt. Retry the exact native reservation while resident;
+                # begin rechecks heads/holds and reuses any retained reservation.
+                # No sandbox invocation exists yet, and exhaustion still returns
+                # the failure to ordinary scheduling.
+                attempt = await retry_resident_operation(
+                    lambda: self._journal_progress(
+                        job, self.journal.begin, job, index, source, started
+                    )
                 )
 
                 async def invoke_and_retain():

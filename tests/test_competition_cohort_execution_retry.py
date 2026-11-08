@@ -249,7 +249,7 @@ async def test_exhausted_history_releases_residency_and_returns_pending(
         pass
 
 
-@pytest.mark.parametrize("method", ["begin", "finish"])
+@pytest.mark.parametrize("method", ["finish"])
 async def test_execution_decision_contention_keeps_existing_pending_path(
     resident, clock, monkeypatch, method
 ):
@@ -269,6 +269,54 @@ async def test_execution_decision_contention_keeps_existing_pending_path(
         assert len(h.e.calls) == 1
         attempt = h.executor.journal.head(h.e.job, 0)
         assert h.executor.journal.result(h.e.job, attempt) is not None
+
+
+@pytest.mark.parametrize("failure_point", ["reservation", "attempt_write"])
+async def test_begin_contention_retains_model_and_exact_native_reservation(
+    resident, clock, monkeypatch, failure_point
+):
+    h = resident
+    journal = h.executor.journal.journal
+    method = "reserve_records" if failure_point == "reservation" else "put_many"
+    original = getattr(journal, method)
+    failed = []
+
+    def persist(*args, **kwargs):
+        is_attempt = method == "reserve_records" or args[0][0][0] == "attempt"
+        if is_attempt and not failed:
+            assert h.scope.active and not h.e.calls
+            failed.append(args)
+            raise busy()
+        if is_attempt and len(failed) == 1:
+            assert args == failed[0]
+            failed.append(args)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(journal, method, persist)
+    evidence = await h.executor.advance_batch(h.e.assignment)
+    assert evidence is not None and len(failed) == 2
+    assert len(h.e.calls) == step_count(h.e.job) and not h.e.stops
+    assert all(attempt.number == 1 for attempt in h.e.calls)
+    assert h.scope.entered == h.scope.released == 1
+    assert clock.sleeps == [1]
+
+
+async def test_begin_contention_exhausts_and_releases_resident_lane(resident, clock, monkeypatch):
+    h = resident
+    monkeypatch.setattr(retry, "MAX_RESIDENT_RETRY_SECONDS", 2)
+    calls = []
+
+    def begin(*args):
+        calls.append(args)
+        raise busy()
+
+    monkeypatch.setattr(h.executor.journal, "begin", begin)
+    _, state, kind = await h.worker._one(h.e.r.slot)
+    assert (state, kind) == ("pending", "OperationalError")
+    assert len(calls) == 3 and all(args == calls[0] for args in calls)
+    assert clock.sleeps == [1, 1] and not h.e.calls
+    assert h.scope.entered == h.scope.released == 1 and not h.scope.active
+    assert not h.worker.capacity.locked()
 
 
 async def test_cancellation_during_history_retry_releases_scope_and_reuses_result(
