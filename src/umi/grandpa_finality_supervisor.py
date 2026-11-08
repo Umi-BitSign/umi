@@ -34,7 +34,7 @@ import stat
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import ExitStack, closing, contextmanager, suppress
+from contextlib import ExitStack, closing, contextmanager, nullcontext, suppress
 from dataclasses import asdict, dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -1120,25 +1120,30 @@ class DurableGrandpaFinalityPort:
         reason = None if initial else self._frontier.inspect(config)
         body_failure = None
         with ExitStack() as readers:
+            opened = (
+                None
+                if initial and before["files"][""][5] == "0"
+                else readers.enter_context(self._frontier.native_open(before))
+            )
             with self._connect(read_only=False) as connection:
-                keeper = readers.enter_context(self._connect(read_only=True))
+                keeper = readers.enter_context(self._sqlite_connection(read_only=True))
                 keeper.execute("BEGIN")
                 keeper.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
                 version = connection.execute("PRAGMA data_version").fetchone()[0]
                 try:
                     with self._transaction(connection):
-                        if not initial:
-                            self._frontier.require_snapshot(before, opened_wal=True)
-                            if reason is not None:
-                                _LOGGER.warning(
-                                    "finality_startup_audit state=repair_required reason=%s", reason
-                                )
-                                self._audit_snapshot(
-                                    connection,
-                                    checkpoint=self._frontier.audit_checkpoint(
-                                        config, legacy_accounting=False
-                                    ),
-                                )
+                        if opened is not None:
+                            opened()
+                        if reason is not None:
+                            _LOGGER.warning(
+                                "finality_startup_audit state=repair_required reason=%s", reason
+                            )
+                            self._audit_snapshot(
+                                connection,
+                                checkpoint=self._frontier.audit_checkpoint(
+                                    config, legacy_accounting=False
+                                ),
+                            )
                         try:
                             yield connection
                         except BaseException as error:
@@ -1743,6 +1748,36 @@ class DurableGrandpaFinalityPort:
 
     @contextmanager
     def _connect(self, *, read_only: bool) -> Iterator[sqlite3.Connection]:
+        if read_only:
+            # Root SQLite also touches WAL ownership for read-only connections.
+            # Serialize those native opens and retain only witnessed metadata
+            # changes; never turn an already damaged completion into reuse.
+            owner = (
+                nullcontext() if self._frontier.owned_by_current_thread else self._frontier.owner()
+            )
+            with ExitStack() as resources:
+                with owner:
+                    before = self._frontier.snapshot()
+                    config = self._config_bytes()
+                    reusable = self._frontier.inspect(config) is None
+                    with self._frontier.native_open(before) as check:
+                        connection = resources.enter_context(
+                            self._sqlite_connection(read_only=True)
+                        )
+                        # Force the lazy WAL open under the native owner, then
+                        # release it before the caller's read/snapshot work.
+                        connection.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+                        check()
+                    after = self._frontier.snapshot()
+                    if reusable and after != before:
+                        self._frontier.publish(config, expected_snapshot=after)
+                yield connection
+            return
+        with self._sqlite_connection(read_only=False) as connection:
+            yield connection
+
+    @contextmanager
+    def _sqlite_connection(self, *, read_only: bool) -> Iterator[sqlite3.Connection]:
         try:
             if self._path.is_symlink():
                 raise GrandpaFinalityStoreCorruption("unsafe_database_path")

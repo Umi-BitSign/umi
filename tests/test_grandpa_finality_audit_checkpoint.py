@@ -92,7 +92,9 @@ def test_process_death_resumes_upgrade_without_rechecking_prefix(
     resumed = _port(tmp_path, observer, chain_observation, **options)
     assert len(calls) == 3
     assert resumed.persisted_head().height == records[-1].block.number
-    assert retained_bytes(port._path)[1:] == original[1:]
+    # Root SQLite changes WAL ownership metadata even on read-only opens.
+    # The native reader observes and retains that metadata-only transition.
+    assert retained_bytes(port._path, port=resumed)[1:] == original[1:]
     # Diagnostic readers must not leave writable handles whose eventual
     # collection checkpoints the WAL behind the native completion record.
     gc.collect()

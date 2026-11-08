@@ -49,10 +49,16 @@ def legacy_database(path):
         connection.execute("PRAGMA user_version=2")
 
 
-def retained_bytes(path):
+def retained_bytes(path, *, port=None):
     # A diagnostic read must not leave a writable SQLite handle that can later
     # checkpoint the WAL during garbage collection or process teardown.
-    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as connection:
+    scope = (
+        closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True))
+        if port is None
+        else port._connect(read_only=True)
+    )
+    with scope as connection:
+        connection.row_factory = None
         return (
             connection.execute(
                 "SELECT * FROM store_meta WHERE key!=? ORDER BY key", (_MARKER,)

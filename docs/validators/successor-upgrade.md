@@ -281,7 +281,7 @@ Startup preflight uses the selected bounded budget and samples busy slots under
 the native admission transaction. A competing transaction reports a retry without
 inventing occupied-slot counts. The new host still acquires its own grant before
 allocating; preflight reserves no capacity.
-Reviewer, settlement, reward coordinator and supervisor CLI logs include native
+Reviewer, settlement, reward coordinator, reference publisher and supervisor CLI logs include native
 finality audit counts, repair reasons and ETAs. The reward coordinator CLI emits
 these records for both coordinator and reviewer roles. An initial frontier
 enrollment may precede readiness;
@@ -1734,6 +1734,12 @@ validated insertion and publication. A read-only keeper prevents close-time
 checkpointing from changing the retained identity. SQLite `data_version` and
 file-identity checks reject unrelated writes during publication. A successfully
 rolled-back native attempt retains the original completed audit.
+SQLite can reset WAL ownership when opening as root, including read-only opens.
+The native owner observes the pinned WAL inode through Linux file-change events.
+Only attribute events, with all other identity fields unchanged, allow the ctime
+update. Writes, replacement, lost events and database changes remain errors.
+Absent and zero-byte WALs contain no frames and are equivalent at that open boundary.
+Kernels without the observation capability retain strict identity checks.
 
 Weight-cache accounting includes these private metadata files in both legacy and
 namespaced layouts. Unknown entries, unsafe ownership, links and oversized records

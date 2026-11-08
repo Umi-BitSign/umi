@@ -16,10 +16,12 @@ import logging
 import os
 import stat
 import tempfile
+import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
+from .grandpa_finality_wal_open import wal_open_attributes
 from .protocol import canonical_json_bytes
 
 AUDIT_SEMANTICS = "umi-grandpa-native-audit/1"
@@ -98,6 +100,12 @@ class FinalityAuditFrontier:
         self.record = self.root / "completed.json"
         self.busy_timeout_ms = busy_timeout_ms
         self._owned = False
+        self._owner_thread = None
+        self._native_open_snapshot = None
+
+    @property
+    def owned_by_current_thread(self):
+        return self._owned and self._owner_thread == threading.get_ident()
 
     @contextmanager
     def owner(self):
@@ -132,15 +140,17 @@ class FinalityAuditFrontier:
                         raise FinalityFrontierError("frontier_record_oversized")
                     path.unlink()
             self._owned = True
+            self._owner_thread = threading.get_ident()
             try:
                 yield
             finally:
                 self._owned = False
+                self._owner_thread = None
         finally:
             os.close(fd)
 
     def snapshot(self):
-        if not self._owned:
+        if not self.owned_by_current_thread:
             raise FinalityFrontierError("frontier_owner_required")
         files = {}
         for suffix in ("", "-wal"):
@@ -194,14 +204,53 @@ class FinalityAuditFrontier:
             return "database_or_wal_changed"
         return None
 
-    def require_snapshot(self, expected, *, opened_wal: bool = False):
+    @contextmanager
+    def native_open(self, expected):
+        """Bracket SQLite open with a kernel observation of the exact WAL inode."""
+        previous = self._native_open_snapshot
+        try:
+            with ExitStack() as resources:
+                try:
+                    attributes = resources.enter_context(
+                        wal_open_attributes(
+                            Path(str(self.database) + "-wal"), expected["files"]["-wal"]
+                        )
+                    )
+                except ValueError as error:
+                    raise FinalityFrontierError(str(error)) from error
+                self.require_snapshot(expected)
+
+                def check():
+                    try:
+                        observed = attributes()
+                    except ValueError as error:
+                        raise FinalityFrontierError(str(error)) from error
+                    self.require_snapshot(expected, opened_wal=True, wal_attributes=observed)
+                    self._native_open_snapshot = expected
+
+                yield check
+        finally:
+            self._native_open_snapshot = previous
+
+    def require_snapshot(self, expected, *, opened_wal: bool = False, wal_attributes=False):
         current = self.snapshot()
-        # Opening an existing WAL database can provision an empty WAL. It has
-        # no committed frames and grants no permission to change the database.
-        if opened_wal and expected["files"]["-wal"] is None:
-            wal = current["files"]["-wal"]
-            if wal is not None and wal[5] == "0":
-                current["files"]["-wal"] = None
+        # SQLite may create an empty WAL or reset an existing empty WAL's
+        # ownership when opening as root. Neither contains committed frames.
+        # Only this native-open boundary treats absent and empty WALs alike;
+        # database identities and every nonempty WAL remain exact.
+        if opened_wal:
+            current = _audit_snapshot_identity(current)
+            expected = _audit_snapshot_identity(expected)
+            before, after = expected["files"]["-wal"], current["files"]["-wal"]
+            if (
+                wal_attributes
+                and before is not None
+                and after is not None
+                and before[:-1] == after[:-1]
+            ):
+                # The live kernel watch saw only ATTRIB, with no writes or lost
+                # events. Every field except ctime still has to match exactly.
+                current["files"]["-wal"] = before
         if current != expected:
             raise FinalityFrontierError("database_changed_outside_native_owner")
 
@@ -262,6 +311,7 @@ class FinalityAuditCheckpoint:
         self.path = owner.root / "audit-progress.json"
         self.binding = {**owner.binding(config), "legacy_accounting": legacy_accounting}
         self.snapshot = owner.snapshot()
+        self.opening_snapshot = owner._native_open_snapshot
         self.reason = None
         self._repair = False
 
@@ -311,7 +361,10 @@ class FinalityAuditCheckpoint:
         if value["binding"] != self.binding:
             self.repair("audit_checkpoint_binding_changed")
             return None
-        if value["snapshot"] != _audit_snapshot_identity(self.snapshot):
+        if value["snapshot"] != _audit_snapshot_identity(self.snapshot) and (
+            self.opening_snapshot is None
+            or value["snapshot"] != _audit_snapshot_identity(self.opening_snapshot)
+        ):
             self.repair("audit_checkpoint_database_changed")
             return None
         return value["state"]
