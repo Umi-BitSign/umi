@@ -2,30 +2,22 @@
 
 Only a successful native export can produce a receipt. The exporter may reuse
 that local result while the policy, verification interval, capacity and every
-published file identity still agree. Receipts are disposable; cache failures
-fall back to native replay and cannot turn missing work into an accepted result.
+published file identity still agree. Missing established state and unavailable
+storage require explicit repair; they never silently repeat completed replay.
 """
 
-import os
 import re
-import stat
-from contextlib import suppress
 from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field
 
 from .private_files import (
-    ensure_private_directory,
-    lock_private_file,
-    publish_private_model,
     read_private_model,
 )
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 MAX_RECEIPT_BYTES = 16 * 1024**2
-MAX_CACHE_BYTES = 64 * 1024**2
-MAX_CACHE_FILES = 2048
 StampNumber = Annotated[str, Field(pattern=r"^-?[0-9]{1,30}$")]
 
 
@@ -60,51 +52,39 @@ def _path(root: Path, terminal_sha: str, policy_sha: str) -> Path:
 
 
 def load_publication_verification(root, terminal_sha, policy_sha):
-    """A missing or unusable optimization is a miss, not a production hold."""
+    """Read indexed state first, importing an unchanged legacy receipt once."""
+    from .competition_publication_receipt_store import PublicationReceiptStore
+
+    path = _path(root, terminal_sha, policy_sha)
+    store = PublicationReceiptStore(path.parent)
+    raw = store.load(path.stem)
+    if raw is not None:
+        try:
+            receipt = PublicationVerificationReceipt.model_validate_json(raw)
+            if receipt.terminal_sha256 != terminal_sha or receipt.policy_sha256 != policy_sha:
+                raise ValueError("publication receipt identity differs")
+            return receipt
+        except ValueError as error:
+            raise store.failure("publication_receipt_invalid") from error
     try:
         receipt = read_private_model(
-            _path(root, terminal_sha, policy_sha),
-            PublicationVerificationReceipt,
-            maximum_bytes=MAX_RECEIPT_BYTES,
+            path, PublicationVerificationReceipt, maximum_bytes=MAX_RECEIPT_BYTES
         )
-        if receipt.terminal_sha256 == terminal_sha and receipt.policy_sha256 == policy_sha:
-            return receipt
-    except (OSError, ValueError):
-        pass
-    return None
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as error:
+        raise store.failure("legacy_publication_receipt_repair_required") from error
+    if receipt.terminal_sha256 != terminal_sha or receipt.policy_sha256 != policy_sha:
+        raise store.failure("legacy_publication_receipt_identity_changed")
+    # The original /1 verdict and file stamps are unchanged. No native replay,
+    # output reads or payload hashes are needed to migrate this local metadata.
+    store.remember(path.stem, canonical_json_bytes(receipt))
+    return receipt
 
 
 def remember_publication_verification(root: Path, receipt: PublicationVerificationReceipt):
-    """Replace only disposable cache metadata, after durable original publication.
+    """Checkpoint successful native work before reporting the export current."""
+    from .competition_publication_receipt_store import PublicationReceiptStore
 
-    The private file publisher performs the atomic write and directory sync.
-    Losing a cache record between removal and replacement merely causes replay.
-    No signed object, index, journal or original execution evidence is removed.
-    """
-    with suppress(OSError, ValueError):
-        raw = canonical_json_bytes(receipt)
-        if len(raw) > MAX_RECEIPT_BYTES:
-            return
-        path = _path(root, receipt.terminal_sha256, receipt.policy_sha256)
-        ensure_private_directory(path.parent)
-        lock = lock_private_file(path.parent / ".cache.lock")
-        try:
-            count = used = 0
-            for entry in path.parent.iterdir():
-                info = entry.lstat()
-                if (
-                    not stat.S_ISREG(info.st_mode)
-                    or info.st_nlink != 1
-                    or info.st_uid != os.getuid()
-                    or info.st_mode & 0o077
-                ):
-                    return
-                if entry != path:
-                    count += 1
-                    used += info.st_size
-                if count >= MAX_CACHE_FILES or used + len(raw) > MAX_CACHE_BYTES:
-                    return
-            path.unlink(missing_ok=True)
-            publish_private_model(path, receipt, maximum_bytes=MAX_RECEIPT_BYTES)
-        finally:
-            os.close(lock)
+    path = _path(root, receipt.terminal_sha256, receipt.policy_sha256)
+    PublicationReceiptStore(path.parent).remember(path.stem, canonical_json_bytes(receipt))

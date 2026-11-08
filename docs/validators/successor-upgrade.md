@@ -3131,14 +3131,26 @@ collecting a new subnet membership proof. Its observer, freshness and rollback
 checks still apply, and work beyond that finalized height stays pending. The
 closure reviewer separately checks membership, authority and the certified
 request interval; export does not replace any of those checks.
-Successful local publication verification is retained in a bounded private
-`.publication-verification/` cache, so restarting an exporter does not replay
-unchanged exports. Reuse requires the same policy and capacity, a verification
-interval containing the original interval, and unchanged identities for every
-published object and index. Missing or changed files require native replay and
-repair; an unavailable cache never blocks publication. These receipts are local
-optimization metadata, not transferable evidence: replicate the original
-objects and indexes, and let the receiver perform its own native verification.
+Successful local publication verification is retained in the private
+`.publication-verification/receipts.sqlite3` index. It has a 64 MiB payload budget
+and a 128 MiB database bound (plus at most 128 MiB for a rollback journal), with
+no per-directory receipt-count ceiling. Each completed receipt commits before
+export is reported current. A failed checkpoint retries the retained in-memory
+result without repeating native verification. Reuse requires the same policy
+and capacity, a verification interval containing the original interval, and
+unchanged identities for every published object and index.
+
+Existing `/1` JSON receipts are read by exact identity and imported individually
+without replay, hashing payloads or modifying the legacy bytes. This reader is
+required while supported installations retain legacy receipts. New receipts use
+the index; older runtimes can still read the retained legacy files but cannot
+reuse new indexed verdicts. Missing or changed output files require native
+repair. Damaged or missing established receipt state and exhausted storage emit
+`publication_receipt_retention` repair diagnostics and keep export pending.
+Restore that exact private state from its retained backup or resolve its storage
+failure before retrying; do not delete completion markers to force replay.
+These records carry no remote authority: replicate the original objects and
+indexes, and let the receiver perform its own native verification.
 Polling completed execution and waiting for missing endpoint evidence do not
 take the job writer lock. Creating execution steps and sealing terminals still
 require exclusive ownership. Export retries include a bounded `last_failure`
