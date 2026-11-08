@@ -67,7 +67,7 @@ class EvidenceServer:
         assert request.method == "GET"
         if self.get_failure is not None:
             return httpx.Response(self.get_failure)
-        if request.headers["if-match"] != headers["ETag"]:
+        if "if-match" in request.headers and request.headers["if-match"] != headers["ETag"]:
             return httpx.Response(412)
         if self.corrupt_get:
             raw = bytes((raw[0] ^ 1,)) + raw[1:]

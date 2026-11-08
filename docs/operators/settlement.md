@@ -1433,6 +1433,15 @@ selection does not alter signed plans, clocks, acceptance rules or native proof
 authority. Select it through each service's existing authenticated configuration
 and upgrade boundary; source tests alone do not qualify a deployed successor.
 
+First-time remote imports obtain metadata and bytes in one bounded GET. The
+reader validates the declared size, ETag, SHA-256 metadata and cache capacity
+before consuming the body, then checks its exact size and content hash before
+retaining the original generation receipt. Missing or interrupted first imports
+retain no success. Established receipts keep their conditional read and explicit
+generation-repair behavior across restart and cache eviction. This transport
+optimization applies to both supported archive schemas and changes no native
+proof verdict, signed input, or operator configuration.
+
 An example selection is:
 
 ```json
