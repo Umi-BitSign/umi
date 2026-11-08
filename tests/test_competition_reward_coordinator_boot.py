@@ -85,6 +85,8 @@ def test_root_selection_and_cli_check_report_no_credentials(config_case, capsys)
         "umi.competition_reward_history_repair",
         "umi.competition_reward_coverage_collector",
         "umi.historical_header_progress",
+        "umi.grandpa_finality_supervisor",
+        "umi.grandpa_finality_frontier",
     ],
 )
 def test_reward_cli_emits_work_progress_once_and_restores_logging(capsys, name):

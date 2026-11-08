@@ -281,8 +281,10 @@ Startup preflight uses the selected bounded budget and samples busy slots under
 the native admission transaction. A competing transaction reports a retry without
 inventing occupied-slot counts. The new host still acquires its own grant before
 allocating; preflight reserves no capacity.
-Reviewer, settlement and supervisor CLI logs include native finality audit counts,
-repair reasons and ETAs. An initial frontier enrollment may precede readiness;
+Reviewer, settlement, reward coordinator and supervisor CLI logs include native
+finality audit counts, repair reasons and ETAs. The reward coordinator CLI emits
+these records for both coordinator and reviewer roles. An initial frontier
+enrollment may precede readiness;
 later starts reuse its retained completion when its dependencies are unchanged.
 Phase-review and settlement hosts honor the operator stop event while waiting
 for a construction lease. They exit without constructing another provider or
