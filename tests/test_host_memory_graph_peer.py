@@ -20,6 +20,12 @@ GIB = 1024**3
 _KERNEL_CGROUP_CHECK = native._require_cgroup2
 
 
+def independent_graph(pool):
+    controller = pool.controller()
+    controller.startup_reservation_bytes = 8 * GIB
+    return controller
+
+
 @pytest.fixture
 def shared(pool, tmp_path, monkeypatch):
     body = pool.policy.model_dump(mode="json", by_alias=True)
@@ -51,8 +57,9 @@ def test_three_graphs_charge_one_service_ceiling_but_models_keep_full_grant(
     model = pool.controller()
     leases = []
     try:
+        controllers = [controller, independent_graph(pool), independent_graph(pool)]
         monkeypatch.setattr(native, "_available_memory", lambda: 13 * GIB)
-        for _ in range(3):
+        for controller in controllers:
             lease = controller.try_acquire("transient")
             assert lease is not None and lease.service_bounded
             leases.append(lease)
@@ -79,7 +86,7 @@ def test_independent_reader_and_startup_probe_share_only_proven_graph_ceiling(
     pool, shared, monkeypatch
 ):
     controller, _ = shared
-    leases = [controller.try_acquire("transient") for _ in range(2)]
+    leases = [c.try_acquire("transient") for c in [controller, independent_graph(pool)]]
     reader = pool.controller()
     try:
         monkeypatch.setattr(startup, "_available_memory", lambda: 21 * GIB)
@@ -116,6 +123,44 @@ def test_retained_settlement_and_transient_graph_share_the_service_cap(pool, sha
         assert reader.last_model_admission["selected_reservation_bytes"] == 8 * GIB
     finally:
         for lease in (model, transient, retained):
+            if lease is not None:
+                lease.close()
+
+
+def test_transient_graph_sharing_preserves_limit_and_frees_two_model_slots(
+    pool, shared, monkeypatch
+):
+    controller, _ = shared
+    reader = pool.controller()
+    graphs, models = [], []
+    try:
+        monkeypatch.setattr(native, "_available_memory", lambda: 13 * GIB)
+        graphs = [controller.try_acquire("transient") for _ in range(3)]
+        assert all(graphs)
+        assert len({lease.slot.name for lease in graphs}) == 1
+        assert controller.last_model_admission["additional_reservation_bytes"] == 0
+        assert controller.try_acquire("transient") is None
+        assert controller.last_model_admission["graph_operation_limit"] is True
+        # Two full model grants fit beside the one graph ceiling. Sharing does
+        # not authorize an extra graph operation or borrow model capacity.
+        monkeypatch.setattr(native, "_available_memory", lambda: 29 * GIB)
+        models = [reader.try_acquire_group("transient", 1) for _ in range(2)]
+        assert all(models)
+        assert all(not lease.service_bounded for lease in models)
+        assert reader.last_model_admission["required_available_bytes"] == 29 * GIB
+        assert reader.try_acquire_group("transient", 1) is None
+        graphs[0].close()
+        assert reader.try_acquire_group("transient", 1) is None
+        replacement = controller.try_acquire("transient")
+        assert replacement is not None and replacement.slot == graphs[1].slot
+        graphs.append(replacement)
+        for lease in graphs:
+            lease.close()
+        third = reader.try_acquire_group("transient", 1)
+        assert third is not None and not third.service_bounded
+        models.append(third)
+    finally:
+        for lease in [*graphs, *models]:
             if lease is not None:
                 lease.close()
 
@@ -259,7 +304,7 @@ def test_unwitnessed_retained_settlement_keeps_its_full_charge(pool, shared, mon
 @pytest.mark.parametrize("change", ["swap", "enlarged", "moved", "unowned", "marker"])
 def test_changed_or_unverifiable_peer_keeps_full_reservations(pool, shared, monkeypatch, change):
     controller, root = shared
-    leases = [controller.try_acquire("transient") for _ in range(2)]
+    leases = [c.try_acquire("transient") for c in [controller, independent_graph(pool)]]
     reader = pool.controller()
     try:
         if change == "swap":

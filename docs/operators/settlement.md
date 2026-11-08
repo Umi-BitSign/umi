@@ -6107,6 +6107,19 @@ model's allowance. Select this implementation on both settlement roles through
 the supported host source update path. Existing policies and miner/validator
 wire formats remain compatible, including future cohorts using the standing series.
 
+A bounded evaluator also shares one transient reservation among its local graph
+operations. It permits at most as many simultaneous graph operations as the
+policy has transient slots, preserving the previous per-service upper bound.
+Every operation retains the kernel reservation until its own completion; closing
+the first operation cannot release the others. Admission verifies the unchanged
+service cap and witness before each borrow. With three transient slots, up to
+three graph operations occupy one slot and leave two for full model grants.
+The third model slot becomes available when all graph operations drain.
+`shared_graph_slot`, `shared_graph_lane` and `graph_operation_limit` distinguish
+sharing from a local concurrency wait. Select the updated evaluator through its
+supported source handoff. Existing readers continue to charge the held slot;
+signed model allowances, CPU resources and wire formats are unchanged.
+
 
 ### Retained request owner repair diagnostics
 

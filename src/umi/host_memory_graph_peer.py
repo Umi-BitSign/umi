@@ -107,8 +107,19 @@ def own_binding(controller, slot):
         return None
 
 
-def share_retained(controller, parent):
-    """Keep an already admitted settlement ceiling alive for local graph work.
+def transient_graph_count(controller):
+    """Count live local graph operations, including borrowed descriptors."""
+    return sum(
+        not lease.closed
+        and lease._creator_pid == os.getpid()
+        and lease.slot.lane == "transient"
+        and lease._graph_binding is not None
+        for lease in tuple(controller._model_leases)
+    )
+
+
+def share_graph(controller, parent):
+    """Keep an already admitted service ceiling alive for local graph work.
 
     Each operation owns duplicated descriptors, including the cohort marker
     and settlement gate. The kernel releases capacity only after the final
@@ -122,7 +133,7 @@ def share_retained(controller, parent):
         if (
             owner.closed
             or owner._creator_pid != os.getpid()
-            or owner.slot.lane != "settlement_retained"
+            or owner.slot.lane not in {"settlement_retained", "transient"}
             or not owner.service_bounded
             or owner._graph_binding is None
         ):
@@ -152,10 +163,13 @@ def share_retained(controller, parent):
             lease.service_bounded = True
             controller._model_leases.add(lease)
             controller.last_model_admission = dict(
-                shared_retained_graph_slot=owner.slot.name,
+                shared_graph_slot=owner.slot.name,
+                shared_graph_lane=owner.slot.lane,
                 shared_service_ceiling_bytes=lease._graph_binding[1],
                 additional_reservation_bytes=0,
             )
+            if owner.slot.lane == "settlement_retained":
+                controller.last_model_admission["shared_retained_graph_slot"] = owner.slot.name
             return lease
         finally:
             close(binding)

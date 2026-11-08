@@ -915,7 +915,17 @@ class HostMemoryAdmission:
             if transaction is None:
                 return None
             if lane == "transient":
-                lease = host_memory_graph_peer.share_retained(self, parent)
+                # Sharing a service cap must not expand the historical maximum
+                # number of simultaneous transient graph operations per owner.
+                if host_memory_graph_peer.transient_graph_count(self) >= sum(
+                    slot.lane == "transient" for slot in self.policy.slots
+                ):
+                    self.last_model_admission = dict(
+                        graph_operation_limit=True,
+                        additional_reservation_bytes=0,
+                    )
+                    return None
+                lease = host_memory_graph_peer.share_graph(self, parent)
                 if lease is not None:
                     return lease
             for slot in self.policy.slots:
