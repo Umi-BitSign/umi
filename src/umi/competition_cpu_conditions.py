@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
+from contextlib import suppress
 from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
@@ -182,6 +185,24 @@ def validate_conditions(evidence, timing):
     # Own OOM, faults and quota contention remain model costs.
     for field in ("external_memory_full_us", "external_io_full_us"):
         if changes[field] * 10_000 > duration * limits.maximum_external_pressure_bps:
+            # Failed timing has no accepted evidence record. Retain the exact
+            # numeric rejection basis without weakening or retrying validation.
+            with suppress(Exception):
+                logging.getLogger("umi.competition.progress").warning(
+                    json.dumps(
+                        dict(
+                            schema="umi-cpu-pressure-rejection/1",
+                            reason_code="cpu_condition_external_pressure",
+                            invocation_sha256=evidence.invocation_sha256,
+                            pressure_field=field,
+                            duration_us=duration,
+                            maximum_external_pressure_bps=limits.maximum_external_pressure_bps,
+                            pressure_changes=changes,
+                            certification_authority=False,
+                        ),
+                        separators=(",", ":"),
+                    )
+                )
             _fail("cpu_condition_external_pressure")
     return changes
 

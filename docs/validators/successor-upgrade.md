@@ -264,6 +264,19 @@ graph grant cannot be rebound to a model container. Drain owned work before
 changing a service limit or moving workers outside its cgroup. Carry the source
 update through the existing validator host maintenance path; miners need no
 submission or signed-input migration.
+A job whose models are already materialized and bound in the current process can
+pin those files and enter execution while another model download owns the disk
+allocation mutex. This path allocates no model bytes and preserves the selected
+pair limit and exclusive-owner holds. It still acquires the ordinary invocation
+memory and CPU grants. Missing bindings, a restart, or a missing model directory
+use the existing allocation and restoration path. This scheduler update uses the
+same validator source-maintenance path; miner inputs and verification receipts
+need no migration. Observe accepted cases and timing-pressure retries after
+adoption, since more overlapping containers alone do not prove higher throughput.
+`umi-cpu-pressure-rejection/1` reports the failed pressure field, measured interval,
+exact counter deltas and the unchanged signed threshold. It is diagnostic evidence;
+a rejected timing still requires a valid retry and cannot become a neutral score.
+
 Startup preflight uses the selected bounded budget and samples busy slots under
 the native admission transaction. A competing transaction reports a retry without
 inventing occupied-slot counts. The new host still acquires its own grant before

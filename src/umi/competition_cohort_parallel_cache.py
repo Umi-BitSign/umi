@@ -101,6 +101,23 @@ class ParallelModelCache:
         with suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self.condition.wait(), self.capacity_poll_seconds)
 
+    def _resident_path(self, plan):
+        return next(
+            (
+                path
+                for path in self.slots
+                if self.assigned.get(path) == plan.identity
+                and self.port.slot_identities.get(path) == plan.identity
+                and (path / digest(plan.bundle)).is_dir()
+            ),
+            None,
+        )
+
+    def _resident_plans(self, plans):
+        # Only this process's completed materializations qualify. The pair
+        # condition protects selection until its pins prevent eviction.
+        return all(self._resident_path(plan) is not None for plan in plans.values() if plan)
+
     @asynccontextmanager
     async def scope(
         self,
@@ -142,7 +159,9 @@ class ParallelModelCache:
                 plans = {role: plans[role] for role in remaining}
                 sizes = {p.identity: sizes[p.identity] for p in plans.values() if p}
         async with self._reserve_pair(job, plans, budget, sizes) as exclusive:
-            if not exclusive:
+            async with self.condition:
+                resident = self._resident_plans(plans)
+            if not exclusive and not resident:
                 async with self.admission.hold(job.runtime, preparation=True, **runtime_options):
                     selected = []
                     async with self.condition:
@@ -155,6 +174,19 @@ class ParallelModelCache:
 
     async def _selection(self, plans, budget, sizes):
         """Select a mode without holding scarce inference/preparation slots."""
+        if not self.exclusive and self._resident_plans(plans):
+            models = self._models(plans)
+            if (
+                len(self.pairs) < self.concurrency
+                and len(models) <= len(self.slots)
+                and sum(budget.model_bytes(bundle) for bundle in models.values())
+                <= budget.maximum_bytes
+            ):
+                # No transfer, eviction, or allocation follows this decision.
+                # Existing bytes already coexist with the allocator's working
+                # set. Pin them under the same condition; the invocation still
+                # acquires its normal memory and exclusive CPU leases.
+                return False, None, {"admission_basis": "resident_models_without_allocation"}
         capacity = await self._resident_capacity(budget)
         counts = dict(
             resident_capacity_bytes=capacity,
@@ -345,12 +377,8 @@ class ParallelModelCache:
         # Resident reads never join the global transfer lane. An unrelated
         # model download must not postpone a ready invocation or its release.
         async with self.condition:
-            path = next((p for p in self.slots if self.assigned.get(p) == plan.identity), None)
-            if (
-                path is not None
-                and self.port.slot_identities.get(path) == plan.identity
-                and (path / digest(plan.bundle)).is_dir()
-            ):
+            path = self._resident_path(plan)
+            if path is not None:
                 self.readers[path] += 1
                 return path
         runtime_options = (

@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from anyio import fail_after
 
 from umi.competition_cohort_execution_journal import IncumbentSourcePending
 from umi.competition_cohort_parallel_cache import ModelPlan, ParallelModelCache
@@ -631,6 +632,66 @@ async def test_cancelled_transfer_keeps_other_pairs_readable(cache):
         finally:
             s.block.set()
             await s.helper.release(path)
+
+
+async def test_resident_job_runs_while_other_transfer_owns_disk_and_preparation(cache):
+    s, job = cache, Job(name="a")
+    async with s.helper.scope(job):
+        pass
+    calls = list(s.calls)
+    with s.helper.budget().allocation_lease(), fail_after(2):
+        async with s.admission.prepare:
+            async with s.helper.scope(job):
+                plan = s.helper.plan(job, "candidate")
+                path = await s.helper.acquire(plan, job.runtime)
+                try:
+                    async with s.admission.hold(job.runtime):
+                        assert s.admission.active == 1
+                        assert s.helper.readers[path] == 1
+                        assert s.helper.pins[plan.identity] == 1
+                        assert s.calls == calls
+                finally:
+                    await s.helper.release(path)
+    assert not s.helper.pairs and not any(s.helper.pins.values())
+
+
+@pytest.mark.parametrize("missing", ["identity", "assignment", "directory"])
+async def test_resident_job_needs_current_completed_local_binding(cache, missing):
+    s, job = cache, Job(name="a")
+    async with s.helper.scope(job):
+        plan = s.helper.plan(job, "candidate")
+        path = s.helper._resident_path(plan)
+    if missing == "identity":
+        s.port.slot_identities.pop(path)
+    elif missing == "assignment":
+        s.helper.assigned.pop(path)
+    else:
+        shutil.rmtree(path / digest(plan.bundle))
+    with s.helper.budget().allocation_lease(), pytest.raises(TimeoutError), fail_after(0.05):
+        async with s.helper.scope(job):
+            pytest.fail("incomplete residency cannot bypass allocation admission")
+    assert not s.helper.pairs and not any(s.helper.pins.values())
+
+
+async def test_resident_jobs_keep_pair_limit_and_exclusive_owner(cache):
+    s = cache
+    first, second = Job(name="a"), Job(name="a", runtime="another-job")
+    async with s.helper.scope(first):
+        pass
+    with s.helper.budget().allocation_lease():
+        s.helper.exclusive = True
+        with pytest.raises(TimeoutError), fail_after(0.05):
+            async with s.helper.scope(first):
+                pytest.fail("resident job cannot bypass an exclusive pair")
+        s.helper.exclusive = False
+        s.helper.concurrency = 1
+        with fail_after(2):
+            async with s.helper.scope(first):
+                with pytest.raises(TimeoutError), fail_after(0.05):
+                    async with s.helper.scope(second):
+                        pytest.fail("resident jobs must keep the selected pair limit")
+                assert len(s.helper.pairs) == 1
+    assert not s.helper.pairs and not any(s.helper.pins.values())
 
 
 async def test_real_admission_prepares_two_pairs_then_runs_with_2034_gib(
