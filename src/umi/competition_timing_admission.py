@@ -9,7 +9,9 @@ import json
 import logging
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from .competition_transport_verification import TransferProgress
 from .concurrency import await_owned_task
@@ -19,6 +21,15 @@ _LOG = logging.getLogger("umi.competition.progress")
 
 class TimingAdmissionTimeout(OSError):
     """No native attempt started before the local admission allowance expired."""
+
+
+@dataclass(frozen=True)
+class TimingTurn:
+    release: Callable[[], Awaitable[None]]
+    waited: bool
+
+    async def __call__(self):
+        await self.release()
 
 
 class TimingAttemptAdmission:
@@ -48,7 +59,8 @@ class TimingAttemptAdmission:
                         return not self.active and self.waiters[0] is ticket
                     return not self.waiters
 
-                if not ready():
+                waited = not ready()
+                if waited:
                     loop = asyncio.get_running_loop()
                     deadline = loop.time() + timeout
 
@@ -93,6 +105,7 @@ class TimingAttemptAdmission:
                         progress.advance(1)
                 self.active += 1
                 self.quiet = quiet
+                return waited
             finally:
                 if quiet:
                     self.waiters.remove(ticket)
@@ -100,7 +113,7 @@ class TimingAttemptAdmission:
 
     @asynccontextmanager
     async def attempt(self, *, quiet, timeout):
-        await self._acquire(quiet, max(0.0, timeout))
+        waited = await self._acquire(quiet, max(0.0, timeout))
         started = self.clock()
         released = False
 
@@ -120,7 +133,7 @@ class TimingAttemptAdmission:
         try:
             # The executor can release after the native sandbox has drained;
             # journal persistence and final authority checks need no quiet turn.
-            yield release
+            yield TimingTurn(release, waited)
         finally:
             await release()
 

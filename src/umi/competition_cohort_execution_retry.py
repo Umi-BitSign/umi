@@ -8,7 +8,7 @@ failure to ordinary scheduling without accepting unusable timing.
 
 import asyncio
 import sqlite3
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 
@@ -29,6 +29,7 @@ class _ResidentRetry:
 
 _RESIDENT_RETRY = ContextVar("cohort_resident_execution_retry", default=None)
 _TIMING_RELEASE = ContextVar("cohort_resident_timing_release", default=None)
+_TIMING_PENDING = ContextVar("cohort_resident_timing_pending", default=None)
 # Default transient recovery is two minutes. Timing retries may need an observed
 # sibling step plus headroom to drain the queue. Their measured allowance remains
 # bounded by the configured read budget and never cancels owned execution.
@@ -49,6 +50,29 @@ async def release_resident_timing():
         await release()
 
 
+@asynccontextmanager
+async def resident_timing_turn():
+    """Acquire the pending turn only when native attempt creation is ready."""
+    pending = _TIMING_PENDING.get()
+    if pending is None:
+        yield False
+        return
+    admission, quiet, timeout, deadline = pending
+    if deadline is not None:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimingAdmissionTimeout("resident_timing_preparation_allowance_expired")
+        timeout = min(timeout, remaining)
+    async with admission.attempt(quiet=quiet, timeout=timeout) as release:
+        token = _TIMING_RELEASE.set(release)
+        consumed = _TIMING_PENDING.set(None)
+        try:
+            yield getattr(release, "waited", True)
+        finally:
+            _TIMING_PENDING.reset(consumed)
+            _TIMING_RELEASE.reset(token)
+
+
 @contextmanager
 def resident_execution_retries(slot, timeout):
     token = _RESIDENT_RETRY.set(
@@ -60,13 +84,15 @@ def resident_execution_retries(slot, timeout):
         _RESIDENT_RETRY.reset(token)
 
 
-async def retry_resident_timing(operation, *, admission=None):
+async def retry_resident_timing(operation, *, admission=None, defer_admission=False):
     """Keep residency for a bounded retry of rejected external-pressure timing.
 
     The operation must be ordinary executor.advance, not sandbox.invoke: every
     retry reconciles the old attempt, reads fresh authority and creates a new
     native attempt. No failed result or timing evidence is reused. This never
     cancels an owned invocation when its recovery allowance expires.
+    Executors can defer the turn until immediately before native attempt
+    creation; completed results and authority preparation consume no turn.
     """
     state = _RESIDENT_RETRY.get()
     if state is None:
@@ -86,12 +112,21 @@ async def retry_resident_timing(operation, *, admission=None):
                 if started is None
                 else max(0.0, allowance - (asyncio.get_running_loop().time() - started))
             )
-            async with admission.attempt(quiet=failures > 0, timeout=remaining) as release:
-                token = _TIMING_RELEASE.set(release)
-                try:
+            token = _TIMING_PENDING.set(
+                (
+                    admission,
+                    failures > 0,
+                    remaining,
+                    None if started is None else started + allowance,
+                )
+            )
+            try:
+                if defer_admission:
                     return await operation()
-                finally:
-                    _TIMING_RELEASE.reset(token)
+                async with resident_timing_turn():
+                    return await operation()
+            finally:
+                _TIMING_PENDING.reset(token)
         except TimingAdmissionTimeout:
             # The rejected attempt remains the failure authority. Waiting
             # for siblings never fabricates another failed native attempt.

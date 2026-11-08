@@ -29,6 +29,7 @@ from .competition_cohort_execution_retry import (
     ResidentTimingPressure,
     release_resident_timing,
     resident_execution_retries,
+    resident_timing_turn,
     retry_resident_operation,
     retry_resident_timing,
 )
@@ -352,7 +353,9 @@ class CohortExecutor(CohortExecutionAuthority):
                 # finite scheduling batch, not a new deadline or protocol gate.
                 for _ in range(total - restored + 1):
                     result = await retry_resident_timing(
-                        lambda: self.advance(assignment), admission=self.timing_admission
+                        lambda: self.advance(assignment),
+                        admission=self.timing_admission,
+                        defer_admission=True,
                     )
                     completed = await self._journal_progress(
                         job, self.journal.checkpoint_count, job
@@ -447,49 +450,56 @@ class CohortExecutor(CohortExecutionAuthority):
                     )
                     await self._journal_progress(job, self.journal.stopped, attempt)
                     source, started = await self.current(assignment)
-                # A contended transaction rolls back before publishing its
-                # attempt. Retry the exact native reservation while resident;
-                # begin rechecks heads/holds and reuses any retained reservation.
-                # No sandbox invocation exists yet, and exhaustion still returns
-                # the failure to ordinary scheduling.
-                attempt = await retry_resident_operation(
-                    lambda: self._journal_progress(
-                        job, self.journal.begin, job, index, source, started
-                    )
-                )
-
-                async def invoke_and_retain():
-                    try:
-                        result = await await_progress(
-                            self.sandbox.invoke(job, attempt),
-                            stage="execution_sandbox",
-                            cohort=job.round.cohort_sha256,
+                async with resident_timing_turn() as waited:
+                    if waited:
+                        # Queueing can change authority after preparation. The
+                        # native attempt still uses a fresh authenticated view.
+                        source, started = await self.current(assignment)
+                    # A contended transaction rolls back before publishing its
+                    # attempt. Retry the exact native reservation while resident;
+                    # begin rechecks heads/holds and reuses any retained reservation.
+                    # No sandbox invocation exists yet, and exhaustion still returns
+                    # the failure to ordinary scheduling.
+                    attempt = await retry_resident_operation(
+                        lambda: self._journal_progress(
+                            job, self.journal.begin, job, index, source, started
                         )
-                    except CpuTimingInfrastructureError as error:
-                        if error.reason_code == "cpu_condition_external_pressure":
-                            raise ResidentTimingPressure() from error
-                        raise
+                    )
 
-                    async def retain_result():
+                    async def invoke_and_retain():
                         try:
-                            # invoke has drained native cleanup and timing checks.
-                            await release_resident_timing()
-                        finally:
-                            await retry_resident_operation(
-                                lambda: self._journal_progress(
-                                    job, self.journal.observe, job, attempt, result
-                                )
+                            result = await await_progress(
+                                self.sandbox.invoke(job, attempt),
+                                stage="execution_sandbox",
+                                cohort=job.round.cohort_sha256,
                             )
+                        except CpuTimingInfrastructureError as error:
+                            if error.reason_code == "cpu_condition_external_pressure":
+                                raise ResidentTimingPressure() from error
+                            raise
 
-                    # Drain the owned persistence attempt before cancellation
-                    # releases the job lock; recovery reuses the exact result,
-                    # exhaustion preserves the existing failure path.
-                    await await_owned_task(asyncio.create_task(retain_result()))
+                        async def retain_result():
+                            try:
+                                # invoke has drained native cleanup and timing checks.
+                                await release_resident_timing()
+                            finally:
+                                await retry_resident_operation(
+                                    lambda: self._journal_progress(
+                                        job, self.journal.observe, job, attempt, result
+                                    )
+                                )
 
-                # Restoration and shared cache queues precede inference. Give
-                # them the configured read budget without consuming the signed
-                # inference limit, which the sandbox enforces independently.
-                await wait_for_owned(invoke_and_retain(), timeout=job_policy_timeout(self.journal))
+                        # Drain the owned persistence attempt before cancellation
+                        # releases the job lock; recovery reuses the exact result,
+                        # exhaustion preserves the existing failure path.
+                        await await_owned_task(asyncio.create_task(retain_result()))
+
+                    # Restoration and shared cache queues precede inference. Give
+                    # them the configured read budget without consuming the signed
+                    # inference limit, which the sandbox enforces independently.
+                    await wait_for_owned(
+                        invoke_and_retain(), timeout=job_policy_timeout(self.journal)
+                    )
             _, finished = await self.current(assignment)
             await self._journal_progress(job, self.journal.finish, job, attempt, finished)
             return await self._journal_progress(job, self.journal.evidence, slot)

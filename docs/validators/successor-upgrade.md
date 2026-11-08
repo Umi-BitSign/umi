@@ -301,8 +301,11 @@ Ordinary jobs waiting behind recovery retain their configured read allowance;
 they have not failed and do not use a rejected attempt's shorter budget. If an
 admission allowance expires, no new attempt is recorded. `timing_attempt_admission`
 reports the wait and its expiry through the standard competition progress logger enabled by
-the reviewer CLI. The gate covers the ordinary fresh-authority step and stays
-held until its owned invocation drains. It releases before result persistence,
+the reviewer CLI. Authority preparation and completed-result reuse do not occupy
+a timing turn. Acquire the turn immediately before recording the native attempt;
+if admission queued, refresh authenticated authority before recording or invoking
+anything. Failed-retry preparation spends the existing recovery allowance.
+The turn stays held until its owned invocation drains. It releases before result persistence,
 final authority observation and evidence assembly, so those operations can
 overlap the next timing turn. The exact result remains owned until persistence
 finishes, including cancellation during gate release; retries do not repeat

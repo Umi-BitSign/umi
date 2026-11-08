@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import sqlite3
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
 
 import httpx
@@ -204,6 +204,105 @@ async def test_history_recovers_after_sandbox_result_without_inference_repeat(
     assert len(h.e.calls) == step_count(h.e.job) and not h.e.stops
     assert h.scope.entered == h.scope.released == 1
     assert clock.sleeps == [1]
+
+
+async def test_authority_preparation_does_not_occupy_a_timing_turn(resident, monkeypatch):
+    h = resident
+    original = h.executor.current
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def current(assignment):
+        if h.scope.active and not h.e.calls:
+            entered.set()
+            await release.wait()
+        return await original(assignment)
+
+    monkeypatch.setattr(h.executor, "current", current)
+    task = asyncio.create_task(h.executor.advance_batch(h.e.assignment))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        assert h.executor.timing_admission.active == 0
+        async with h.executor.timing_admission.attempt(quiet=True, timeout=0):
+            assert not h.e.calls
+        release.set()
+        assert await asyncio.wait_for(task, 10) is not None
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert h.scope.entered == h.scope.released == 1
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_deferred_queue_has_no_attempt_and_refreshes_authority(resident, monkeypatch, cancel):
+    h = resident
+    original = h.executor.current
+    queued = asyncio.Event()
+    revoked = False
+
+    async def current(assignment):
+        if revoked:
+            raise ValueError("authority changed while waiting for timing")
+        return await original(assignment)
+
+    monkeypatch.setattr(h.executor, "current", current)
+    gate = h.executor.timing_admission
+    acquire = gate._acquire
+
+    async def acquire_observed(quiet, timeout):
+        if not quiet and gate.quiet:
+            queued.set()
+        return await acquire(quiet, timeout)
+
+    monkeypatch.setattr(gate, "_acquire", acquire_observed)
+    async with gate.attempt(quiet=True, timeout=0):
+        task = asyncio.create_task(h.executor.advance_batch(h.e.assignment))
+        try:
+            await asyncio.wait_for(queued.wait(), 10)
+            # A blocked timing waiter must not create a native attempt.
+            assert h.executor.journal.head(h.e.job, 0) is None
+            assert not h.e.calls and gate.active == 1
+            revoked = True
+            if cancel:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+        except BaseException:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+    if not cancel:
+        with pytest.raises(ValueError, match="authority changed while waiting"):
+            await asyncio.wait_for(task, 10)
+    assert not h.e.calls and not h.scope.active and gate.active == 0
+    assert h.executor.journal.head(h.e.job, 0) is None
+
+
+@pytest.mark.parametrize("occupied", [False, True])
+async def test_preparation_spends_failed_retry_allowance_before_deferred_admission(clock, occupied):
+    from umi.competition_timing_admission import TimingAttemptAdmission
+
+    gate = TimingAttemptAdmission(clock=lambda: clock.now)
+    error = retry.ResidentTimingPressure()
+    calls = 0
+
+    async def operation():
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            clock.now += 100
+        async with retry.resident_timing_turn():
+            raise error
+
+    # Preparation consumes the allowance. Even an immediately available turn
+    # cannot start a new invocation after the failed retry's allowance expires.
+    async with gate.attempt(quiet=False, timeout=0) if occupied else nullcontext():
+        with retry.resident_execution_retries("ab" * 32, 12), pytest.raises(type(error)) as raised:
+            await retry.retry_resident_timing(operation, admission=gate, defer_admission=True)
+        assert raised.value is error and gate.active == int(occupied) and not gate.quiet
+    assert calls == 2 and gate.active == 0
+    assert clock.sleeps == [5]
 
 
 async def test_result_persistence_retries_exact_result_inside_resident_scope(
