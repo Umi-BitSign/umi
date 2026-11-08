@@ -7,6 +7,7 @@ files are created or changed. The witness and held file descriptor die with the
 native lease. Only bounded native graph grants publish this witness.
 """
 
+import fcntl
 import os
 import stat
 from pathlib import Path
@@ -107,18 +108,29 @@ def own_binding(controller, slot):
         return None
 
 
-def transient_graph_count(controller):
-    """Count live local graph operations, including borrowed descriptors."""
-    return sum(
-        not lease.closed
-        and lease._creator_pid == os.getpid()
-        and lease.slot.lane == "transient"
-        and lease._graph_binding is not None
-        for lease in tuple(controller._model_leases)
-    )
+def operation_token(controller, parent):
+    """Bound shared graph operations across controllers and processes.
+
+    The caller holds the native transaction while checking/setting a read OFD
+    marker. Bytes zero and one remain the existing export/model demand markers.
+    This token reserves concurrency only; every first graph still needs memory.
+    """
+    descriptor = controller._open_slot(parent, controller.policy.transaction_lock)
+    try:
+        count = sum(slot.lane == "transient" for slot in controller.policy.slots)
+        for offset in range(2, 2 + count):
+            row = host_memory_peer._command(descriptor, "F_OFD_GETLK", fcntl.F_WRLCK, offset, 1)
+            if row.type == fcntl.F_UNLCK:
+                host_memory_peer._command(descriptor, "F_OFD_SETLK", fcntl.F_RDLCK, offset, 1)
+                result, descriptor = descriptor, None
+                return result
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
-def share_graph(controller, parent):
+def share_graph(controller, parent, *, retained):
     """Keep an already admitted service ceiling alive for local graph work.
 
     Each operation owns duplicated descriptors, including the cohort marker
@@ -133,7 +145,7 @@ def share_graph(controller, parent):
         if (
             owner.closed
             or owner._creator_pid != os.getpid()
-            or owner.slot.lane not in {"settlement_retained", "transient"}
+            or owner.slot.lane != ("settlement_retained" if retained else "transient")
             or not owner.service_bounded
             or owner._graph_binding is None
         ):
@@ -209,7 +221,7 @@ def _lock_owners():
     return result
 
 
-def discount(controller, parent, busy, *, selected=None, selected_bytes=0):
+def discount(controller, parent, busy, *, selected=None, selected_bytes=0, residency=None):
     """Return only duplicate graph charges proven under one kernel hard cap.
 
     No resident pages are credited. Missing/incompatible markers and old hosts
@@ -246,6 +258,8 @@ def discount(controller, parent, busy, *, selected=None, selected_bytes=0):
             # budget were already rejected by _open_group.
             group[0] = max(group[0], binding[1])
             group[1] += slot.reservation_bytes
+            if residency is not None and slot.reservation_bytes >= binding[1]:
+                residency.offer(binding[3], binding[1], descriptor, witness)
         except (OSError, ValueError):
             continue
         finally:

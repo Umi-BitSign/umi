@@ -790,7 +790,7 @@ def test_parallel_joint_keeps_orphan_stop_even_with_another_free_slot(parallel_j
 
     original_scan = controller._model_container_reservations
 
-    def retained_orphan(busy):
+    def retained_orphan(busy, *, residency=None):
         assert not busy
         controller.last_model_admission = dict(populated_containers=1)
         return 8 * GIB

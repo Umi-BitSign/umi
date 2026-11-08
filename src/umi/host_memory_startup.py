@@ -23,6 +23,7 @@ from .host_memory_admission import (
     _open_cgroup_directory,
     _require_cgroup2,
 )
+from .host_memory_residency import ResidentBudget
 
 _active = ContextVar("host_startup_reservation", default=None)
 
@@ -165,6 +166,7 @@ def probe_startup_reservation(controller):
     root = controller._open_root()
     transaction = None
     busy = set()
+    residency = ResidentBudget(controller.peer_execution_stage)
     pending = max(s.reservation_bytes for s in controller.policy.slots if s.lane == "transient")
     if controller.peer_execution_stage and controller.startup_reservation_bytes is not None:
         pending = min(pending, controller.startup_reservation_bytes)
@@ -195,19 +197,23 @@ def probe_startup_reservation(controller):
                     busy.add((slot.device, slot.inode))
             finally:
                 os.close(descriptor)
-        graph_discount = host_memory_graph_peer.discount(controller, root, busy)
+        graph_discount = host_memory_graph_peer.discount(
+            controller, root, busy, residency=residency
+        )
         pending -= graph_discount
-        containers = controller._model_container_reservations(busy)
+        containers = controller._model_container_reservations(busy, residency=residency)
+        available, resident_credit = residency.measure(_available_memory)
     finally:
+        residency.close()
         if transaction is not None:
             os.close(transaction)
         os.close(root)
-    available = _available_memory()
     required = (
         controller.policy.minimum_available_bytes
         + controller.policy.background_reservation_bytes
         + pending
         + containers
+        - resident_credit
     )
     return dict(
         schema="umi-host-memory-startup/1",
@@ -220,6 +226,7 @@ def probe_startup_reservation(controller):
         startup_memory_bytes=controller.startup_reservation_bytes,
         pending_reservation_bytes=pending,
         shared_graph_ceiling_discount_bytes=graph_discount,
+        **residency.observation,
         capacity_reserved=False,
         eta_seconds=0 if available >= required else None,
         eta_basis="startup_reservation_probe_actual_grant_required_before_construction",

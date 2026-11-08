@@ -27,6 +27,7 @@ from pydantic import Field, model_validator
 
 from . import host_memory_graph_peer, host_memory_peer
 from .host_memory_export_wait import export_waiter, yield_to_models
+from .host_memory_residency import ResidentBudget
 from .protocol import StrictProtocolModel
 
 Lane = Literal["owner_export", "transient", "settlement_retained"]
@@ -293,6 +294,7 @@ class HostMemoryLease:
         self._generation = object()
         self._model_container = None
         self._graph_binding = None
+        self._graph_operation = None
         self._peer_witness = False
         self.service_bounded = False
 
@@ -302,6 +304,9 @@ class HostMemoryLease:
 
     def close(self) -> None:
         self.clear_model_container()
+        operation, self._graph_operation = self._graph_operation, None
+        if operation is not None:
+            os.close(operation)
         descriptor, self._descriptor = self._descriptor, None
         if descriptor is not None:
             os.close(descriptor)
@@ -582,6 +587,7 @@ class HostMemoryAdmission:
     ) -> HostMemoryLease | None:
         descriptor = self._open_slot(parent, selected)
         graph_binding = None
+        residency = ResidentBudget(self.peer_execution_stage)
         try:
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -593,10 +599,8 @@ class HostMemoryAdmission:
                 and host_memory_peer.observed_inode(descriptor) is not None
             ):
                 raise AdmissionBindingError("unowned peer witness remains on a free native slot")
-            # Busy operations may not have allocated yet. Charge their full
-            # reservation in addition to current RSS rather than racing grants
-            # against a stale memory sample. Measurements must qualify this
-            # conservative admission envelope, including downstream owner work.
+            # Charge full caps, then credit only stable anonymous pages already
+            # resident inside a witnessed cap. Unallocated capacity stays charged.
             selected_bytes = (
                 self._service_reservation(selected)
                 if service_bounded
@@ -604,6 +608,8 @@ class HostMemoryAdmission:
             )
             if service_bounded:
                 graph_binding = host_memory_graph_peer.own_binding(self, selected)
+                # The candidate has no published witness until admission. Its
+                # existing resident pages therefore receive no credit here.
             pending = selected_bytes
             busy = set()
             for slot in self.policy.slots:
@@ -619,16 +625,22 @@ class HostMemoryAdmission:
                 finally:
                     os.close(other)
             graph_discount = host_memory_graph_peer.discount(
-                self, parent, busy, selected=graph_binding, selected_bytes=selected_bytes
+                self,
+                parent,
+                busy,
+                selected=graph_binding,
+                selected_bytes=selected_bytes,
+                residency=residency,
             )
             pending -= graph_discount
-            containers = self._model_container_reservations(busy)
-            available = _available_memory()
+            containers = self._model_container_reservations(busy, residency=residency)
+            available, resident_credit = residency.measure(_available_memory)
             required = (
                 self.policy.minimum_available_bytes
                 + pending
                 + self.policy.background_reservation_bytes
                 + containers
+                - resident_credit
             )
             if self.model_execution_stage:
                 self.last_model_admission.update(
@@ -642,6 +654,7 @@ class HostMemoryAdmission:
                     selected_slot_reservation_bytes=selected.reservation_bytes,
                     selected_service_bounded=selected_bytes < selected.reservation_bytes,
                     shared_graph_ceiling_discount_bytes=graph_discount,
+                    **residency.observation,
                 )
             if self.joint_execution_stage:
                 # A dead owner releases flock before a surviving rootless
@@ -671,6 +684,7 @@ class HostMemoryAdmission:
             descriptor = None
             return lease
         finally:
+            residency.close()
             host_memory_graph_peer.close(graph_binding)
             if descriptor is not None:
                 os.close(descriptor)
@@ -780,7 +794,7 @@ class HostMemoryAdmission:
             os.close(parent)
         return result
 
-    def _model_container_reservations(self, busy=()) -> int:
+    def _model_container_reservations(self, busy=(), *, residency=None) -> int:
         """Charge every ceiling; credit only a verified busy native lease.
 
         Legacy bindings are local. Joint /2 also recognizes exact kernel OFD
@@ -873,6 +887,18 @@ class HostMemoryAdmission:
                             credit = min(ceiling, slot.reservation_bytes)
                             peer_credit_total += credit
                             peer_credited.add(slot.name)
+                        if residency is not None and credit == ceiling and identity[1] in peers:
+                            parent = self._open_root()
+                            try:
+                                slot_descriptor = self._open_slot(parent, peers[identity[1]])
+                                try:
+                                    residency.offer(
+                                        descriptor, ceiling, slot_descriptor, identity[1]
+                                    )
+                                finally:
+                                    os.close(slot_descriptor)
+                            finally:
+                                os.close(parent)
                         total += ceiling - credit
                         credit_total += credit
                         count += 1
@@ -909,32 +935,37 @@ class HostMemoryAdmission:
         if self.joint_execution_stage:
             self.last_model_admission = None
         parent = self._open_root()
-        transaction = None
+        transaction = graph_operation = None
         try:
             transaction = self._transaction(parent)
             if transaction is None:
                 return None
             if lane == "transient":
-                # Sharing a service cap must not expand the historical maximum
-                # number of simultaneous transient graph operations per owner.
-                if host_memory_graph_peer.transient_graph_count(self) >= sum(
-                    slot.lane == "transient" for slot in self.policy.slots
-                ):
-                    self.last_model_admission = dict(
-                        graph_operation_limit=True,
-                        additional_reservation_bytes=0,
-                    )
-                    return None
-                lease = host_memory_graph_peer.share_graph(self, parent)
+                lease = host_memory_graph_peer.share_graph(self, parent, retained=True)
                 if lease is not None:
+                    return lease
+                if self.peer_execution_stage and self.startup_reservation_bytes is not None:
+                    graph_operation = host_memory_graph_peer.operation_token(self, parent)
+                    if graph_operation is None:
+                        self.last_model_admission = dict(
+                            graph_operation_limit=True,
+                            additional_reservation_bytes=0,
+                        )
+                        return None
+                lease = host_memory_graph_peer.share_graph(self, parent, retained=False)
+                if lease is not None:
+                    lease._graph_operation, graph_operation = graph_operation, None
                     return lease
             for slot in self.policy.slots:
                 if slot.lane == lane:
                     lease = self._reserve(parent, slot, service_bounded=True)
                     if lease is not None:
+                        lease._graph_operation, graph_operation = graph_operation, None
                         return lease
             return None
         finally:
+            if graph_operation is not None:
+                os.close(graph_operation)
             if transaction is not None:
                 os.close(transaction)
             os.close(parent)

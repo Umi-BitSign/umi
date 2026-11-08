@@ -165,6 +165,37 @@ def test_transient_graph_sharing_preserves_limit_and_frees_two_model_slots(
                 lease.close()
 
 
+def test_graph_operation_limit_is_shared_with_independent_process_and_controller(pool, shared):
+    owner, _ = shared
+    reader = independent_graph(pool)
+    graphs = [owner.try_acquire("transient") for _ in range(3)]
+    replacement = None
+    read, write = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.close(read)
+        try:
+            assert reader.try_acquire("transient") is None
+            assert reader.last_model_admission["graph_operation_limit"] is True
+            os.write(write, b"bounded")
+        finally:
+            os._exit(0)
+    os.close(write)
+    try:
+        assert os.read(read, 16) == b"bounded"
+        assert os.waitpid(child, 0)[1] == 0
+        graphs[0].close()
+        # Remaining borrowers do not pin the finished operation's token.
+        replacement = reader.try_acquire("transient")
+        assert replacement is not None
+        assert owner.try_acquire("transient") is None
+    finally:
+        os.close(read)
+        for lease in [*graphs, replacement]:
+            if lease is not None:
+                lease.close()
+
+
 @pytest.mark.parametrize("role", ["coordinator", "reviewer"])
 def test_retained_graph_work_leaves_three_model_slots_and_survives_owner_close(
     pool, shared, monkeypatch, role

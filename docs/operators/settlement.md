@@ -6070,11 +6070,23 @@ capacity probe is advisory; actual construction still requires its own lease.
 
 Each serialized grant rechecks
 current available memory against the floor, background allowance, candidate
-reservation and the full reservations of all occupied slots. This deliberately
-charges occupied work again even when it is already resident. Qualification must
-therefore include this conservative envelope, retained allocator memory, all
-configured concurrent consumers and downstream owner work. A policy fitting only
-the sum of isolated peaks can block its own dependencies. Verify startup, steady
+reservation and the remaining growth of occupied slots. For a witnessed busy
+cgroup whose entire hard ceiling is charged, admission brackets the host sample
+with anonymous-memory and fault-counter observations. Unchanged observations
+under the same cap, zero swap and live witness can credit already resident
+anonymous pages. File cache and kernel memory receive no credit. Lifetime
+`pglazyfree` pages are also excluded because `MADV_FREE` can make anonymous pages
+reclaimable. Sampling slack remains charged: at least 1/16 of observed eligible
+anonymous bytes and four 64-page accounting batches per configured CPU. This is
+additional headroom to the unchanged host floor and background allowance.
+Changed or missing metadata, allocation/fault churn, exited owners and overlapping
+cgroups retain the full charge. No previous measurement is reused. Unallocated
+growth up to each full hard cap stays reserved. Older readers retain the previous
+full-cap charge; no policy or signed wire migration is required. Admission logs
+expose observed anonymous bytes, credited bytes, sampling slack, accepted/rejected
+groups and zero cache credit. Startup probes use the same accounting.
+Qualification must include retained allocator memory, configured concurrent
+consumers and downstream owner work. Verify startup, steady
 state, replica restart and recovery under the actual account/mount/cgroup limits
 before cutover; do not infer these bounds from aggregate file sizes alone.
 
@@ -6108,15 +6120,18 @@ the supported host source update path. Existing policies and miner/validator
 wire formats remain compatible, including future cohorts using the standing series.
 
 A bounded evaluator also shares one transient reservation among its local graph
-operations. It permits at most as many simultaneous graph operations as the
-policy has transient slots, preserving the previous per-service upper bound.
+operations. Kernel-lived operation tokens on separate bytes of the transaction
+file permit at most as many shared transient graph operations as the policy has
+transient slots, across selected controllers and processes. Retained settlement
+operations preserve their existing separate path. Tokens reserve concurrency;
+the first graph still needs its ordinary memory grant.
 Every operation retains the kernel reservation until its own completion; closing
 the first operation cannot release the others. Admission verifies the unchanged
 service cap and witness before each borrow. With three transient slots, up to
 three graph operations occupy one slot and leave two for full model grants.
 The third model slot becomes available when all graph operations drain.
 `shared_graph_slot`, `shared_graph_lane` and `graph_operation_limit` distinguish
-sharing from a local concurrency wait. Select the updated evaluator through its
+sharing from a concurrency wait. Select the updated evaluator through its
 supported source handoff. Existing readers continue to charge the held slot;
 signed model allowances, CPU resources and wire formats are unchanged.
 
