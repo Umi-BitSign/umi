@@ -45,6 +45,7 @@ from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_progress import report_execution_retry
 from .competition_round_journal import FinalizedHeadRegression
 from .competition_runner import OfflineCaseExecution
+from .competition_timing_admission import TimingAttemptAdmission
 from .competition_transport_verification import TransferProgress
 from .competition_verification_reuse import VerificationReuse
 from .competition_work_progress import await_progress, review_scope
@@ -211,6 +212,7 @@ class CohortExecutor(CohortExecutionAuthority):
     ):
         super().__init__(journal, provider, history)
         self.sandbox = sandbox
+        self.timing_admission = TimingAttemptAdmission()
 
     async def _journal_progress(self, assignment, operation, *args):
         cohort = (
@@ -348,7 +350,9 @@ class CohortExecutor(CohortExecutionAuthority):
                 # iteration covers an already-complete retained job; this is a
                 # finite scheduling batch, not a new deadline or protocol gate.
                 for _ in range(total - restored + 1):
-                    result = await retry_resident_timing(lambda: self.advance(assignment))
+                    result = await retry_resident_timing(
+                        lambda: self.advance(assignment), admission=self.timing_admission
+                    )
                     completed = await self._journal_progress(
                         job, self.journal.checkpoint_count, job
                     )

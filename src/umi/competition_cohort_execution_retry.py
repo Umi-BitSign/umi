@@ -16,6 +16,7 @@ import httpx
 
 from .competition_cpu_timing import CpuTimingInfrastructureError
 from .competition_progress import report_execution_retry
+from .competition_timing_admission import TimingAdmissionTimeout
 from .sqlite_contention import is_sqlite_contention
 
 
@@ -48,7 +49,7 @@ def resident_execution_retries(slot, timeout):
         _RESIDENT_RETRY.reset(token)
 
 
-async def retry_resident_timing(operation):
+async def retry_resident_timing(operation, *, admission=None):
     """Keep residency for a bounded retry of rejected external-pressure timing.
 
     The operation must be ordinary executor.advance, not sandbox.invoke: every
@@ -61,10 +62,26 @@ async def retry_resident_timing(operation):
         return await operation()
     started = None
     failures = 0
+    last_error = None
     while True:
         try:
-            return await operation()
+            if admission is None:
+                return await operation()
+            remaining = (
+                state.timeout
+                if started is None
+                else max(0.0, state.timeout - (asyncio.get_running_loop().time() - started))
+            )
+            async with admission.attempt(quiet=failures > 0, timeout=remaining):
+                return await operation()
+        except TimingAdmissionTimeout:
+            # The rejected attempt remains the failure authority. Waiting
+            # for siblings never fabricates another failed native attempt.
+            if last_error is not None:
+                raise last_error from last_error.__cause__
+            raise
         except ResidentTimingPressure as error:
+            last_error = error
             now = asyncio.get_running_loop().time()
             if started is None:
                 started = now

@@ -283,7 +283,16 @@ it does not reuse failed output or timing. Backoff grows from 5 to 30 seconds,
 within the smaller of the configured read allowance and 120 seconds. An owned
 invocation drains normally even if that recovery allowance expires. Exhaustion,
 cancellation and other timing failures release residency through the existing
-scheduler. Deploy through validator source maintenance; miner submissions,
+scheduler. Ordinary attempts may overlap. After a pressure rejection, that
+executor queues the retry behind its running attempts and temporarily admits
+retries one at a time, in queue order, before accepting new ordinary attempts.
+Waiting consumes the same bounded recovery allowance. If it expires before
+admission, no new attempt is recorded. `timing_attempt_admission` reports the
+wait and its expiry. The gate covers the ordinary fresh-authority step and stays
+held until its owned invocation drains. It is local to one executor; other
+processes, downloads and services still require the unchanged host-condition
+checks. Successful retries return subsequent cases to ordinary parallel admission.
+Deploy through validator source maintenance; miner submissions,
 signed clocks, timing limits and retained result readers need no migration.
 
 Startup preflight uses the selected bounded budget and samples busy slots under

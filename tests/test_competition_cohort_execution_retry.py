@@ -393,15 +393,41 @@ async def test_unmarked_pressure_failure_is_not_a_retry(clock):
     assert raised.value is error and not clock.sleeps
 
 
+async def test_pressure_admission_expiry_does_not_fabricate_an_attempt(clock):
+    error = retry.ResidentTimingPressure()
+    calls = 0
+    admissions = []
+
+    class Admission:
+        @asynccontextmanager
+        async def attempt(self, *, quiet, timeout):
+            admissions.append((quiet, timeout))
+            if quiet:
+                raise retry.TimingAdmissionTimeout("timing_admission_allowance_expired")
+            yield
+
+    async def operation():
+        nonlocal calls
+        calls += 1
+        raise error
+
+    with retry.resident_execution_retries("ab" * 32, 12), pytest.raises(type(error)) as raised:
+        await retry.retry_resident_timing(operation, admission=Admission())
+    assert raised.value is error
+    assert calls == 1 and admissions == [(False, 12), (True, 7)]
+
+
 async def test_pressure_retry_reconciles_and_rechecks_with_fresh_attempt(
     resident, clock, monkeypatch
 ):
     h = resident
     original = h.e.port.invoke
     failed = []
+    quiet_attempts = []
 
     async def invoke(job, attempt):
         assert h.scope.active
+        quiet_attempts.append(h.executor.timing_admission.quiet)
         if not failed:
             failed.append(attempt)
             h.e.calls.append(attempt)
@@ -413,6 +439,8 @@ async def test_pressure_retry_reconciles_and_rechecks_with_fresh_attempt(
     assert len(h.e.calls) == step_count(h.e.job) + 1
     assert h.e.stops == failed
     assert h.e.calls[0] != h.e.calls[1]
+    assert quiet_attempts[:2] == [False, True]
+    assert not any(quiet_attempts[2:])
     assert h.executor.journal.result(h.e.job, failed[0]) is None
     assert h.scope.entered == h.scope.released == 1 and clock.sleeps == [5]
 
