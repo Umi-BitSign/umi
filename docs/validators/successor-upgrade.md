@@ -334,6 +334,14 @@ model slot. More benchmark tasks or unused memory slots do not add timed capacit
 Shared-slot graph and inference readers use the same 100 ms capacity retry
 interval. Carry both readers through the supported source update; this scheduling
 change preserves existing policies, resource limits and retained timing evidence.
+When an invocation is waiting, a bounded graph reader stops adding shared owners
+to its currently occupied transient slot. Existing operations finish normally;
+their final owner releases the slot so inference can acquire it. Once the slot
+drains, a fresh graph may compete through ordinary admission even if the waiting
+model cannot fit. Removing model demand resumes sharing immediately. Retained
+settlement and export work keep their independent paths. The admission observer
+reports `awaiting_current_graph_drain_for_model` and the active graph lease count.
+This requires no pool replacement, new reservation or signed-input migration.
 Keep completed baseline observations only when their measurement profile remains
 identical. Qualify simultaneous load, cold-cache isolation and cancellation/orphan
 cleanup under the actual service limits before selecting additional CPU slots.

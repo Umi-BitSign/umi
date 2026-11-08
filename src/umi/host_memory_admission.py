@@ -26,7 +26,7 @@ from typing import Annotated, Literal
 from pydantic import Field, model_validator
 
 from . import host_memory_graph_peer, host_memory_peer
-from .host_memory_export_wait import export_waiter, yield_to_models
+from .host_memory_export_wait import export_waiter, model_waiting, yield_to_models
 from .host_memory_residency import ResidentBudget
 from .protocol import StrictProtocolModel
 
@@ -944,6 +944,18 @@ class HostMemoryAdmission:
                 lease = host_memory_graph_peer.share_graph(self, parent, retained=True)
                 if lease is not None:
                     return lease
+                draining = host_memory_graph_peer.transient_graph_count(self)
+                if draining and model_waiting(self):
+                    # Sharing can keep this slot occupied indefinitely as new
+                    # graph operations replace completed ones. Let its current
+                    # owners drain before admitting more work. Once they drain,
+                    # a fresh graph can still compete if the model cannot fit.
+                    self.last_model_admission = dict(
+                        graph_drain_for_model=True,
+                        active_graph_leases=draining,
+                        additional_reservation_bytes=0,
+                    )
+                    return None
                 if self.peer_execution_stage and self.startup_reservation_bytes is not None:
                     graph_operation = host_memory_graph_peer.operation_token(self, parent)
                     if graph_operation is None:
@@ -1104,6 +1116,8 @@ class HostMemoryAdmission:
                                 eta_basis=(
                                     "capacity_granted"
                                     if lease is not None
+                                    else "awaiting_current_graph_drain_for_model"
+                                    if observation.get("graph_drain_for_model", False)
                                     else "awaiting_native_model_container_cleanup"
                                     if orphan
                                     else "awaiting_shared_execution_capacity"

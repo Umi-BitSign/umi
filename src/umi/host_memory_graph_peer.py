@@ -130,6 +130,20 @@ def operation_token(controller, parent):
             os.close(descriptor)
 
 
+def transient_graph_count(controller):
+    """Count this controller's live shared owners without extending their lives."""
+    if not controller.peer_execution_stage:
+        return 0
+    return sum(
+        not lease.closed
+        and lease._creator_pid == os.getpid()
+        and lease.slot.lane == "transient"
+        and lease.service_bounded
+        and lease._graph_binding is not None
+        for lease in tuple(controller._model_leases)
+    )
+
+
 def share_graph(controller, parent, *, retained):
     """Keep an already admitted service ceiling alive for local graph work.
 
