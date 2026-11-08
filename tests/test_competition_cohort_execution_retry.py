@@ -399,6 +399,9 @@ async def test_pressure_admission_expiry_does_not_fabricate_an_attempt(clock):
     admissions = []
 
     class Admission:
+        def retry_allowance(self, fallback, maximum):
+            return fallback
+
         @asynccontextmanager
         async def attempt(self, *, quiet, timeout):
             admissions.append((quiet, timeout))
@@ -507,3 +510,33 @@ async def test_cancellation_during_pressure_wait_keeps_recoverable_attempt(
     assert h.executor.journal.result(h.e.job, h.e.calls[0]) is None
     with h.executor.journal.locked(h.e.r.slot):
         pass
+
+
+async def test_measured_retry_allowance_is_frozen_and_read_bounded(clock):
+    calls = 0
+    allowances = []
+    waits = []
+
+    class Admission:
+        def retry_allowance(self, fallback, maximum):
+            allowances.append((fallback, maximum))
+            return min(maximum, 200.0)
+
+        @asynccontextmanager
+        async def attempt(self, *, quiet, timeout):
+            waits.append((quiet, timeout))
+            yield
+
+    async def operation():
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            clock.now += 10
+            raise retry.ResidentTimingPressure()
+        return "accepted"
+
+    with retry.resident_execution_retries("ab" * 32, 180):
+        assert await retry.retry_resident_timing(operation, admission=Admission()) == "accepted"
+    assert allowances == [(120, 180)]
+    assert waits == [(False, 120), (True, 175), (True, 155)]
+    assert clock.sleeps == [5, 10]

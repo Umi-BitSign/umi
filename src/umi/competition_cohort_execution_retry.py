@@ -24,12 +24,13 @@ from .sqlite_contention import is_sqlite_contention
 class _ResidentRetry:
     slot: str
     timeout: float
+    read_timeout: float
 
 
 _RESIDENT_RETRY = ContextVar("cohort_resident_execution_retry", default=None)
-# Brief owner restarts can take over a minute. Limit idle residency to two
-# minutes rather than the entire (potentially hour-long) read allowance. This
-# bounds retry scheduling only; it never cancels an in-flight owned operation.
+# Default transient recovery is two minutes. Timing retries may need an observed
+# sibling step plus headroom to drain the queue. Their measured allowance remains
+# bounded by the configured read budget and never cancels owned execution.
 MAX_RESIDENT_RETRY_SECONDS = 120.0
 
 
@@ -42,7 +43,9 @@ class ResidentTimingPressure(CpuTimingInfrastructureError):
 
 @contextmanager
 def resident_execution_retries(slot, timeout):
-    token = _RESIDENT_RETRY.set(_ResidentRetry(slot, min(timeout, MAX_RESIDENT_RETRY_SECONDS)))
+    token = _RESIDENT_RETRY.set(
+        _ResidentRetry(slot, min(timeout, MAX_RESIDENT_RETRY_SECONDS), timeout)
+    )
     try:
         yield
     finally:
@@ -63,14 +66,15 @@ async def retry_resident_timing(operation, *, admission=None):
     started = None
     failures = 0
     last_error = None
+    allowance = state.timeout
     while True:
         try:
             if admission is None:
                 return await operation()
             remaining = (
-                state.timeout
+                allowance
                 if started is None
-                else max(0.0, state.timeout - (asyncio.get_running_loop().time() - started))
+                else max(0.0, allowance - (asyncio.get_running_loop().time() - started))
             )
             async with admission.attempt(quiet=failures > 0, timeout=remaining):
                 return await operation()
@@ -85,8 +89,10 @@ async def retry_resident_timing(operation, *, admission=None):
             now = asyncio.get_running_loop().time()
             if started is None:
                 started = now
+                if admission is not None:
+                    allowance = admission.retry_allowance(state.timeout, state.read_timeout)
             elapsed = now - started
-            remaining = max(0.0, state.timeout - elapsed)
+            remaining = max(0.0, allowance - elapsed)
             failures += 1
             report_execution_retry(
                 slot=state.slot,

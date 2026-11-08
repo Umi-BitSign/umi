@@ -75,7 +75,7 @@ async def test_cancelled_waiter_releases_new_normal_attempts():
 
 
 async def test_expired_wait_starts_no_attempt_and_keeps_running_owner(caplog):
-    caplog.set_level(logging.INFO, logger="umi.competition_timing_admission")
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
     gate = TimingAttemptAdmission()
     async with gate.attempt(quiet=False, timeout=1):
         with pytest.raises(TimingAdmissionTimeout):
@@ -144,3 +144,48 @@ async def test_repeated_cancellation_drains_pending_release():
         await task
     async with gate.attempt(quiet=False, timeout=0):
         pass
+
+
+def test_reviewer_cli_emits_timing_wait_without_external_logger_configuration(monkeypatch, capsys):
+    from umi import competition_cohort_review_cli as cli
+
+    logger = logging.getLogger("umi.competition.progress")
+    before = (logger.level, logger.propagate, tuple(logger.handlers))
+    monkeypatch.setattr(cli, "load_phase_review_config", lambda path: object())
+
+    async def run(config):
+        gate = TimingAttemptAdmission()
+        async with gate.attempt(quiet=False, timeout=1):
+            with pytest.raises(TimingAdmissionTimeout):
+                async with gate.attempt(quiet=True, timeout=0):
+                    pytest.fail("waiting retry cannot enter")
+
+    monkeypatch.setattr(cli, "_run", run)
+    cli.main(["run", "--config", "unused.json"])
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    waiting = [event for event in events if event["status"] == "waiting"]
+    assert waiting
+    assert waiting[0]["stage"] == "timing_attempt_admission"
+    assert waiting[0]["active_attempts"] == 1
+    assert waiting[0]["queued_retries"] == 1
+    assert waiting[0]["elapsed_seconds"] >= 0
+    assert waiting[0]["admission_remaining_seconds"] == 0
+    assert waiting[0]["stalled_or_retrying"]
+    assert (logger.level, logger.propagate, tuple(logger.handlers)) == before
+
+
+async def test_measured_ordinary_duration_extends_retry_without_exceeding_read_budget():
+    now = [0.0]
+    gate = TimingAttemptAdmission(clock=lambda: now[0])
+    assert gate.retry_allowance(120, 1000) == 120
+    async with gate.attempt(quiet=False, timeout=1):
+        now[0] += 200
+    assert gate.retry_allowance(120, 1000) == 250
+    assert gate.retry_allowance(120, 180) == 180
+    # Retrying or waiting cannot inflate later allowances indefinitely.
+    async with gate.attempt(quiet=True, timeout=1):
+        now[0] += 1000
+    assert gate.retry_allowance(120, 1000) == 250
+    async with gate.attempt(quiet=False, timeout=1):
+        now[0] += 50
+    assert gate.retry_allowance(120, 1000) == 250

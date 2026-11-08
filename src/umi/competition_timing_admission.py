@@ -7,13 +7,14 @@ services remain observable through the unchanged native timing checks.
 import asyncio
 import json
 import logging
+import time
 from collections import deque
 from contextlib import asynccontextmanager
 
 from .competition_transport_verification import TransferProgress
 from .concurrency import await_owned_task
 
-_LOG = logging.getLogger(__name__)
+_LOG = logging.getLogger("umi.competition.progress")
 
 
 class TimingAdmissionTimeout(OSError):
@@ -21,11 +22,17 @@ class TimingAdmissionTimeout(OSError):
 
 
 class TimingAttemptAdmission:
-    def __init__(self):
+    def __init__(self, *, clock=None):
+        self.clock = time.monotonic if clock is None else clock
+        self.observed_ordinary_seconds = 0.0
         self.condition = asyncio.Condition()
         self.active = 0
         self.quiet = False
         self.waiters = deque()
+
+    def retry_allowance(self, fallback, maximum):
+        """Reserve one observed ordinary step plus 25% headroom, within the read budget."""
+        return min(maximum, max(fallback, self.observed_ordinary_seconds * 1.25))
 
     async def _acquire(self, quiet, timeout):
         ticket = object() if quiet else None
@@ -51,6 +58,8 @@ class TimingAttemptAdmission:
                         event.update(
                             admission_remaining_seconds=remaining,
                             active_attempts=self.active,
+                            observed_ordinary_step_seconds=self.observed_ordinary_seconds,
+                            retry_headroom_multiplier=1.25,
                             queued_retries=len(self.waiters),
                             planning_eta_seconds=None if complete else [0, remaining],
                             eta_scope="local_timing_admission_only",
@@ -92,9 +101,14 @@ class TimingAttemptAdmission:
     @asynccontextmanager
     async def attempt(self, *, quiet, timeout):
         await self._acquire(quiet, max(0.0, timeout))
+        started = self.clock()
         try:
             yield
         finally:
+            if not quiet:
+                self.observed_ordinary_seconds = max(
+                    self.observed_ordinary_seconds, max(0.0, self.clock() - started)
+                )
             # A second cancellation during lock acquisition cannot strand the
             # admission count and block every subsequent timing attempt.
             await await_owned_task(asyncio.create_task(self._release(quiet)))
