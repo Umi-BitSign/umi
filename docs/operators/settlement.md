@@ -6084,6 +6084,20 @@ it does not provide FIFO scheduling or reserve a slot for inference. When diagno
 evaluation throughput, separate model subprocess time, capacity waits and authority
 work. An idle model CPU can still be waiting for another consumer's memory lease.
 
+A settlement service with an active retained graph reservation can run its graph
+operations under that same reservation, leaving transient slots available to
+challenges. Admission verifies the exact live kernel witness, unchanged service
+cgroup and enforced zero-swap ceiling, which must fit the retained reservation.
+Each operation owns a separate descriptor lifetime. Closing the scheduler's
+reference leaves the reservation, cohort marker and gate held until all operations
+drain. Models and owner exports still acquire their own slots. Missing witnesses,
+changed limits and older selections keep ordinary transient admission. Logs expose
+`shared_retained_graph_slot`, `shared_service_ceiling_bytes` and zero
+`additional_reservation_bytes`; this does not credit resident pages or lower a
+model's allowance. Select this implementation on both settlement roles through
+the supported host source update path. Existing policies and miner/validator
+wire formats remain compatible, including future cohorts using the standing series.
+
 
 ### Retained request owner repair diagnostics
 

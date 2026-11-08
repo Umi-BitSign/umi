@@ -312,7 +312,9 @@ class HostMemoryLease:
     def clear_model_container(self) -> None:
         # Clear before releasing the directory whose inode the witness names.
         # A forked copy must not clear its parent's shared open-description lock.
-        if self._peer_witness and self._creator_pid == os.getpid():
+        # Graph witnesses instead follow the final duplicated descriptor: local
+        # settlement work may still own the same admitted service reservation.
+        if self._peer_witness and self._creator_pid == os.getpid() and self._graph_binding is None:
             host_memory_peer.clear(self._descriptor)
         self._peer_witness = False
         binding, self._model_container = self._model_container, None
@@ -912,6 +914,10 @@ class HostMemoryAdmission:
             transaction = self._transaction(parent)
             if transaction is None:
                 return None
+            if lane == "transient":
+                lease = host_memory_graph_peer.share_retained(self, parent)
+                if lease is not None:
+                    return lease
             for slot in self.policy.slots:
                 if slot.lane == lane:
                     lease = self._reserve(parent, slot, service_bounded=True)

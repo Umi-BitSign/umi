@@ -107,6 +107,64 @@ def own_binding(controller, slot):
         return None
 
 
+def share_retained(controller, parent):
+    """Keep an already admitted settlement ceiling alive for local graph work.
+
+    Each operation owns duplicated descriptors, including the cohort marker
+    and settlement gate. The kernel releases capacity only after the final
+    owner drains. Models and exports always acquire their separate slots.
+    """
+    from .host_memory_admission import HostMemoryLease
+
+    if not controller.peer_execution_stage:
+        return None
+    for owner in tuple(controller._model_leases):
+        if (
+            owner.closed
+            or owner._creator_pid != os.getpid()
+            or owner.slot.lane != "settlement_retained"
+            or not owner.service_bounded
+            or owner._graph_binding is None
+        ):
+            continue
+        binding = own_binding(controller, owner.slot)
+        descriptor = probe = None
+        group = []
+        try:
+            probe = controller._open_slot(parent, owner.slot)
+            if (
+                binding is None
+                or binding[1] > owner.slot.reservation_bytes
+                or binding[:3] != owner._graph_binding[:3]
+                or host_memory_peer.observed_inode(probe) != binding[2]
+            ):
+                continue
+            # dup retains the same flock and OFD witness, rather than opening a
+            # new reservation. Graph close must leave that witness to the final
+            # descriptor's kernel lifetime, including forked/borrowed owners.
+            descriptor = os.dup(owner._descriptor)
+            for held in owner._group:
+                group.append(os.dup(held))
+            lease = HostMemoryLease(descriptor, owner.slot, group=group)
+            descriptor, group = None, []
+            lease._graph_binding, binding = binding, None
+            lease._peer_witness = True
+            lease.service_bounded = True
+            controller._model_leases.add(lease)
+            controller.last_model_admission = dict(
+                shared_retained_graph_slot=owner.slot.name,
+                shared_service_ceiling_bytes=lease._graph_binding[1],
+                additional_reservation_bytes=0,
+            )
+            return lease
+        finally:
+            close(binding)
+            for held in [probe, descriptor, *group]:
+                if held is not None:
+                    os.close(held)
+    return None
+
+
 def _lock_owners():
     # /proc/locks supplies the native flock owner. PIDs alone never establish
     # graph ownership: callers also match the exact live OFD inode witness.
@@ -114,7 +172,7 @@ def _lock_owners():
         raw = stream.read(1024**2 + 1)
     if len(raw) > 1024**2:
         raise ValueError("graph lease inventory exceeds its bound")
-    result = {}
+    result, ambiguous = {}, set()
     for line in raw.decode("ascii").splitlines():
         fields = line.split()
         if len(fields) != 8 or fields[1:4] != ["FLOCK", "ADVISORY", "WRITE"]:
@@ -124,8 +182,15 @@ def _lock_owners():
             continue
         major, minor, inode = fields[5].split(":")
         key = (os.makedev(int(major, 16), int(minor, 16)), int(inode))
+        if key in ambiguous:
+            continue
         if key in result:
-            raise ValueError("ambiguous native graph lease owner")
+            # /proc/locks is sampled while unrelated locks change. An
+            # ambiguous inode cannot establish ownership, but must not erase
+            # independent witnessed reservations elsewhere on the host.
+            result.pop(key)
+            ambiguous.add(key)
+            continue
         result[key] = pid
     return result
 

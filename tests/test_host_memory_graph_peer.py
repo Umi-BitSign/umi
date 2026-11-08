@@ -1,6 +1,8 @@
 """Shared graph ceilings with real flock/OFD ownership and synthetic cgroups."""
 
+import io
 import os
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +22,14 @@ _KERNEL_CGROUP_CHECK = native._require_cgroup2
 
 @pytest.fixture
 def shared(pool, tmp_path, monkeypatch):
+    body = pool.policy.model_dump(mode="json", by_alias=True)
+    for slot in body["slots"]:
+        if slot["lane"] == "settlement_retained":
+            slot["reservation_bytes"] = 8 * GIB
+    body["incremental_budget_bytes"] = sum(slot["reservation_bytes"] for slot in body["slots"])
+    pool.fixture.selection = pool.fixture.selection.model_copy(
+        update={"policy_sha256": pool.write(body)}
+    )
     root = tmp_path / "service"
     root.mkdir()
     for name in graph._FILES:
@@ -97,10 +107,8 @@ def test_retained_settlement_and_transient_graph_share_the_service_cap(pool, sha
         monkeypatch.setattr(native, "_available_memory", lambda: 13 * GIB)
         transient = controller.try_acquire("transient")
         assert transient is not None
-        assert controller.last_model_admission["pending_reservation_bytes"] == 8 * GIB
-        assert controller.last_model_admission["shared_graph_ceiling_discount_bytes"] == (
-            retained.slot.reservation_bytes
-        )
+        assert transient.slot == retained.slot
+        assert controller.last_model_admission["additional_reservation_bytes"] == 0
         monkeypatch.setattr(native, "_available_memory", lambda: 21 * GIB)
         model = reader.try_acquire_group("transient", 1)
         assert model is not None and not model.service_bounded
@@ -110,6 +118,122 @@ def test_retained_settlement_and_transient_graph_share_the_service_cap(pool, sha
         for lease in (model, transient, retained):
             if lease is not None:
                 lease.close()
+
+
+@pytest.mark.parametrize("role", ["coordinator", "reviewer"])
+def test_retained_graph_work_leaves_three_model_slots_and_survives_owner_close(
+    pool, shared, monkeypatch, role
+):
+    controller, _ = shared
+    reader = pool.controller()
+    retained = controller.try_settlement("0" * 64, role)
+    graphs, models = [], []
+    try:
+        graphs = [controller.try_acquire("transient") for _ in range(2)]
+        assert all(lease.slot == retained.slot for lease in graphs)
+        retained.close()
+        # Closing the scheduler's reference cannot release work still draining,
+        # its cohort marker, its witness, or the independent replica's gate.
+        assert reader.try_settlement("0" * 64, role) is None
+        monkeypatch.setattr(native, "_available_memory", lambda: 37 * GIB)
+        for _ in range(3):
+            lease = reader.try_acquire_group("transient", 1)
+            assert lease is not None and not lease.service_bounded
+            models.append(lease)
+        assert reader.last_model_admission["required_available_bytes"] == 37 * GIB
+        graphs[0].close()
+        assert reader.try_settlement("0" * 64, role) is None
+        graphs[1].close()
+        replacement = reader.try_settlement("0" * 64, role)
+        assert replacement is not None
+        replacement.close()
+    finally:
+        for lease in [*models, *graphs, retained]:
+            if lease is not None:
+                lease.close()
+
+
+@pytest.mark.parametrize("change", ["cap", "swap", "witness", "closed", "fork"])
+def test_changed_retained_owner_cannot_lend_capacity(pool, shared, monkeypatch, change):
+    controller, root = shared
+    retained = controller.try_settlement("0" * 64, "coordinator")
+    transient = None
+    try:
+        if change == "cap":
+            (root / "memory.max").write_text(str(4 * GIB))
+        elif change == "swap":
+            (root / "memory.swap.max").write_text("1")
+        elif change == "witness":
+            peer.clear(retained._descriptor)
+        elif change == "closed":
+            retained.close()
+        else:
+            retained._creator_pid = -1
+        transient = controller.try_acquire("transient")
+        assert transient is not None and transient.slot.lane == "transient"
+        assert "shared_retained_graph_slot" not in controller.last_model_admission
+    finally:
+        if transient is not None:
+            transient.close()
+        retained.close()
+
+
+def test_export_does_not_borrow_retained_graph_capacity(pool, shared):
+    controller, _ = shared
+    retained = controller.try_settlement("0" * 64, "coordinator")
+    export = controller.try_acquire("owner_export")
+    try:
+        assert export is not None and export.slot.lane == "owner_export"
+        assert controller.try_acquire("owner_export") is None
+    finally:
+        export.close()
+        retained.close()
+
+
+def test_partial_graph_share_failure_keeps_original_owner_and_leaks_no_descriptors(
+    pool, shared, monkeypatch
+):
+    controller, _ = shared
+    retained = controller.try_settlement("0" * 64, "coordinator")
+    original = os.dup
+    calls = 0
+
+    def fail(descriptor):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise OSError("injected cohort gate duplication failure")
+        return original(descriptor)
+
+    try:
+        before = len(os.listdir("/proc/self/fd"))
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "dup", fail)
+            with pytest.raises(OSError, match="duplication failure"):
+                controller.try_acquire("transient")
+        assert len(os.listdir("/proc/self/fd")) == before
+        assert pool.controller().try_settlement("0" * 64, "coordinator") is None
+        borrowed = controller.try_acquire("transient")
+        assert borrowed is not None and borrowed.slot == retained.slot
+        borrowed.close()
+    finally:
+        retained.close()
+
+
+def test_ambiguous_kernel_lock_does_not_erase_independent_owners(monkeypatch):
+    raw = b"""1: FLOCK ADVISORY WRITE 123 00:19:100 0 EOF
+2: FLOCK ADVISORY WRITE 456 00:19:200 0 EOF
+3: FLOCK ADVISORY WRITE 789 00:19:100 0 EOF
+4: FLOCK ADVISORY WRITE 123 00:19:100 0 EOF
+5: FLOCK ADVISORY READ 999 00:19:300 0 EOF
+"""
+    original = Path.open
+
+    def opened(path, *args, **kwargs):
+        return io.BytesIO(raw) if str(path) == "/proc/locks" else original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", opened)
+    assert graph._lock_owners() == {(os.makedev(0, 0x19), 200): 456}
 
 
 def test_unwitnessed_retained_settlement_keeps_its_full_charge(pool, shared, monkeypatch):

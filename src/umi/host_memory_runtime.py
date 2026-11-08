@@ -1,8 +1,9 @@
 """Installed host admission selection and complete compact-result operations.
 
 Only bootstrap selects a controller. Child tasks inherit that immutable
-selection, never an active lease. Each operation acquires its own lease; there
-is no implicit reentrancy or sharing between concurrent children.
+selection, never an active lease. Each operation acquires its own lifetime.
+Bounded settlement work may explicitly retain its service's existing capacity;
+there is no implicit reentrancy or inherited ownership between children.
 """
 
 from __future__ import annotations
