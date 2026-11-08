@@ -194,6 +194,55 @@ async def test_missing_earlier_handoff_blocks_later_native_start(provisioned):
     assert ports.loaded == [("coordinator", 0)]
 
 
+@pytest.mark.parametrize("role", ["coordinator", "reviewer"])
+async def test_completed_maintenance_has_one_live_owner_while_native_polling_continues(
+    provisioned, role
+):
+    ports, roles, schedulers = await replicas(provisioned, coordinator_done=1, reviewer_done=1)
+    earlier, later = roles[role][:2]
+    scheduler = schedulers[role]
+    ports.history_delivered[0] = ports.input_delivered[0] = True
+    ports.handoffs[1] = False
+    owners, polls = [], []
+    original_earlier, original_later = earlier.maintain, later.maintain
+
+    async def maintain_earlier():
+        owners.append(asyncio.current_task())
+        return await original_earlier()
+
+    async def maintain_later():
+        polls.append(1)
+        return await original_later()
+
+    earlier.maintain, later.maintain = maintain_earlier, maintain_later
+    stop = asyncio.Event()
+    task = asyncio.create_task(scheduler.run(stop))
+    try:
+        await eventually(lambda: len(polls) >= 3 and len(owners) >= 3)
+        assert owners[0] is not scheduler._maintenance_task
+        assert all(owner is scheduler._maintenance_task for owner in owners[1:])
+        assert not ports.loaded
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 5)
+    assert scheduler._maintenance_task is None
+
+
+async def test_single_step_and_finished_maintenance_owner_still_detect_missing_output(provisioned):
+    ports, roles, schedulers = await replicas(provisioned, coordinator_done=1)
+    scheduler = schedulers["coordinator"]
+    earlier = roles["coordinator"][0]
+    ports.handoffs[1] = False
+    await scheduler.tick()
+    assert earlier in scheduler._completed and not ports.loaded
+    # A terminal task cannot stand in for a supervised maintenance owner.
+    scheduler._maintenance_task = asyncio.create_task(asyncio.sleep(0))
+    await scheduler._maintenance_task
+    ports.outputs[0] = False
+    await scheduler.tick()
+    assert ports.outputs[0] and ports.loaded == [("coordinator", 0)]
+
+
 async def test_explicit_holds_preserve_series_without_blocking_next_cohort(provisioned, caplog):
     ports, roles, _ = await replicas(provisioned)
     nodes = roles["coordinator"]

@@ -5936,8 +5936,12 @@ Coordinator and reviewer have independent slots and may resume at different
 cohorts. Completed cohorts continue repairing their exact input replicas,
 certified histories and already signed votes using bounded delivery operations.
 Their separate serial maintenance task can run while a later native worker is
-busy. Per-cohort exclusion prevents maintenance and native replay from changing
-the same cohort concurrently. Input and output aggregate digests run in owned
+busy. While that supervised task is live, the native scheduler reuses its completed
+cohort selection instead of repeating maintenance. Missing outputs or failed
+maintenance return the affected cohort to the ordered recovery path before a
+later native tick starts. Single-step scheduling still performs maintenance when
+there is no live independent owner. Per-cohort exclusion prevents maintenance
+and native replay from changing the same cohort concurrently. Input and output aggregate digests run in owned
 workers under the native reservation; they do not block the event loop.
 An authenticated terminal-history extension keeps its original certification
 prefix and does not reload the full input inventory.
