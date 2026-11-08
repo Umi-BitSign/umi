@@ -406,7 +406,7 @@
     "competition_model_generation_store.py": "8840a404466bb0093ea14aa4ea6ed7150e9074695493d817c4c30e27ff4fdec3",
     "competition_model_interface.py": "527633a2efd8511b5ae53f77be01635260cdfff304ef97b9c3e6f59a4b4f15df",
     "competition_model_license.py": "1186c6662b52061431f3891f6c0481bf0e5287babaca27f0a79ffdc16f88f539",
-    "competition_model_materialization.py": "9dbb6ad8e02d9962677ba4b71178681088f5294a7c83261afa160271ac7d3c60",
+    "competition_model_materialization.py": "8522db9d64ba1974ebe61c13238c4593be84f8525e7b3c37b9d1c7a871c49093",
     "competition_model_review_file.py": "8a7f3695aa88221b98ab4af6d55170964a51eb4f870bc5465bfe08590938d2d0",
     "competition_model_source_verification.py": "a09491fd6a9e13d376e04fd90bd639f7d0917b742ada49444fadef6c734b26f3",
     "competition_model_storage_leases.py": "a9d4c51596f9d289a3e39edd6fd51503007c55a365a4379a296858b64d577e7b",

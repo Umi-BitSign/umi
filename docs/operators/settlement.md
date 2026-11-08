@@ -5327,6 +5327,15 @@ when the owner is cancelled repeatedly. Active concurrency stays with the
 existing native caller's allowance; shared pooling adds no independent request
 queue or timeout budget. Idle connection retention remains bounded.
 
+Model-cache restoration reads file identities and verification receipts in one
+owned worker scan. The event loop remains available to schedule other challenge
+lanes during metadata I/O. `model_materialization_receipt_inventory` reports
+counted files, elapsed time and a scoped ETA. Receipt commits also run in owned
+workers; cancellation drains each operation before releasing the checkpoint or
+cache lease. Completed payload restoration preserves the existing byte facts and
+does not reread or redownload model weights. The source update changes scheduling
+only; retained receipt formats and miner/validator wire formats are unchanged.
+
 Direct-object first verification reads adjacent manifest files through bounded
 contiguous ranges of at most 64 MiB, retaining the same per-file checkpoints,
 ordered stream digest and provider-generation checks. Completed byte facts remain

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import shutil
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +17,66 @@ from umi.competition_cohort_direct_model_upload import DirectModelPayload
 from umi.competition_model_cache_space import BootDiskModelCache, BootDiskModelCacheConfig
 from umi.competition_transport_verification import TransferProgress
 from umi.open_competition import BundleFile, ModelBundle, digest
+
+
+@pytest.mark.parametrize("operation", ["load", "remember"])
+async def test_receipt_io_keeps_loop_responsive_and_cancellation_owns_store(
+    transfer, monkeypatch, operation
+):
+    if operation == "load":
+        await transfer.run()
+    reads = list(transfer.multipart.reads)
+    entered, release, drained = threading.Event(), threading.Event(), threading.Event()
+    original = getattr(materialization.ByteCheckpoints, operation)
+    original_exit = materialization.ByteCheckpoints.__exit__
+    owner_thread = threading.get_ident()
+    once = False
+
+    def slow(store, *args, **kwargs):
+        nonlocal once
+        if once:
+            return original(store, *args, **kwargs)
+        once = True
+        assert threading.get_ident() != owner_thread
+        entered.set()
+        assert release.wait(3), "event loop did not run while receipt I/O waited"
+        result = original(store, *args, **kwargs)
+        drained.set()
+        return result
+
+    def close(store, *args):
+        assert drained.is_set(), "checkpoint lock released before owned I/O drained"
+        return original_exit(store, *args)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(materialization.ByteCheckpoints, operation, slow)
+        patch.setattr(materialization.ByteCheckpoints, "__exit__", close)
+        task = asyncio.create_task(transfer.run())
+        try:
+            for _ in range(200):
+                if entered.is_set() or task.done():
+                    break
+                await asyncio.sleep(0.01)
+            assert entered.is_set() and not task.done()
+            task.cancel()
+            await asyncio.sleep(0.02)
+            task.cancel()
+            await asyncio.sleep(0.02)
+            assert not task.done() and not drained.is_set()
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    assert drained.is_set()
+    if operation == "load":
+        assert transfer.multipart.reads == reads
+    else:
+        transfer.multipart.reads.clear()
+    await transfer.run()
+    if operation == "remember":
+        assert all(
+            offset >= transfer.bundle.files[0].size_bytes for offset, _ in transfer.multipart.reads
+        )
 
 
 @pytest.fixture
