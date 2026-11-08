@@ -5871,6 +5871,12 @@ reuse the same original reference. Install the compatible reader before selectin
 this optional field; older profiles preserve their serialized fields unchanged.
 Qualify concurrent work under the selected service cap before increasing limits.
 
+The public cohort catalog reads its histories and delivery routes in one owned
+metadata worker, then adds the current admission deadline/window projection on
+the event loop. This avoids rejoining the worker queue for every cohort while
+holding an HTTP slot. Cancellation drains the current disk operation and skips
+remaining reads. Signed history and transport-adoption checks are unchanged.
+
 Every grant accounts for the other occupied slots, background allowance and
 surviving container ceilings. A populated model container whose lease has ended
 blocks the next shared transient grant even if memory is otherwise available.
