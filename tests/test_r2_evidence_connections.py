@@ -150,3 +150,59 @@ def test_native_proof_frame_uses_bounded_owned_publication_clients(tmp_path, tra
         fields,
     )
     assert all(c.is_closed for c in clients)
+
+
+@pytest.mark.parametrize("operation", ["read", "read_if_present", "copy_original_if_present"])
+@pytest.mark.parametrize("retained", [False, True])
+@pytest.mark.parametrize("missing_payload", [False, True])
+def test_cold_frame_and_objects_share_one_owned_client(
+    tmp_path, monkeypatch, operation, retained, missing_payload
+):
+    from .test_competition_remote_proof_store import EvidenceServer, store
+
+    server = EvidenceServer()
+    remote = store(tmp_path / "writer-index", server)
+    writer = RewardProofArchive(tmp_path / "writer", remote=remote)
+    key = "b" * 64
+    fields = {"evidence": b"native proof", "metadata": b"native metadata"}
+    bounds = {name: len(raw) for name, raw in fields.items()}
+    writer.write("history", key, context={}, fields=fields)
+    reader = (
+        writer
+        if retained
+        else RewardProofArchive(
+            tmp_path / "reader", remote=store(tmp_path / "reader-index", server)
+        )
+    )
+    reader.remote.evict_cache()
+    clients = []
+    original = reader.remote.client._new_client
+
+    def client():
+        value = original()
+        clients.append(value)
+        return value
+
+    monkeypatch.setattr(reader.remote.client, "_new_client", client)
+    server.calls.clear()
+    if missing_payload:
+        del server.objects[next(path for path in server.objects if "/objects/" in path)]
+
+    def read():
+        if operation == "copy_original_if_present":
+            destination = RewardProofArchive(tmp_path / "copy")
+            assert reader.copy_original_if_present(
+                destination, "history", key, context={}, bounds=bounds
+            )
+            return destination.read("history", key, bounds=bounds)
+        return getattr(reader, operation)("history", key, bounds=bounds)
+
+    if missing_payload:
+        with pytest.raises((ValueError, FileNotFoundError)):
+            read()
+    else:
+        assert read() == ({}, fields)
+    assert any("/history/" in path for _, path in server.calls)
+    assert any("/objects/" in path for _, path in server.calls)
+    assert len(clients) == 1
+    assert clients[0].is_closed

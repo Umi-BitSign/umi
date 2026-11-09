@@ -802,7 +802,10 @@ class RewardProofArchive:
     def read(
         self, kind: Kind, key: str, *, bounds: dict[str, int]
     ) -> tuple[dict, dict[str, bytes]]:
-        with self.read_release_lease():
+        with (
+            self.read_release_lease(),
+            r2_evidence_connection_scope(getattr(self.remote, "client", None)),
+        ):
             frame = self._frame(kind, key)
             return self._read_frame(frame, kind, key, bounds)
 
@@ -815,7 +818,10 @@ class RewardProofArchive:
         mistake a damaged present archive for an unavailable lookup source.
         Completed remote transport fences retain their existing repair errors.
         """
-        with self.read_release_lease():
+        with (
+            self.read_release_lease(),
+            r2_evidence_connection_scope(getattr(self.remote, "client", None)),
+        ):
             try:
                 frame = self._frame(kind, key)
             except FileNotFoundError:
@@ -832,7 +838,10 @@ class RewardProofArchive:
         encoding for transport; independent native proof acceptance is unchanged.
         The source release lease covers the whole operation.
         """
-        with self.read_release_lease():
+        with (
+            self.read_release_lease(),
+            r2_evidence_connection_scope(getattr(self.remote, "client", None)),
+        ):
             try:
                 frame = self._frame(kind, key)
             except FileNotFoundError:

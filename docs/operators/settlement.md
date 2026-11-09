@@ -5389,6 +5389,13 @@ when the owner is cancelled repeatedly. Active concurrency stays with the
 existing native caller's allowance; shared pooling adds no independent request
 queue or timeout budget. Idle connection retention remains bounded.
 
+Synchronous proof-archive reads and original-archive copies use one HTTP client
+for the frame and its referenced payloads. The client belongs to the calling
+worker and closes when that operation finishes or fails. First imports and
+retained-generation reads keep their existing byte bounds, immutable identity
+checks and repair behavior. Coordinator, reviewer and writer consumers receive
+this shared reader through their normal source update path.
+
 Model-cache restoration reads file identities and verification receipts in one
 owned worker scan. The event loop remains available to schedule other challenge
 lanes during metadata I/O. `model_materialization_receipt_inventory` reports
