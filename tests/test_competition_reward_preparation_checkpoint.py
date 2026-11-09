@@ -304,6 +304,7 @@ async def test_interrupted_dependency_capture_cannot_drop_model_checks(
     )
     reuse = object.__new__(PreparationReuse)
     reuse.preparation, reuse.store, reuse.models_checked = owner, checkpoints, {}
+    reuse.consumer_dependency_keys = {}
 
     async def capture(*args):
         return {"schema": models.ABI, "mode": mode, "context": None, "items": []}

@@ -407,7 +407,7 @@ class StandingRewardCoverageService:
         if retained is None:
             progress = await collector.step()
             logger.info(
-                "coverage_pending cohort_sha256=%s credited_ms=%s errors=%s",
+                "coverage_pending activation_sha256=%s credited_ms=%s errors=%s",
                 key,
                 dict(progress.credited_ms),
                 progress.errors,

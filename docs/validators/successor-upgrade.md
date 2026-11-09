@@ -739,6 +739,26 @@ format. Existing miner and reference readers require no format migration;
 coordinator/reviewer upgrades must include the decision-review and certified
 publication producers as well as the writer preparation path.
 
+Historical preparation can reuse an earlier review from another consumer when
+the selected writer already has its own completed verification of the same
+package, allocation and model dependencies. The earlier fact supplies the
+original review block. The writer's fact supplies only its current local package
+and receipt bindings. Both records remain immutable, and the current model
+receipts and remote generations still undergo the normal dependency restore.
+`reward_preparation_consumer_restore` reports the two completed records checked.
+Changed policy, authority, verifier semantics or model receipts require scoped
+repair; a later completion alone never establishes historical approval. Legacy
+directory-backed model checks cannot use this restoration path.
+
+This compatible reader uses existing preparation and dependency records, without
+a journal conversion or another operator signature. Select it through the normal
+coordinator, reviewer and validator runtime update paths. Miner reward readers
+continue consuming unchanged signed allocations. Publication of a release and
+installed consumer adoption must both finish before treating a historical
+backfill as repaired; confirm that its block cursor advances and finalized reward
+renewal continues. The `coverage_pending` diagnostic identifies the activation
+digest separately from the cohort plan digest.
+
 An explicit compatible transport selection uses schema
 `umi-reference-publisher-config/2`, `gateway_origin` set to
 `https://umi-reference-control.sam-sn78.workers.dev`, and a private JSON

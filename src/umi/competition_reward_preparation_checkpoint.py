@@ -391,6 +391,15 @@ class PreparationCheckpoints:
                 )
             self._retain(db, NATIVE, key, activation_sha256, reviewed_at_block, value)
 
+    def consumer_fact(self, activation_sha256: str, *, context: dict) -> dict | None:
+        """Find this consumer's exact local binding, without historical authority.
+
+        A later fact cannot establish an earlier allocation or review time. The
+        preparation owner must separately select an eligible historical fact
+        and prove unchanged semantics and completed dependencies before reuse.
+        """
+        return self.status(activation_sha256, 2**53 - 1, context=context)
+
     def load_completion(self, native_key: str) -> dict | None:
         activation, block = self._split_key(native_key)
         with self._transaction() as db:

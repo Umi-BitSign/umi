@@ -7174,6 +7174,68 @@ async def test_earlier_peer_completion_cannot_displace_writer_context(
     assert reuse.store.status(digest(ready.activation), ready.reviewed_at_block) == peer
 
 
+async def test_historical_consumer_restoration_keeps_original_review_and_current_dependencies(
+    historical_preparation_case, tmp_path, monkeypatch, caplog
+):
+    from umi.competition_reward_files import StandingRewardFiles
+    from umi.competition_verification_snapshot import VerifiedPackageSnapshot
+
+    p, control, _, args = historical_preparation_case
+    caplog.set_level(logging.INFO)
+    snapshots = []
+    for name in ("writer", "reviewer"):
+        files = StandingRewardFiles(
+            tmp_path / name,
+            maximum_package_bytes=p.preparation.maximum_package_bytes,
+            maximum_witness_bytes=1024**2,
+        )
+        files.retain_package(p.package)
+        snapshots.append(files.verified_package(digest(p.package)))
+    writer, reviewer = snapshots
+    ready = await p.preparation.prepare(writer, **replay_args(await p.observations()))
+    reuse = p.preparation.preparation_reuse
+    activation = digest(ready.activation)
+    # A later consumer fact alone must never establish earlier completion.
+    assert await reuse.restore(writer, ready.activation, ready.reviewed_at_block - 1) is None
+    peer_block = ready.reviewed_at_block - 1
+    peer = reuse._context(reviewer, ready.activation) | {
+        "reviewed_at_block": peer_block,
+        "allocation": ready.allocation.model_dump(mode="json", by_alias=True),
+    }
+    own_key = reuse.store.key(activation, ready.reviewed_at_block)
+    peer_key = reuse.store.key(activation, peer_block)
+    reuse.store.retain_native(activation, peer_block, peer)
+    reuse.store.retain_completion(peer_key, reuse.store.load_completion(own_key))
+    original = reuse.store.status(activation, peer_block)
+    original_dependencies = reuse.store.load_completion(peer_key)
+    control.snapshot = replace(control.snapshot, block_number=peer_block)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("consumer restoration repeated completed native work or rewrote evidence")
+
+    monkeypatch.setattr(preparation, "_replay_detached_reward_package", forbidden)
+    monkeypatch.setattr(VerifiedPackageSnapshot, "read", forbidden)
+    for _ in range(2):
+        restarted = p.reopen()
+        store = restarted.preparation_reuse.store
+        monkeypatch.setattr(store, "retain_native", forbidden)
+        monkeypatch.setattr(store, "retain_completion", forbidden)
+        restored = await restarted.prepare_historical(writer, **args)
+        assert restored.reviewed_at_block == peer_block
+        assert restored.allocation == ready.allocation
+        assert not restored.chain_submission_authorized
+        assert restarted.preparation_reuse.consumer_dependency_keys[peer_key] == own_key
+        assert store.status(activation, peer_block) == original
+        assert store.load_completion(peer_key) == original_dependencies
+        current = await restarted.prepare(writer, **replay_args(await p.observations()))
+        assert current.reviewed_at_block == ready.reviewed_at_block
+    events = json_progress_payloads(
+        caplog.records, logger="umi.competition.progress", schema="umi-transport-work-progress/1"
+    )
+    restores = [e for e in events if e["stage"] == "reward_preparation_consumer_restore"]
+    assert any(e["completed_units"] == e["total_units"] == 2 for e in restores)
+
+
 async def test_completed_preparation_owner_loss_is_not_first_work(
     preparation_case, monkeypatch, caplog
 ):

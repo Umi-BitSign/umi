@@ -27,6 +27,7 @@ class PreparationReuse:
     def __init__(self, preparation):
         self.preparation = preparation
         self.models_checked = {}
+        self.consumer_dependency_keys = {}
         progress = TransferProgress(
             "reward_preparation_checkpoint_open",
             1,
@@ -121,15 +122,30 @@ class PreparationReuse:
             self.store.begin(digest(activation), activation.package_sha256)
             return None
         context = self._context(package, activation)
+        binding = value
+        dependency_key = None
         if any(value.get(key) != expected for key, expected in context.items()):
             # Shared verification stores can contain an earlier completed fact
             # for another consumer's package path or model verifier. Reuse this
             # consumer's original fact without rewriting either completion.
-            value = self.store.status(digest(activation), block, context=context)
-            if value is None:
+            binding = self.store.consumer_fact(digest(activation), context=context)
+            if binding is None:
                 raise PreparationCheckpointRepairRequired("completed preparation disappeared")
-        if set(value) != set(context) | {"reviewed_at_block", "allocation"} or any(
-            value[key] != expected for key, expected in context.items()
+            if binding["reviewed_at_block"] <= block:
+                value = binding
+            else:
+                from .competition_reward_preparation_consumer import completed_consumer_dependencies
+
+                with TransferProgress(
+                    "reward_preparation_consumer_restore",
+                    2,
+                    unit="completed_preparations",
+                    planning_unit_seconds=(0.001, 1),
+                ) as progress:
+                    dependency_key = completed_consumer_dependencies(self.store, value, binding)
+                    progress.advance(2, restored=True)
+        if set(binding) != set(context) | {"reviewed_at_block", "allocation"} or any(
+            binding[key] != expected for key, expected in context.items()
         ):
             raise PreparationCheckpointRepairRequired(
                 "completed preparation dependencies changed; scoped repair is required"
@@ -163,13 +179,19 @@ class PreparationReuse:
             )
             if promotion != allocation.promotion_head:
                 raise PreparationCheckpointRepairRequired("completed promotion binding changed")
-        return p._issue_prepared(
+        prepared = p._issue_prepared(
             package,
             activation,
             allocation,
             value["reviewed_at_block"],
             context["requirement_sha256"],
         )
+        key = self.store.key(digest(activation), prepared.reviewed_at_block)
+        if dependency_key is None:
+            self.consumer_dependency_keys.pop(key, None)
+        else:
+            self.consumer_dependency_keys[key] = dependency_key
+        return prepared
 
     async def restore(self, package, activation, block):
         progress = TransferProgress(
@@ -215,6 +237,7 @@ class PreparationReuse:
 
         p = self.preparation
         key = self.store.key(digest(prepared.activation), prepared.reviewed_at_block)
+        key = self.consumer_dependency_keys.get(key, key)
         completion = await run_owned_thread(self.store.load_completion, key)
         if completion is None:
             models = await capture_coverage_model_dependencies(p, package, prepared)
