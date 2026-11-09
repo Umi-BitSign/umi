@@ -651,9 +651,12 @@ async def test_pressure_retry_refuses_changed_authority(resident, clock, monkeyp
     assert h.scope.entered == h.scope.released == 1
 
 
-async def test_pressure_exhaustion_releases_pair_for_other_jobs(resident, clock, monkeypatch):
+@pytest.mark.parametrize("allowance,attempts", [(5, 1), (6, 2)])
+async def test_pressure_exhaustion_releases_pair_for_other_jobs(
+    resident, clock, monkeypatch, allowance, attempts
+):
     h = resident
-    monkeypatch.setattr(retry, "MAX_RESIDENT_RETRY_SECONDS", 5)
+    monkeypatch.setattr(retry, "MAX_RESIDENT_RETRY_SECONDS", allowance)
 
     async def invoke(job, attempt):
         h.e.calls.append(attempt)
@@ -662,7 +665,10 @@ async def test_pressure_exhaustion_releases_pair_for_other_jobs(resident, clock,
     monkeypatch.setattr(h.e.port, "invoke", invoke)
     _, state, kind = await h.worker._one(h.e.r.slot)
     assert (state, kind) == ("pending", "ResidentTimingPressure")
-    assert len(h.e.calls) == 2 and len(h.e.stops) == 1
+    # Admission expires before another native attempt is created. Reconcile
+    # every rejected attempt, including the last one, before releasing the pair.
+    assert len(h.e.calls) == attempts and h.e.stops == h.e.calls
+    assert clock.now == allowance
     assert not h.scope.active and not h.worker.capacity.locked()
     assert h.scope.entered == h.scope.released == 1
 
