@@ -5389,6 +5389,35 @@ when the owner is cancelled repeatedly. Active concurrency stays with the
 existing native caller's allowance; shared pooling adds no independent request
 queue or timeout budget. Idle connection retention remains bounded.
 
+Synchronous proof-archive reads and original-archive copies use one HTTP client
+for the frame and its referenced payloads. The client belongs to the calling
+worker and closes when that operation finishes or fails. First imports and
+retained-generation reads keep their existing byte bounds, immutable identity
+checks and repair behavior. Coordinator, reviewer and writer consumers receive
+this shared reader through their normal source update path.
+
+Independent proof objects can be fetched concurrently without holding the
+store-wide cache lock during network I/O. Reads of the same object share one
+fetch. In-flight response bodies reserve space within the existing cache byte
+limit before consumption; cache residency and active pins retain that limit.
+Capacity occupied by another fetch is released on completion or failure. A cache
+held entirely by active consumer leases still reports its existing capacity
+error. Each retained fetch checks its original generation and rechecks recorded
+damage before installing bytes. This changes transport scheduling, not proof
+acceptance, signed inputs, receipt formats or the native verification ABI.
+The history owner overlaps retained-frame downloads within its selected count
+and byte window. Each unfinished read reserves a maximum-size frame; completed
+frames retain their actual byte charge until the batch is applied. A two-frame
+byte budget permits two initial downloads together, but retained bytes can limit
+later lookahead to one read. Native verification starts as soon as the next
+ordered frame and its ancestry are ready; it does not wait for the whole batch.
+Gaps, completed checkpoints and failed inputs stop further read admission.
+Shutdown drains started reads and native work, retains successful checkpoints,
+and releases discarded prefetched encodings. Only the ordered owner updates the
+visible preparation stage and applies history effects. This uses the installed
+profile's existing limits; a source qualification alone does not establish a
+deployed throughput improvement.
+
 Model-cache restoration reads file identities and verification receipts in one
 owned worker scan. The event loop remains available to schedule other challenge
 lanes during metadata I/O. `model_materialization_receipt_inventory` reports
