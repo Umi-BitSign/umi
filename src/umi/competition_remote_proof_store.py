@@ -11,7 +11,7 @@ import json
 from collections import OrderedDict
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing, contextmanager, nullcontext
+from contextlib import ExitStack, closing, contextmanager, nullcontext
 from pathlib import Path
 from threading import Condition, Event, RLock
 from typing import Annotated, Literal
@@ -405,6 +405,9 @@ class RemoteProofStore:
                     raise ValueError("receipt source requires its completed immutable ledger")
         self._cache, self._pins, self._bytes = OrderedDict(), {}, 0
         self._lock = RLock()
+        self._read_condition = Condition(self._lock)
+        self._read_locks = {}
+        self._fetch_bytes = 0
         self._publication_condition = Condition(self._lock)
         self._publishing_keys: set[str] = set()
         self._publishing_bytes = 0
@@ -1124,42 +1127,115 @@ class RemoteProofStore:
 
     def _space(self, required: int) -> None:
         for sha in tuple(self._cache):
-            if self._bytes + required <= self.config.maximum_cache_bytes:
+            if self._bytes + self._fetch_bytes + required <= self.config.maximum_cache_bytes:
                 break
             if not self._pins.get(sha):
                 self._bytes -= len(self._cache.pop(sha))
-        if self._bytes + required > self.config.maximum_cache_bytes:
+        if self._bytes + self._fetch_bytes + required > self.config.maximum_cache_bytes:
             raise OSError("proof cache capacity is held by active leases")
 
     @contextmanager
-    def pin(self, value: dict, *, maximum: int):
-        reference = self.validate_reference(value)
+    def _read_slot(self, key):
+        # Waiting for one object must not hold the store lock or prevent another
+        # fetch from finishing. Nested path -> pin calls share this owned RLock.
+        with self._lock:
+            slot = self._read_locks.setdefault(key, [RLock(), 0])
+            slot[1] += 1
+        try:
+            with slot[0]:
+                yield
+        finally:
+            with self._lock:
+                slot[1] -= 1
+                if not slot[1]:
+                    del self._read_locks[key]
+
+    @contextmanager
+    def _read_capacity(self, size):
+        # Charge response bodies before reading them. Completed cache entries
+        # and every concurrent fetch share the existing byte ceiling.
+        with self._read_condition:
+            while True:
+                try:
+                    self._space(size)
+                except OSError:
+                    if not self._fetch_bytes:
+                        raise
+                    self._read_condition.wait()
+                else:
+                    self._fetch_bytes += size
+                    break
+        charged = True
+
+        def release():
+            nonlocal charged
+            with self._read_condition:
+                if charged:
+                    self._fetch_bytes -= size
+                    charged = False
+                    self._read_condition.notify_all()
+
+        try:
+            yield release
+        finally:
+            release()
+
+    def _cache_read(self, sha, raw, release):
+        # The caller holds the store lock: turn the in-flight charge into cache
+        # residency atomically, including a concurrent publisher's cache entry.
+        release()
+        previous = self._cache.pop(sha, None)
+        self._bytes += len(raw) - (0 if previous is None else len(previous))
+        self._cache[sha] = raw
+
+    def _read_reference(self, value, *, maximum, pinned):
+        reference = RemoteProofReference.model_validate(value)
         if not 0 < reference.size_bytes <= maximum <= MAX_PROOF_OBJECT_BYTES:
             raise ValueError("remote proof read exceeds its consumer bound")
         sha = digest(reference)
-        with self._lock, TransferProgress("proof_fetch", reference.size_bytes) as progress:
-            raw = self._cache.pop(sha, None)
+        with (
+            self._read_slot(reference.key),
+            TransferProgress("proof_fetch", reference.size_bytes) as progress,
+        ):
+            self.validate_reference(value)
+            with self._lock:
+                raw = self._cache.get(sha)
+                if raw is not None:
+                    self._cache.move_to_end(sha)
+                    if pinned:
+                        self._pins[sha] = self._pins.get(sha, 0) + 1
             if raw is None:
-                self._space(reference.size_bytes)
-                expected = EvidenceObjectHead(
-                    reference.size_bytes, reference.etag, reference.content_sha256
-                )
-                try:
-                    if self.client.head(reference.key) != expected:
-                        raise ValueError("remote proof object is missing or its generation changed")
-                    raw = self.client.read(reference.key, expected, maximum=maximum)
-                except ValueError:
-                    self._hold(reference)
-                    progress.emit(
-                        "repair_required", reason="remote_proof_missing_changed_or_corrupt"
+                with self._read_capacity(reference.size_bytes) as release:
+                    expected = EvidenceObjectHead(
+                        reference.size_bytes, reference.etag, reference.content_sha256
                     )
-                    raise
-                self._bytes += len(raw)
-                progress.advance(len(raw))
+                    try:
+                        if self.client.head(reference.key) != expected:
+                            raise ValueError(
+                                "remote proof object is missing or its generation changed"
+                            )
+                        raw = self.client.read(reference.key, expected, maximum=maximum)
+                    except ValueError:
+                        self._hold(reference)
+                        progress.emit(
+                            "repair_required", reason="remote_proof_missing_changed_or_corrupt"
+                        )
+                        raise
+                    # Another owner can record damage while this thread is in
+                    # network I/O. Never install bytes behind that repair fence.
+                    self.validate_reference(value)
+                    with self._lock:
+                        self._cache_read(sha, raw, release)
+                        if pinned:
+                            self._pins[sha] = self._pins.get(sha, 0) + 1
+                    progress.advance(len(raw))
             else:
                 progress.advance(len(raw), restored=True)
-            self._cache[sha] = raw
-            self._pins[sha] = self._pins.get(sha, 0) + 1
+        return sha, raw
+
+    @contextmanager
+    def pin(self, value: dict, *, maximum: int):
+        sha, raw = self._read_reference(value, maximum=maximum, pinned=True)
         try:
             yield raw
         finally:
@@ -1169,25 +1245,36 @@ class RemoteProofStore:
                     del self._pins[sha]
 
     def read_bytes(self, value: dict, *, maximum: int) -> bytes:
-        with self.pin(value, maximum=maximum) as raw:
-            return raw
+        # The returned bytes already have their own Python reference. A
+        # momentary cache pin here would wake capacity waiters into a lease
+        # error between fetch completion and the immediate pin release.
+        return self._read_reference(value, maximum=maximum, pinned=False)[1]
 
     def read_path(self, path: str, *, maximum: int, expected_sha256=None) -> bytes:
         key = self._key(path)
-        with self._lock:
+        with self._read_slot(key):
             reference = self._retained(key)
             if reference is None:
                 if self.receipt_source is not None:
                     raise ValueError("producer proof receipt is missing; explicit repair required")
-                with TransferProgress("proof_import", 1, unit="objects") as progress:
+                with (
+                    TransferProgress("proof_import", 1, unit="objects") as progress,
+                    ExitStack() as capacity,
+                ):
                     if not 0 < maximum <= MAX_PROOF_OBJECT_BYTES:
                         raise ValueError("remote proof import exceeds its consumer bound")
+                    release = None
+
+                    def admit(head):
+                        nonlocal release
+                        release = capacity.enter_context(self._read_capacity(head.size_bytes))
+
                     if isinstance(self.client, R2EvidenceClient):
                         first = self.client.discover(
                             key,
                             maximum=maximum,
                             expected_sha256=expected_sha256,
-                            admit=lambda head: self._space(head.size_bytes),
+                            admit=admit,
                         )
                         if first is None:
                             raise FileNotFoundError("selected remote proof object is unavailable")
@@ -1201,14 +1288,16 @@ class RemoteProofStore:
                             raise ValueError("remote proof path changes its content address")
                         if not 0 < head.size_bytes <= maximum:
                             raise ValueError("remote proof import exceeds its consumer bound")
-                        self._space(head.size_bytes)
+                        admit(head)
                         raw = self.client.read(key, head, maximum=maximum)
                     reference = self._reference(key, head)
-                    self._remember(reference)
                     sha = digest(reference)
-                    self._cache[sha] = raw
-                    self._bytes += len(raw)
+                    with self._lock:
+                        self._remember(reference)
+                        self.validate_reference(reference.model_dump(mode="json", by_alias=True))
+                        self._cache_read(sha, raw, release)
                     progress.advance(1)
+                    return raw
             if expected_sha256 is not None and reference.content_sha256 != expected_sha256:
                 raise ValueError("remote proof receipt changes its content address")
             return self.read_bytes(

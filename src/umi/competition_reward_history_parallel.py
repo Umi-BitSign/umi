@@ -21,11 +21,12 @@ from .concurrency import await_owned_task, run_owned_thread
 from .host_memory_runtime import compact_memory_error, history_memory_window
 
 
-async def _load_input(reader, height):
-    reader.progress.preparation_start(
-        "retained_history_loading", height, "load_checkpoint_or_selected_retained_frame"
-    )
-    reader.progress.report(reader, "running")
+async def _load_input(reader, height, *, report=True):
+    if report:
+        reader.progress.preparation_start(
+            "retained_history_loading", height, "load_checkpoint_or_selected_retained_frame"
+        )
+        reader.progress.report(reader, "running")
     try:
         completed = await run_owned_thread(reader.checkpoints.load, height)
     except HistoryCheckpointRepairRequired:
@@ -53,6 +54,78 @@ async def _load_input(reader, height):
             if context != reader._archive_context(height):
                 raise ValueError("imported history changes its requested domain")
     return None, fields, retained
+
+
+class _FrameInputs:
+    """Own bounded speculative reads, retaining all consumed bytes until apply."""
+
+    def __init__(self, reader, stop, first, last):
+        self.reader, self.stop = reader, stop
+        self.next, self.last = first, last
+        self.tasks = {}
+        self.bytes = 0
+        self.boundary = False
+
+    def _fill(self):
+        limit = self.reader.verification_profile.maximum_in_flight_bytes
+        while (
+            self.next <= self.last
+            and not self.boundary
+            and not self.stop.is_set()
+            and self.bytes + MAX_FRAME_BYTES <= limit
+        ):
+            height = self.next
+            self.next += 1
+            self.bytes += MAX_FRAME_BYTES
+            self.tasks[height] = asyncio.create_task(self._load(height))
+
+    async def _load(self, height):
+        size = 0
+        try:
+            result = await _load_input(self.reader, height, report=False)
+            completed, fields, _ = result
+            if completed is not None or fields is None:
+                self.boundary = True
+            else:
+                size = sum(map(len, fields.values()))
+                if size > MAX_FRAME_BYTES:
+                    raise ValueError("history frame exceeds its reserved byte bound")
+            return result
+        except BaseException:
+            self.boundary = True
+            raise
+        finally:
+            # No await between releasing the reservation and charging residency.
+            self.bytes += size - MAX_FRAME_BYTES
+
+    async def take(self, height):
+        self._fill()
+        if self.stop.is_set() or height not in self.tasks:
+            return None, None, False
+        # Only the ordered owner changes the visible preparation stage. A later
+        # download must not replace a header wait or claim native completion.
+        self.reader.progress.preparation_start(
+            "retained_history_loading", height, "load_checkpoint_or_selected_retained_frame"
+        )
+        self.reader.progress.report(self.reader, "running")
+        result = await await_owned_task(self.tasks[height], on_cancel=self.stop.set)
+        del self.tasks[height]
+        self._fill()
+        return result
+
+    async def __aenter__(self):
+        self._fill()
+        return self
+
+    async def __aexit__(self, *_):
+        # Gaps, completed checkpoints and failed predecessors end this window.
+        # Drain every started read before releasing its bytes or source tokens.
+        for height, task in self.tasks.items():
+            with suppress(Exception, asyncio.CancelledError):
+                await await_owned_task(task, on_cancel=self.stop.set)
+            self.reader._prepared_encodings.pop(height, None)
+            self.reader._source_tokens.pop(height, None)
+        self.tasks.clear()
 
 
 async def _persist(reader, pool, future, fields, retained):
@@ -112,10 +185,9 @@ async def _persist(reader, pool, future, fields, retained):
     return value
 
 
-async def _window(reader, provider, pool, entries, stop, *, last_height):
+async def _window(reader, provider, pool, entries, stop, *, last_height, inputs=None):
     tasks = []
     error = None
-    admitted_bytes = sum(sum(map(len, fields.values())) for _, fields, _ in entries)
     reader.progress.preparation_start(
         "owned_history_provider_wait",
         entries[0][0] if entries else None,
@@ -175,21 +247,9 @@ async def _window(reader, provider, pool, entries, stop, *, last_height):
                                 ),
                             )
                         )
-                        # Start this native check before loading the next frame.
-                        # Reserve a maximum-size frame before reading another.
-                        # Small frames can fill the count window without each
-                        # consuming a maximum-frame reservation for its lifetime.
-                        if (
-                            height < last_height
-                            and not stop.is_set()
-                            and admitted_bytes + MAX_FRAME_BYTES
-                            <= reader.verification_profile.maximum_in_flight_bytes
-                        ):
-                            completed, following, following_retained = await _load_input(
-                                reader, height + 1
-                            )
+                        if height < last_height and not stop.is_set() and inputs is not None:
+                            completed, following, following_retained = await inputs.take(height + 1)
                             if completed is None and following is not None:
-                                admitted_bytes += sum(map(len, following.values()))
                                 entries.append((height + 1, following, following_retained))
             # Checkpoint coroutines run as each worker finishes; gathering here
             # never imposes block order on durable completion.
@@ -274,10 +334,26 @@ async def _run(reader, provider, last, stop):
                 if reader._next > last or stop.is_set():
                     break
                 entries = []
+                fields = None
                 window_last = min(last, reader._next + profile.maximum_in_flight - 1)
-                completed, fields, retained = await _load_input(reader, reader._next)
-                if completed is None and fields is not None:
-                    entries.append((reader._next, fields, retained))
+                async with _FrameInputs(reader, stop, reader._next, window_last) as inputs:
+                    completed, fields, retained = await inputs.take(reader._next)
+                    if completed is None and fields is not None:
+                        entries.append((reader._next, fields, retained))
+                        if pool is None:
+                            pool = HistoryWorkers(
+                                profile,
+                                HistoryWorkerSelection.from_provider(provider, reader.hotkey),
+                            )
+                        values = await _window(
+                            reader,
+                            provider,
+                            pool,
+                            entries,
+                            stop,
+                            last_height=window_last,
+                            inputs=inputs,
+                        )
                 if not entries:
                     # Online capture retains serialized native verification, but
                     # uses every admitted frame for overlapping source persistence
@@ -289,13 +365,6 @@ async def _run(reader, provider, last, stop):
                         stop=stop,
                     )
                     continue
-                if pool is None:
-                    pool = HistoryWorkers(
-                        profile, HistoryWorkerSelection.from_provider(provider, reader.hotkey)
-                    )
-                values = await _window(
-                    reader, provider, pool, entries, stop, last_height=window_last
-                )
                 await _apply_prepared_window(reader, entries, values, stop)
         except BaseException as error:
             failure = compact_memory_error(error)
