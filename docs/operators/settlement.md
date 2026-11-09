@@ -5396,6 +5396,18 @@ retained-generation reads keep their existing byte bounds, immutable identity
 checks and repair behavior. Coordinator, reviewer and writer consumers receive
 this shared reader through their normal source update path.
 
+Independent proof objects can be fetched concurrently without holding the
+store-wide cache lock during network I/O. Reads of the same object share one
+fetch. In-flight response bodies reserve space within the existing cache byte
+limit before consumption; cache residency and active pins retain that limit.
+Capacity occupied by another fetch is released on completion or failure. A cache
+held entirely by active consumer leases still reports its existing capacity
+error. Each retained fetch checks its original generation and rechecks recorded
+damage before installing bytes. This changes transport scheduling, not proof
+acceptance, signed inputs, receipt formats or the native verification ABI.
+The caller still owns read concurrency and its frame budget; this transport
+change does not add history prefetch workers or enlarge an installed profile.
+
 Model-cache restoration reads file identities and verification receipts in one
 owned worker scan. The event loop remains available to schedule other challenge
 lanes during metadata I/O. `model_materialization_receipt_inventory` reports
