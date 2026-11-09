@@ -1922,6 +1922,8 @@ drains those operations before releasing the scheduler owner; restart replays
 the same signed requests and completed responses. A single `poll_once` remains
 a bounded batch observation for callers that explicitly request one.
 
+A model-only reviewer (`eligible_tracks: ["model"]`, with no `endpoint` configuration) skips retained endpoint assignments before history requests or CPU execution. An existing reviewer also needs an explicit local host-selection migration before starting with that configuration. Signed assignments and journals remain intact; selecting the endpoint track again resumes unfinished work. This local scheduling choice does not certify or close a cohort. The operator command `tools/migrate_reviewer_tracks.py` accepts a root-owned, read-only JSON request containing `source` (the selected installed source), `before` and `after` references (`path` and `sha256`), and a durable service-account-owned `output` directory. Run it with the installed interpreter's `-I -B` flags as the reviewer account while the native handoff holds the service stopped. It permits only removal of the endpoint configuration and narrowing to the model track; it retains the original local binding and changes no signed cohort record. Keep its intent and completion receipts for restart and recovery. A failed earlier attempt that retained the exact local selection hold can use the same explicit repair; unrelated holds remain. The command does not select a new service configuration or start the reviewer.
+
 The endpoint worker starts alongside CPU execution and completion exports. It
 delivers requests, retrieves retained responses, obtains independent retirement
 votes and resumes certified replacements. Missing inputs or unavailable peers

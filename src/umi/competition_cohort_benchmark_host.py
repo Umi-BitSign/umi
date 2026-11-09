@@ -230,6 +230,7 @@ class BenchmarkHost:
             batch_size=c.batch_size,
             concurrency=c.concurrency,
             defer_endpoint_until_terminal=getattr(config, "endpoint", None) is not None,
+            eligible_tracks=config.eligible_tracks,
         )
         self.journal = RoundJournal(
             Path(c.directory),

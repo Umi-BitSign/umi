@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import time
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from contextvars import ContextVar
 from typing import Annotated, Literal
 
@@ -14,17 +14,36 @@ from pydantic import Field, model_serializer, model_validator
 from .competition_transport_verification import TransferProgress
 from .host_cpu_timing import CpuTimingHostSelection, CpuTimingSession, load_cpu_timing_profile
 from .host_memory_admission import (
+    CAPACITY_RETRY_SECONDS,
     AdmissionBindingError,
     HostMemoryAdmission,
     HostMemoryFile,
     HostMemorySlot,
     _absolute,
 )
+from .host_memory_export_wait import model_waiter, yield_to_export
 from .open_competition import digest
 from .protocol import Hex32, StrictProtocolModel
 
 _ACTIVE = ContextVar("host_model_execution_lease", default=None)
+_PREPARATION = ContextVar("host_model_preparation_checkpoint", default=None)
 _LOGGER = logging.getLogger("umi.competition.progress")
+
+
+async def yield_model_preparation_capacity():
+    """Yield only after the transfer has drained I/O and dropped its range buffer.
+
+    The suspended transfer retains bounded metadata, already reflected in host
+    usage. It cannot fetch or allocate another range before reacquiring capacity.
+    Timed model invocations never install this checkpoint.
+    """
+    active = _PREPARATION.get()
+    if active is None:
+        return
+    task, pid, checkpoint = active
+    if task is not asyncio.current_task() or pid != os.getpid():
+        raise RuntimeError("another task cannot yield model preparation capacity")
+    await checkpoint()
 
 
 def inherited_model_lease():
@@ -202,6 +221,9 @@ class ModelExecutionMemoryPolicy(StrictProtocolModel):
 
 class ModelExecutionAdmission:
     def __init__(self, selection, policy, *, reattach_worker=False):
+        from .host_memory_startup import current_startup_reservation
+
+        startup = current_startup_reservation()
         self.selection = {
             "policy_path": str(selection.policy_path),
             "policy_sha256": selection.policy_sha256,
@@ -211,14 +233,17 @@ class ModelExecutionAdmission:
             policy_path=_absolute(selection.policy_path),
             expected_sha256=selection.policy_sha256,
             host_identity_path=_absolute(selection.host_identity_path),
-            _reattach_model_worker=reattach_worker,
+            _reattach_model_worker=reattach_worker or startup is not None,
         )
+        if startup is not None:
+            startup.compatible_model_controller(self.controller)
         selected = self.controller.policy
         if not self.controller.model_execution_stage or (
             selected.protocol_policy_sha256 != digest(policy)
             or selected.evaluation_runtime_sha256 != policy.evaluation_runtime_sha256
         ):
             raise AdmissionBindingError("model execution capacity differs from signed policy")
+        self._preparation_lock = asyncio.Lock()
         self.protocol_policy = policy.model_copy(deep=True)
         self.cpu_timing_profile = load_cpu_timing_profile(
             selected.cpu_timing_profile, self.controller
@@ -274,20 +299,12 @@ class ModelExecutionAdmission:
                 finally:
                     token.close()
 
-    @asynccontextmanager
-    async def hold(
-        self, runtime, *, exclusive=False, preparation=False, runtime_authorization=None
-    ):
-        self.check_runtime(runtime, runtime_authorization=runtime_authorization)
-        if self.controller.joint_execution_stage and not preparation:
-            from .host_memory_runtime import inherited_graph_lease
-
-            if inherited_graph_lease() is not None or inherited_model_lease() is not None:
-                raise RuntimeError("nested joint execution would wait on its own capacity")
-        lane = "owner_export" if preparation else "transient"
-        count = len(self.slots) if exclusive and not preparation else 1
+    async def _acquire_capacity(self, lane, count, *, preparation):
         started = time.monotonic()
-        with TransferProgress("model_execution_capacity", count, unit="slots") as progress:
+        with (
+            model_waiter(self.controller, lane),
+            TransferProgress("model_execution_capacity", count, unit="slots") as progress,
+        ):
             last_wait = None
             while True:
                 options = (
@@ -318,16 +335,57 @@ class ModelExecutionAdmission:
                         self.controller, lane=lane, count=count, started=started, state="waiting"
                     )
                     last_wait = now
-                await asyncio.sleep(0.5)
+                # Model and graph work compete for the same native slot. Use
+                # the same retry cadence so inference does not sample each
+                # released slot five times less often than graph consumers.
+                await asyncio.sleep(CAPACITY_RETRY_SECONDS)
             progress.advance(count)
-        try:
-            token = (
-                None
-                if preparation
-                else _ACTIVE.set((self.controller, lease, asyncio.current_task()))
-            )
-            yield lease
-        finally:
-            if token is not None:
-                _ACTIVE.reset(token)
-            lease.close()
+        return lease
+
+    @asynccontextmanager
+    async def hold(
+        self, runtime, *, exclusive=False, preparation=False, runtime_authorization=None
+    ):
+        self.check_runtime(runtime, runtime_authorization=runtime_authorization)
+        if self.controller.joint_execution_stage and not preparation:
+            from .host_memory_runtime import inherited_graph_lease
+
+            if inherited_graph_lease() is not None or inherited_model_lease() is not None:
+                raise RuntimeError("nested joint execution would wait on its own capacity")
+        if preparation and _PREPARATION.get() is not None:
+            raise RuntimeError("nested model preparation would wait on its own capacity")
+        lane = "owner_export" if preparation else "transient"
+        count = len(self.slots) if exclusive and not preparation else 1
+        async with AsyncExitStack() as stack:
+            if preparation:
+                # Another local transfer must not borrow the native slot while
+                # waiting for a path lock retained by this suspended transfer.
+                await stack.enter_async_context(self._preparation_lock)
+            lease = await self._acquire_capacity(lane, count, preparation=preparation)
+
+            async def checkpoint():
+                nonlocal lease
+                lease.close()
+                lease = None
+                # Let queued exports reach their existing native retry before this
+                # download competes again. No memory or CPU budget is enlarged.
+                await asyncio.sleep(CAPACITY_RETRY_SECONDS)
+                await yield_to_export(self.controller, CAPACITY_RETRY_SECONDS)
+                lease = await self._acquire_capacity(lane, count, preparation=True)
+
+            token = preparation_token = None
+            try:
+                if preparation and self.controller.joint_execution_stage:
+                    preparation_token = _PREPARATION.set(
+                        (asyncio.current_task(), os.getpid(), checkpoint)
+                    )
+                elif not preparation:
+                    token = _ACTIVE.set((self.controller, lease, asyncio.current_task()))
+                yield lease
+            finally:
+                if preparation_token is not None:
+                    _PREPARATION.reset(preparation_token)
+                if token is not None:
+                    _ACTIVE.reset(token)
+                if lease is not None:
+                    lease.close()

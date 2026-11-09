@@ -462,7 +462,10 @@ class ModelDeliveryAdoptionOwner:
                     raise ValueError("model-delivery certificate lacks its exact owner reservation")
                 control.store.commit(request.certificate)
                 history, state, _, _ = control._history()
-                await node._publish(history)
+                if transition.model_delivery_adoption.storage_only:
+                    await node._publish(history, publish_closed_results=False)
+                else:
+                    await node._publish(history)
                 return canonical_json_bytes(state)
             else:
                 raise ValueError("unknown model-delivery control operation")

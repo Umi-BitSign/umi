@@ -561,6 +561,7 @@ def evaluator_config(o, name, root):
     )
     return SimpleNamespace(
         policy=o.h.intake.policy,
+        eligible_tracks=("endpoint", "model"),
         series=o.config.series,
         owner_hotkey=o.config.admission_owner.owner_hotkey,
         owner_origin="https://owner.example",

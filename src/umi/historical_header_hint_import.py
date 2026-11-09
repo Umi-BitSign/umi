@@ -23,6 +23,7 @@ from .competition_worker import (
 )
 from .finalized_ancestry import MAXIMUM_HEADER_BYTES
 from .grandpa_finality import _decode_header
+from .historical_header_capacity import hint_payload_usage
 
 MAXIMUM_BATCH_BYTES = 8 * 1024**2
 SCHEMA = "umi-untrusted-header-hint-import/1"
@@ -268,17 +269,9 @@ class HeaderHintImport:
                     chars += len(encoded)
                 if not rows or processed + len(rows) > selection["total"]:
                     raise ValueError("source hint transfer scope changed or contains a gap")
-                # SQLite pages are a conservative upper bound for ASCII hint
-                # payload. Avoid rescanning the growing cache on every import
-                # batch when even this bound is comfortably below capacity.
-                used = (
-                    target.execute("PRAGMA page_count").fetchone()[0]
-                    * target.execute("PRAGMA page_size").fetchone()[0]
+                used = hint_payload_usage(
+                    target, additional_bytes=chars, maximum_bytes=self.maximum_bytes
                 )
-                if used + chars > self.maximum_bytes:
-                    used = target.execute(
-                        "SELECT COALESCE(SUM(length(encoded)),0) FROM historical_header_hints"
-                    ).fetchone()[0]
                 for _rowid, block_hash, encoded in rows:
                     old = target.execute(
                         "SELECT substr(encoded,1,?) FROM historical_header_hints WHERE hash=?",

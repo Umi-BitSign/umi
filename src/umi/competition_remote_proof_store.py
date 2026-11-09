@@ -1180,15 +1180,29 @@ class RemoteProofStore:
                 if self.receipt_source is not None:
                     raise ValueError("producer proof receipt is missing; explicit repair required")
                 with TransferProgress("proof_import", 1, unit="objects") as progress:
-                    head = self.client.head(key)
-                    if head is None:
-                        raise FileNotFoundError("selected remote proof object is unavailable")
-                    if expected_sha256 is not None and head.content_sha256 != expected_sha256:
-                        raise ValueError("remote proof path changes its content address")
-                    if not 0 < head.size_bytes <= maximum <= MAX_PROOF_OBJECT_BYTES:
+                    if not 0 < maximum <= MAX_PROOF_OBJECT_BYTES:
                         raise ValueError("remote proof import exceeds its consumer bound")
-                    self._space(head.size_bytes)
-                    raw = self.client.read(key, head, maximum=maximum)
+                    if isinstance(self.client, R2EvidenceClient):
+                        first = self.client.discover(
+                            key,
+                            maximum=maximum,
+                            expected_sha256=expected_sha256,
+                            admit=lambda head: self._space(head.size_bytes),
+                        )
+                        if first is None:
+                            raise FileNotFoundError("selected remote proof object is unavailable")
+                        head, raw = first
+                    else:
+                        # Preserve injected transports without a first-read API.
+                        head = self.client.head(key)
+                        if head is None:
+                            raise FileNotFoundError("selected remote proof object is unavailable")
+                        if expected_sha256 is not None and head.content_sha256 != expected_sha256:
+                            raise ValueError("remote proof path changes its content address")
+                        if not 0 < head.size_bytes <= maximum:
+                            raise ValueError("remote proof import exceeds its consumer bound")
+                        self._space(head.size_bytes)
+                        raw = self.client.read(key, head, maximum=maximum)
                     reference = self._reference(key, head)
                     self._remember(reference)
                     sha = digest(reference)

@@ -10,7 +10,6 @@ import logging
 import os
 from collections import OrderedDict
 from collections.abc import Iterator
-from contextlib import suppress
 from pathlib import Path
 from threading import Lock
 
@@ -68,6 +67,7 @@ class RequestCompletionFiles:
         self.maximum_bytes = maximum_bytes
         ReplayObjectCollector(self.objects, maximum_bytes)
         self._published = OrderedDict()
+        self._unretained = set()
         self._cached_paths = 0
         self._cache_lock = Lock()
         self._publication_lock = Lock()
@@ -309,6 +309,10 @@ class RequestCompletionFiles:
             return False
         if os.getpid() != self._pid:
             return False
+        with self._cache_lock:
+            pending = tuple(self._published[key] for key in self._unretained)
+        for receipt in pending:
+            self._remember(receipt)
         key = (terminal_sha, policy_sha256)
         with self._cache_lock:
             record = self._published.get(key)
@@ -336,15 +340,21 @@ class RequestCompletionFiles:
             else:
                 old = self._published.pop(key, None)
                 if old is not None:
+                    self._unretained.discard(key)
                     self._cached_paths -= len(old.files)
-            return unchanged
+            unretained = unchanged and key in self._unretained
+        if unretained:
+            # Retry only the failed checkpoint, never the completed native work.
+            self._remember(record)
+        return unchanged
 
     def _remember_cached(self, key, receipt):
         old = self._published.pop(key, None)
         if old is not None:
             self._cached_paths -= len(old.files)
         while self._published and self._cached_paths + len(receipt.files) > 65536:
-            _, old = self._published.popitem(last=False)
+            removed, old = self._published.popitem(last=False)
+            self._unretained.discard(removed)
             self._cached_paths -= len(old.files)
         self._published[key] = receipt
         self._cached_paths += len(receipt.files)
@@ -353,12 +363,17 @@ class RequestCompletionFiles:
         if os.getpid() != self._pid:
             return
         with self._cache_lock:
-            self._remember_cached((receipt.terminal_sha256, receipt.policy_sha256), receipt)
+            key = (receipt.terminal_sha256, receipt.policy_sha256)
+            self._remember_cached(key, receipt)
+            self._unretained.add(key)
             # Concurrent exports share one nonblocking private cache mutex.
             # Serialize our own writes so a successful publication also keeps
             # its restart receipt instead of treating local contention as a miss.
         with self._publication_lock:
             remember_publication_verification(self.root, receipt)
+        with self._cache_lock:
+            if self._published.get(key) is receipt:
+                self._unretained.discard(key)
 
     def _order_path(self, round_sha: str, submission: str) -> Path:
         # Both keys are derived from validated native objects by callers.
@@ -416,25 +431,7 @@ class RequestCompletionFiles:
             publish_private_model(order_path, _Reference(sha256=digest(order)), maximum_bytes=1024)
             publish_private_model(index, _Reference(sha256=key), maximum_bytes=1024)
         paths = (order_path, index, *(self.objects._path(sha) for sha in sorted(collected.values)))
-        with suppress(OSError, ValueError):
-            if len(paths) <= 65536:
-                self._remember(
-                    PublicationVerificationReceipt(
-                        schema="umi-private-request-publication/1",
-                        terminal_sha256=key,
-                        policy_sha256=digest(owner.policy),
-                        maximum_bytes=self.maximum_bytes,
-                        opened_at_block=0,
-                        completed_by_block=completed_by_block,
-                        files=tuple(
-                            PublicationFileStamp(
-                                relative_path=str(path.relative_to(self.root)),
-                                stamp=tuple(str(v) for v in self._stamp(path)),
-                            )
-                            for path in paths
-                        ),
-                    )
-                )
+        self._remember_paths(key, digest(owner.policy), 0, completed_by_block, paths)
         self._remember_model_partial(
             owner, slot, assignment, job, manifest, key, completed_by_block
         )
@@ -712,13 +709,21 @@ class RequestCompletionFiles:
         completed_by_block: int,
     ) -> None:
         collected = ReplayObjectCollector(source, self.maximum_bytes)
-        assignment = read_request_terminal(
-            signed,
-            collected,
-            policy,
-            opened_at_block=opened_at_block,
-            completed_by_block=completed_by_block,
-        )
+        from .competition_transport_verification import TransferProgress
+
+        with TransferProgress("request_publication_native_review", 1, unit="terminals") as progress:
+            if self.objects._path(digest(signed)).exists():
+                progress.emit(
+                    "repair_required", reason="legacy_publication_receipt_absent_or_output_changed"
+                )
+            assignment = read_request_terminal(
+                signed,
+                collected,
+                policy,
+                opened_at_block=opened_at_block,
+                completed_by_block=completed_by_block,
+            )
+            progress.advance(1)
         order = assignment.certificate
         collected.retain(order)
         collected.retain(signed)
@@ -749,28 +754,34 @@ class RequestCompletionFiles:
             terminal_path,
             *(self.objects._path(key) for key in sorted(collected.values)),
         )
-        # Cache bookkeeping cannot turn a durable successful publication into
-        # a failed export. A missing receipt simply requires native replay.
-        with suppress(OSError, ValueError):
-            if len(paths) > 65536:
-                return
-            self._remember(
-                PublicationVerificationReceipt(
-                    schema="umi-private-request-publication/1",
-                    terminal_sha256=digest(signed),
-                    policy_sha256=digest(policy),
-                    maximum_bytes=self.maximum_bytes,
-                    opened_at_block=opened_at_block,
-                    completed_by_block=completed_by_block,
-                    files=tuple(
-                        PublicationFileStamp(
-                            relative_path=str(path.relative_to(self.root)),
-                            stamp=tuple(str(v) for v in self._stamp(path)),
-                        )
-                        for path in paths
-                    ),
-                )
+        self._remember_paths(
+            digest(signed), digest(policy), opened_at_block, completed_by_block, paths
+        )
+
+    def _remember_paths(self, terminal, policy, opened, completed, paths):
+        from .competition_publication_receipt_store import PublicationReceiptStore
+
+        if len(paths) > 65536:
+            raise PublicationReceiptStore.failure("publication_receipt_path_capacity")
+        try:
+            receipt = PublicationVerificationReceipt(
+                schema="umi-private-request-publication/1",
+                terminal_sha256=terminal,
+                policy_sha256=policy,
+                maximum_bytes=self.maximum_bytes,
+                opened_at_block=opened,
+                completed_by_block=completed,
+                files=tuple(
+                    PublicationFileStamp(
+                        relative_path=str(path.relative_to(self.root)),
+                        stamp=tuple(str(v) for v in self._stamp(path)),
+                    )
+                    for path in paths
+                ),
             )
+        except (OSError, ValueError) as error:
+            raise PublicationReceiptStore.failure("publication_receipt_output_changed") from error
+        self._remember(receipt)
 
     def orders(
         self, roster: RecoverableRosterEvidence

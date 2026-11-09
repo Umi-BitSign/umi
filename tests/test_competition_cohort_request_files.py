@@ -636,49 +636,75 @@ async def test_restart_cache_never_accepts_changed_export_or_verification_contex
     assert restarted.current(digest(terminal), **args)
 
 
-@pytest.mark.parametrize("failure", ["corrupt", "symlink", "write_unavailable"])
-async def test_disposable_publication_cache_failure_does_not_hold_exports(
+@pytest.mark.parametrize("failure", ["corrupt", "missing", "symlink"])
+async def test_damaged_publication_receipt_is_explicit_without_native_replay(
     exporting, monkeypatch, failure
 ):
-    from umi import competition_cohort_request_reuse as reuse
+    from umi.competition_publication_receipt_store import PublicationReceiptUnavailable
 
     h = exporting
-    if failure == "write_unavailable":
-
-        def unavailable(*args, **kwargs):
-            raise OSError("synthetic cache write unavailable")
-
-        monkeypatch.setattr(reuse, "publish_private_model", unavailable)
     await publish_all(h)
-    count = len(h.exports_signed)
-    cache = h.files.root / ".publication-verification"
+    store = h.files.root / ".publication-verification" / "receipts.sqlite3"
+    target = h.files.root / "untouched"
     if failure == "corrupt":
-        for path in cache.glob("*.json"):
-            path.write_bytes(b"{broken")
-    elif failure == "symlink":
-        target = h.files.root / "invalid-cache-target"
-        target.write_bytes(b"must remain untouched")
-        for path in cache.glob("*.json"):
-            path.unlink()
-            path.symlink_to(target)
-
+        store.write_bytes(b"damaged")
+    else:
+        store.unlink()
+        if failure == "symlink":
+            target.write_bytes(b"untouched")
+            store.symlink_to(target)
     restarted = RequestCompletionFiles(h.files.root)
-    replayed = []
-    original = restarted.publish
 
-    def replay(*args, **kwargs):
-        replayed.append(digest(args[0]))
-        return original(*args, **kwargs)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("damaged completed state must not silently replay")
 
-    monkeypatch.setattr(restarted, "publish", replay)
+    monkeypatch.setattr(restarted, "publish", forbidden)
     for worker in h.workers:
         worker.files = restarted
-    await publish_all(h)
-    assert replayed
-    assert len(h.exports_signed) == count
-    assert h.window().completion == "complete"
+    reports = [await worker.poll_once() for worker in h.workers]
+    assert sum(report["retry_count"] for report in reports) > 0
+    assert any(
+        report["last_error_type"] == PublicationReceiptUnavailable.__name__ for report in reports
+    )
     if failure == "symlink":
-        assert target.read_bytes() == b"must remain untouched"
+        assert target.read_bytes() == b"untouched"
+
+
+async def test_failed_receipt_write_retries_checkpoint_without_replay(exporting, monkeypatch):
+    from umi import competition_cohort_request_files as module
+    from umi.competition_publication_receipt_store import PublicationReceiptUnavailable
+
+    h = exporting
+    original = module.remember_publication_verification
+
+    def unavailable(*args, **kwargs):
+        raise PublicationReceiptUnavailable("publication_receipt_storage_unavailable")
+
+    monkeypatch.setattr(module, "remember_publication_verification", unavailable)
+    reports = [await worker.poll_once() for worker in h.workers]
+    assert sum(report["retry_count"] for report in reports) > 0
+    assert h.files._unretained
+    monkeypatch.setattr(module, "remember_publication_verification", original)
+
+    completed = {key[0] for key in h.files._published}
+    original_publish = h.files.publish
+
+    def only_new_work(signed, *args, **kwargs):
+        assert digest(signed) not in completed, "checkpoint retry must not repeat native work"
+        return original_publish(signed, *args, **kwargs)
+
+    monkeypatch.setattr(h.files, "publish", only_new_work)
+    await publish_all(h)
+    assert not h.files._unretained
+    h.files = RequestCompletionFiles(h.files.root)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("restart must reuse completed receipts")
+
+    monkeypatch.setattr(h.files, "publish", forbidden)
+    for worker in h.workers:
+        worker.files = h.files
+    await publish_all(h)
 
 
 def unfinished_endpoint(h):

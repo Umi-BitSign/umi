@@ -1,5 +1,7 @@
 """Synthetic evidence rejects incomparable conditions without repeating inference."""
 
+import json
+
 import pytest
 
 from umi.competition_cpu_conditions import comparable_conditions
@@ -106,6 +108,33 @@ def test_own_memory_limit_faults_and_host_psi_are_not_subtracted_or_excused():
         ),
     )
     validate(value)
+
+
+@pytest.mark.parametrize("field", ["external_memory_full_us", "external_io_full_us"])
+def test_pressure_rejection_retains_exact_threshold_and_counters(caplog, field):
+    value = evidence()
+    duration = value.finished_monotonic_us - value.model_started_monotonic_us
+    boundary = duration // 100
+    value = replace_condition(
+        value,
+        after_pressure=value.conditions.after_pressure.model_copy(update={field: boundary}),
+    )
+    validate(value)
+    assert not caplog.records
+    value = replace_condition(
+        value,
+        after_pressure=value.conditions.after_pressure.model_copy(update={field: boundary + 1}),
+    )
+    with pytest.raises(CpuTimingInfrastructureError, match="cpu_condition_external_pressure"):
+        validate(value)
+    record = json.loads(caplog.records[-1].message)
+    assert record["schema"] == "umi-cpu-pressure-rejection/1"
+    assert record["pressure_field"] == field
+    assert record["duration_us"] == duration
+    assert record["maximum_external_pressure_bps"] == 100
+    assert record["pressure_changes"][field] == boundary + 1
+    assert record["invocation_sha256"] == value.conditions.invocation_sha256
+    assert not record["certification_authority"]
 
 
 def test_consistent_slow_host_cannot_compare_with_fast_reference():

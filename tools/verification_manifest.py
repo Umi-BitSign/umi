@@ -85,6 +85,11 @@ seeds = [
     "host_cpu_probe",
     # Timed invocations launch this selected-source module through runpy.
     "competition_cohort_sandbox_worker",
+    # Native preparation rendering and peer memory inspection are selected by
+    # external owned controllers; retain their previously guarded source pins.
+    "competition_reward_preparation_service",
+    "host_memory_peer",
+    "host_memory_graph_peer",
 ]
 modules = set()
 external_imports = set()
@@ -134,6 +139,7 @@ body = {
     "schema": "umi-native-verification-dependencies/1",
     "abi": "umi-native-request-verification/1",
     "extensions": {
+        "cohort_model_delivery_adoption_v3": "umi-native-archival-model-storage/1",
         "archived_execution_shared_incumbent_v2": "umi-native-shared-incumbent/2",
         "shared_incumbent_source_terminal_v2": "umi-native-shared-incumbent/2",
         "shared_incumbent_source_participant_v2": "umi-native-shared-incumbent/2",

@@ -35,6 +35,7 @@ from .test_competition_cohort_model_delivery_issuance import prepared as prepare
 from .test_competition_cohort_model_delivery_issuance import receipt_scenario as receipt_scenario
 from .test_competition_cohort_model_delivery_issuance import recovery as recovery
 from .test_competition_cohort_model_delivery_issuance import runtime as runtime
+from .test_competition_cohort_model_delivery_issuance import storage_only as storage_only
 from .test_open_competition import wallet
 
 pytestmark = [

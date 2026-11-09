@@ -448,7 +448,9 @@ class CohortModelAcceptances:
         its finalized-registration filter. They never grant roster authority.
         """
         self.intake._allowed(cohort)
-        with self.intake._connection() as (db, _):
+        # Polling must not occupy the writer gate or queue threads behind
+        # preservation. Count both ledgers in one committed, query-only snapshot.
+        with self.intake._connection(prefer_history=True) as (db, _):
             rows = tuple(
                 db.execute(
                     "SELECT c.hotkey,c.sequence,"

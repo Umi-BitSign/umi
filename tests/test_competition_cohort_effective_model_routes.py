@@ -4,8 +4,10 @@ Finality and R2 are synthetic ports. Intake/history, authorization, payload
 journals and acceptance reservations are the native production implementations.
 """
 
+import asyncio
 import fcntl
 import os
+from threading import Event
 from types import SimpleNamespace
 
 import httpx
@@ -260,6 +262,43 @@ async def test_discovery_holds_during_adoption_then_advertises_effective_route(d
         assert entry["profile_source"] == "signed_model_delivery_adoption"
         assert "direct_model_upload_url" in entry
         assert "model_upload_url" not in entry
+
+
+async def test_discovery_cancellation_drains_history_without_starting_delivery(
+    delivery, monkeypatch
+):
+    h = delivery
+    entered, release = Event(), Event()
+    original = h.intake.history
+
+    def blocked_history(cohort):
+        entered.set()
+        assert release.wait(5)
+        return original(cohort)
+
+    class Delivery:
+        def delivery_route(self, cohort):
+            pytest.fail("cancelled catalog started another blocking read")
+
+    routes = cohort_routes(h.intake, h.capture, maximum_body_bytes=4 * 1024**2, models=Delivery())
+    endpoint = next(r.endpoint for r in routes.routes if r.path == "/v1/competition/cohorts")
+    monkeypatch.setattr(h.intake, "history", blocked_history)
+    task = asyncio.create_task(endpoint())
+
+    async def wait_entered():
+        while not entered.is_set():
+            await asyncio.sleep(0.001)
+
+    try:
+        await asyncio.wait_for(wait_entered(), 4)
+        for _ in range(2):
+            task.cancel()
+            await asyncio.sleep(0.01)
+            assert not task.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 def test_retained_acceptance_retry_keeps_legacy_bytes_without_current_artifact(prepared, tmp_path):

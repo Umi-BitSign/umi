@@ -87,7 +87,9 @@ class R2EvidenceClient:
             raise RuntimeError("R2 evidence connection scope belongs to another process")
         return nullcontext(retained[1])
 
-    def _exchange(self, method, key, *, body=b"", headers=None, maximum=0, statuses=(200,)):
+    def _exchange(
+        self, method, key, *, body=b"", headers=None, maximum=0, statuses=(200,), read_bound=None
+    ):
         signed = self.signer.authorized_headers(
             method, key, body=body, additional_headers=headers
         ) | {"Accept-Encoding": "identity", "Content-Length": str(len(body))}
@@ -104,8 +106,10 @@ class R2EvidenceClient:
                     raise R2EvidenceHTTPError(response.status_code)
                 if response.headers.get("content-encoding") not in {None, "identity"}:
                     raise ValueError("R2 evidence response used content encoding")
-                if method == "HEAD":
+                if method == "HEAD" or response.status_code == 404:
                     return response.status_code, dict(response.headers), b""
+                if read_bound is not None:
+                    maximum = read_bound(dict(response.headers))
                 raw = bytearray()
                 for chunk in response.iter_bytes(chunk_size=64 * 1024):
                     if len(raw) + len(chunk) > maximum:
@@ -119,6 +123,10 @@ class R2EvidenceClient:
         status, headers, _ = self._exchange("HEAD", key, statuses=(200, 404))
         if status == 404:
             return None
+        return self._head(headers)
+
+    @staticmethod
+    def _head(headers) -> EvidenceObjectHead:
         try:
             size = int(headers["content-length"])
             etag = headers["etag"].strip('"')
@@ -134,6 +142,41 @@ class R2EvidenceClient:
         ):
             raise ValueError("R2 evidence object metadata differs")
         return EvidenceObjectHead(size, etag, sha)
+
+    def discover(self, key, *, maximum, expected_sha256=None, admit=None):
+        """Read a first-seen object's metadata and bytes from one bounded response.
+
+        No previous generation is selected here. Retained references keep their
+        conditional read path. Metadata and capacity are checked before reading
+        the body, and no completion is returned until its exact bytes match.
+        """
+        if type(maximum) is not int or maximum <= 0:
+            raise ValueError("R2 evidence object exceeds the selected read bound")
+        selected = None
+
+        def bound(headers):
+            nonlocal selected
+            selected = self._head(headers)
+            if selected.size_bytes > maximum:
+                raise ValueError("R2 evidence object exceeds the selected read bound")
+            if expected_sha256 is not None and selected.content_sha256 != expected_sha256:
+                raise ValueError("remote proof path changes its content address")
+            if admit is not None:
+                admit(selected)
+            return selected.size_bytes
+
+        status, _, raw = self._exchange(
+            "GET", key, maximum=maximum, statuses=(200, 404), read_bound=bound
+        )
+        if status == 404:
+            return None
+        if (
+            selected is None
+            or len(raw) != selected.size_bytes
+            or hashlib.sha256(raw).hexdigest() != selected.content_sha256
+        ):
+            raise ValueError("R2 evidence bytes differ from their immutable identity")
+        return selected, raw
 
     def publish(self, key: str, raw: bytes, sha256: str) -> EvidenceObjectHead:
         with self.connection_scope():

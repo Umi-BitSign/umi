@@ -62,6 +62,7 @@ from .competition_cpu_efficiency_policy import (
 from .competition_evaluation_runtime import authorize_evaluation_runtime
 from .competition_execution import execution_boundary
 from .competition_forecast import ForecastAttempt, ForecastCapacityRequired, ForecastLedger
+from .competition_forecast_compaction import ForecastCompactionConfig
 from .competition_forecast_maintenance import maintain_forecasts
 from .competition_forecast_storage import (
     ForecastArchiveConfig,
@@ -100,6 +101,7 @@ class LifecycleHostConfig(StrictProtocolModel):
     maximum_state_bytes: Annotated[int, Field(ge=1024**2, le=16 * 1024**3)] = 1024**3
     forecast_accounting_bytes: Annotated[int, Field(ge=64 * 1024, le=1024**3)] = 32 * 1024**2
     forecast_archive: ForecastArchiveConfig | None = None
+    forecast_compaction: ForecastCompactionConfig | None = None
     forecast_retention_index_bytes: Annotated[int, Field(ge=64 * 1024, le=1024**3)] = 512 * 1024**2
     request_tail_operator_token_file: Directory | None = None
     automatic_progression_hold_cohorts: tuple[Hex32, ...] = ()
@@ -112,6 +114,8 @@ class LifecycleHostConfig(StrictProtocolModel):
     @model_serializer(mode="wrap")
     def preserve_legacy(self, handler):
         value = handler(self)
+        if self.forecast_compaction is None:
+            value.pop("forecast_compaction", None)
         if self.forecast_archive is None:
             value.pop("forecast_archive", None)
         if self.forecast_retention_index_bytes == 512 * 1024**2:
@@ -211,6 +215,11 @@ class LifecycleHostConfig(StrictProtocolModel):
                 self.proof_export_directory,
                 *(self.proof_stores.credential_paths() if self.proof_stores else ()),
                 *forecast_credential_paths(self.forecast_archive, self.proof_stores),
+                *(
+                    (self.forecast_compaction.lock_file,)
+                    if include_shared and self.forecast_compaction is not None
+                    else ()
+                ),
                 self.sources.round_directory,
                 self.sources.objects_directory,
                 self.sources.transport_directory,
@@ -290,6 +299,7 @@ class LifecycleHost:
                 if remote is not None
                 else None,
                 maximum_index_bytes=c.forecast_retention_index_bytes,
+                compaction=c.forecast_compaction,
             )
             resources.callback(self.forecast_ledger.close)
         except ForecastCapacityRequired:

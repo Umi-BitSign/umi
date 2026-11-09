@@ -256,8 +256,14 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
             raise ValueError("policy adoption requires a selected full phase review budget")
         validate_adoption_candidates(
             self.model_delivery_adoption_candidates,
-            (digest(plan) for plan in self.series.cohorts if plan.sequence > 5),
+            (digest(plan) for plan in self.series.cohorts),
         )
+        ordinary = {digest(plan) for plan in self.series.cohorts if plan.sequence > 5}
+        if any(
+            not candidate.storage_only and candidate.source.cohort_sha256 not in ordinary
+            for candidate in self.model_delivery_adoption_candidates
+        ):
+            raise ValueError("legacy cohort model adoption must be storage-only")
         return self
 
     @model_validator(mode="after")

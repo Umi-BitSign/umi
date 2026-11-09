@@ -44,6 +44,7 @@ from .test_competition_reward_boot import control as control
 from .test_competition_reward_boot import inputs as inputs
 from .test_competition_reward_boot import policy as policy
 from .test_competition_reward_boot import series_case as series_case
+from .test_host_memory_admission import provisioned as provisioned
 from .test_open_competition import wallet
 
 
@@ -77,6 +78,145 @@ def config_for(value, root):
         eligible_tracks=("endpoint",),
         listen_port=19578,
     )
+
+
+@pytest.mark.parametrize("storage_only", [False, True])
+def test_original_cohort_candidate_requires_archival_scope(selected, tmp_path, storage_only):
+    from umi.competition_cohort_model_delivery_candidate import ModelDeliveryAdoptionCandidateConfig
+
+    from .test_competition_cohort_review_budget import profile, select
+
+    config = selected.config
+    plan = next(plan for plan in config.series.cohorts if plan.sequence == 5)
+    root = tmp_path / "archival-candidate"
+    candidate = ModelDeliveryAdoptionCandidateConfig.model_validate_json(
+        canonical_json_bytes(
+            dict(
+                schema="umi-model-delivery-adoption-candidate/1",
+                source=dict(
+                    schema="umi-legacy-model-storage-source/1",
+                    cohort_sha256=digest(plan),
+                    directory=str(root / "originals"),
+                    baseline_model_sha256="ab" * 32,
+                ),
+                delivery=dict(
+                    schema="umi-model-delivery-profile/1",
+                    mechanism="coordinator_chunked_v1"
+                    if storage_only
+                    else "direct_r2_multipart_v1",
+                    **(
+                        {}
+                        if storage_only
+                        else dict(
+                            part_size_bytes=64 * 1024**2,
+                            maximum_concurrent_parts=4,
+                            capability_ttl_seconds=3600,
+                        )
+                    ),
+                ),
+                r2_credentials_file=str(root / "credentials"),
+                r2_bucket="model-archive",
+                verification_directory=str(root / "verification"),
+                storage_only=storage_only,
+            )
+        )
+    )
+    configured = config.model_copy(update={"model_delivery_adoption_candidates": (candidate,)})
+    if storage_only:
+        loaded = select(configured, profile(config.policy))
+        assert loaded.model_delivery_adoption_candidates == (candidate,)
+        assert loaded.series == config.series
+    else:
+        with pytest.raises(ValueError, match="must be storage-only"):
+            select(configured, profile(config.policy))
+
+
+async def test_reserved_startup_covers_provider_and_benchmark_then_releases(
+    selected, providers, provisioned, monkeypatch, tmp_path
+):
+    from umi import host_memory_admission as native
+    from umi import host_memory_startup as startup
+    from umi.host_memory_runtime import HostMemoryAdmissionSelection
+
+    from .test_host_memory_workload_profile import profile_body, write_profile
+
+    c = with_benchmark(selected.config)
+    _, path, prior, write, _ = provisioned
+    gib = 1024**3
+    profile = write_profile(
+        tmp_path / "reserved-workload.json",
+        profile_body(
+            tmp_path,
+            digest(c.policy),
+            c.policy.evaluation_runtime_sha256,
+            digest(c.series),
+            digest(c.series.recovery.authority),
+        ),
+    )
+    body = dict(prior)
+    body.update(
+        schema="umi-host-execution-memory-admission/1",
+        minimum_available_bytes=4 * gib,
+        incremental_budget_bytes=15 * gib,
+        background_reservation_bytes=gib,
+        maximum_aggregate_bytes=4 * gib,
+        protocol_policy_sha256=digest(c.policy),
+        evaluation_runtime_sha256=c.policy.evaluation_runtime_sha256,
+        workload_profile=profile.model_dump(),
+        container_cgroup_roots=("/sys/fs/cgroup/umi-startup-test-absent",),
+        slots=[
+            dict(slot, reservation_bytes=size)
+            for slot, size in zip(prior["slots"], (gib, 8 * gib, 3 * gib, 3 * gib), strict=True)
+        ],
+    )
+    selection = HostMemoryAdmissionSelection(
+        policy_path=str(path), policy_sha256=write(body), startup_memory_bytes=8 * gib
+    )
+    c = c.model_copy(
+        update={
+            "host_memory_admission": selection,
+            "benchmark": c.benchmark.model_copy(update={"model_execution_admission": selection}),
+        }
+    )
+    monkeypatch.setattr(native, "_available_memory", lambda: 13 * gib)
+    monkeypatch.setattr(startup, "enforced_service_limit", lambda: 8 * gib)
+    original = boot.HistoricalRegistrationProvider
+    observed = []
+
+    def provider(*args, **kwargs):
+        reservation = startup.current_startup_reservation()
+        assert reservation is not None
+        assert reservation.controller.try_acquire("transient") is None
+        observed.append("reserved")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(boot, "HistoricalRegistrationProvider", provider)
+    for _ in range(2):
+        async with boot.phase_review_app(c) as app:
+            assert app.state.benchmark is not None
+            assert startup.current_startup_reservation() is None
+            controller = native.HostMemoryAdmission(
+                path, expected_sha256=selection.policy_sha256, _reattach_model_worker=True
+            )
+            lease = controller.try_acquire("transient")
+            assert lease is not None
+            lease.close()
+    assert observed == ["reserved", "reserved"]
+    assert providers.events.count("started") == providers.events.count("closed") == 2
+
+    # An independent lease owner must not delay this service's operator stop.
+    held = controller.try_acquire("transient")
+    assert held is not None
+    stop = asyncio.Event()
+    task = asyncio.create_task(boot.run_phase_review_service(c, stop))
+    try:
+        await asyncio.sleep(0)
+        stop.set()
+        await asyncio.wait_for(task, timeout=1)
+        assert observed == ["reserved", "reserved"]
+        os.close(lock_private_file(Path(c.signing.directory) / "service.lock"))
+    finally:
+        held.close()
 
 
 @pytest.fixture
@@ -416,6 +556,25 @@ def test_cli_reports_phase_failure_without_private_exception_text(selected, monk
     assert report["details"][0]["reason_code"] == "validation_failed"
     assert '"event":"failed"' in captured.err
     assert "PRIVATE_EXCEPTION_TEXT" not in captured.out + captured.err
+
+
+def test_cli_exposes_finality_audit_and_restores_logging(selected, monkeypatch, capsys):
+    import logging
+
+    loggers = [
+        logging.getLogger("umi." + name)
+        for name in ("grandpa_finality_supervisor", "grandpa_finality_frontier")
+    ]
+    before = [(x.level, x.propagate, tuple(x.handlers)) for x in loggers]
+
+    async def running(config):
+        for logger in loggers:
+            logger.info("finality_startup_audit completed=2 total=3")
+
+    monkeypatch.setattr(cli, "_run", running)
+    cli.main(["run", "--config", str(selected.path)])
+    assert capsys.readouterr().err.count("finality_startup_audit completed=2 total=3") == 2
+    assert [(x.level, x.propagate, tuple(x.handlers)) for x in loggers] == before
 
 
 def test_cli_reports_allowlisted_service_reason_without_private_cause(
@@ -1204,6 +1363,7 @@ async def test_direct_model_only_review_boot_omits_endpoint_path(selected, provi
         assert app.state.endpoint is None
         assert isinstance(app.state.benchmark.sandbox, DirectCohortCpuSandbox)
         assert app.state.benchmark.worker.defer_endpoint_until_terminal is False
+        assert app.state.benchmark.worker.eligible_tracks == ("model",)
         assert app.state.benchmark.sandbox.artifacts.config.r2_bucket == "umi-model-artifacts"
 
 

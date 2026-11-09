@@ -63,6 +63,27 @@ async def test_restart_reuses_generations_without_head_or_download(backup, tmp_p
     assert backup.remote.heads == backup.remote.reads == []
 
 
+@pytest.mark.parametrize("blocker", ["reader", "writer"])
+async def test_native_transaction_contention_preserves_completed_facts(backup, tmp_path, blocker):
+    instance = owned(backup, tmp_path)
+    snapshot = await instance.verify()
+    owner = instance._generations()
+    context = {**instance._remote_context(), "retry_probe": True}
+    with sqlite3.connect(owner.journal.path, isolation_level=None) as connection:
+        connection.execute("BEGIN" if blocker == "reader" else "BEGIN IMMEDIATE")
+        connection.execute("SELECT COUNT(*) FROM records").fetchone()
+        try:
+            with pytest.raises(ModelGenerationOwnerBusy, match="reader or writer") as caught:
+                owner.begin(context, instance._declarations())
+            assert isinstance(caught.value.__cause__, sqlite3.OperationalError)
+        finally:
+            connection.rollback()
+    assert owner.journal.get("scope-start", digest(context)) is None
+    instance.require_verified(snapshot)
+    owner.begin(context, instance._declarations())
+    assert owner.journal.get("scope-start", digest(context)) is not None
+
+
 @pytest.mark.parametrize("legacy_layout", [False, True])
 async def test_native_legacy_metadata_migration_preserves_bytes_and_never_heads(
     backup, tmp_path, legacy_layout

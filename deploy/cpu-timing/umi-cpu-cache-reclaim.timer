@@ -1,0 +1,11 @@
+[Unit]
+Description=Maintain clean-cache headroom between UMI CPU invocations
+
+[Timer]
+OnBootSec=30
+OnUnitInactiveSec=5
+AccuracySec=1
+Unit=umi-cpu-cache-reclaim.service
+
+[Install]
+WantedBy=timers.target

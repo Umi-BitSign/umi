@@ -1,8 +1,9 @@
 """Installed host admission selection and complete compact-result operations.
 
 Only bootstrap selects a controller. Child tasks inherit that immutable
-selection, never an active lease. Each operation acquires its own lease; there
-is no implicit reentrancy or sharing between concurrent children.
+selection, never an active lease. Each operation acquires its own lifetime.
+Bounded settlement work may explicitly retain its service's existing capacity;
+there is no implicit reentrancy or inherited ownership between children.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import Field, ValidationError, model_validator
+from pydantic import Field, ValidationError, model_serializer, model_validator
 
 from .competition_cohort_public_progress import is_cached_cohort_progress_request
 from .competition_progress import _failure_details
@@ -44,6 +45,14 @@ class HostMemoryAdmissionSelection(StrictProtocolModel):
     policy_path: str
     host_identity_path: str = "/etc/machine-id"
     policy_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    startup_memory_bytes: Annotated[int, Field(gt=0, strict=True)] | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_existing_selection(self, handler):
+        value = handler(self)
+        if self.startup_memory_bytes is None:
+            value.pop("startup_memory_bytes", None)
+        return value
 
     @model_validator(mode="after")
     def binding(self):
@@ -66,9 +75,14 @@ def probe_memory_startup(selection: HostMemoryAdmissionSelection | None):
             Path(selection.policy_path),
             expected_sha256=selection.policy_sha256,
             host_identity_path=Path(selection.host_identity_path),
+            _startup_reservation_bytes=selection.startup_memory_bytes,
         )
     except HostMemoryStartupPending as error:
         return dict(error.observation)
+    if selection.startup_memory_bytes is not None:
+        from .host_memory_startup import probe_startup_reservation
+
+        return probe_startup_reservation(controller)
     return (
         dict(controller.startup_observation)
         if controller.startup_observation is not None
@@ -140,6 +154,7 @@ def memory_runtime(
         Path(selection.policy_path),
         expected_sha256=selection.policy_sha256,
         host_identity_path=Path(selection.host_identity_path),
+        _startup_reservation_bytes=selection.startup_memory_bytes,
     )
     controller.bind_runtime(role, protocol_policy_sha256, series_sha256, authority_sha256)
     if (

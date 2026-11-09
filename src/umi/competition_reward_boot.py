@@ -8,7 +8,7 @@ stores separately; missing inputs remain pending in the native service.
 from __future__ import annotations
 
 import asyncio
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
@@ -34,6 +34,7 @@ from .competition_cohort_model_transport_selection import (
     requires_direct_model_review,
     selected_direct_model_review,
 )
+from .competition_forecast_compaction import ForecastCompactionConfig
 from .competition_forecast_storage import (
     ForecastArchiveConfig,
     forecast_credential_paths,
@@ -72,6 +73,8 @@ from .competition_reward_service import StandingRewardServiceLimits, run_standin
 from .competition_store import CompetitionStore
 from .competition_supervisor_adapters import ProductionSuccessorRuntimeAdapter
 from .competition_supervisor_runtime import SuccessorSupervisorRuntime, hold_successor_startup_lease
+from .competition_work_progress import WorkProgress, work_heartbeats
+from .competition_worker import _prepare_private_directory, _verify_private_directory
 from .concurrency import await_owned_task, run_owned_thread
 from .host_memory_runtime import HostMemoryAdmissionSelection, memory_runtime
 from .open_competition import CompetitionPolicy, digest, identity
@@ -136,6 +139,7 @@ class StandingRewardBootConfig(StrictProtocolModel):
         DEFAULT_HISTORY_FORECAST_BYTES
     )
     forecast_archive: ForecastArchiveConfig | None = None
+    forecast_compaction: ForecastCompactionConfig | None = None
     forecast_retention_index_bytes: Annotated[int, Field(ge=64 * 1024, le=1024**3)] = 512 * 1024**2
 
     runtime_proof_reads: bool = False
@@ -159,6 +163,8 @@ class StandingRewardBootConfig(StrictProtocolModel):
         value = handler(self)
         if self.forecast_accounting_bytes == DEFAULT_HISTORY_FORECAST_BYTES:
             value.pop("forecast_accounting_bytes", None)
+        if self.forecast_compaction is None:
+            value.pop("forecast_compaction", None)
         if self.forecast_archive is None:
             value.pop("forecast_archive", None)
         if self.forecast_retention_index_bytes == 512 * 1024**2:
@@ -298,6 +304,11 @@ class StandingRewardBootConfig(StrictProtocolModel):
                 self.proof_import_directory,
                 *(self.proof_stores.credential_paths() if self.proof_stores else ()),
                 *forecast_credential_paths(self.forecast_archive, self.proof_stores),
+                *(
+                    (self.forecast_compaction.lock_file,)
+                    if include_shared and self.forecast_compaction is not None
+                    else ()
+                ),
                 self.proof_export_directory,
                 *(c.resources.state_directory for c in self.legacy_chains),
                 *(self.direct_model_review.stores() if self.direct_model_review else ()),
@@ -392,6 +403,109 @@ def select_standing_boot(
 
 async def _close_provider(provider):
     await await_owned_task(asyncio.create_task(provider.aclose()))
+
+
+def _construct_standing_provider(
+    constructing, config, chain, policy, locations, header_root, *, runtime_proof_reads
+):
+    provider = HistoricalRewardControlProvider(
+        chain,
+        policy,
+        resources=locations,
+        runtime_proof_reads=runtime_proof_reads,
+        historical_header_directory=header_root,
+        historical_header_maximum_bytes=config.maximum_header_bytes,
+        historical_header_database_maximum_bytes=config.maximum_header_database_bytes,
+    )
+    # Register ownership before returning, including when construction runs in
+    # an owned thread whose caller was cancelled while the constructor drained.
+    constructing.push_async_callback(_close_provider, provider)
+    return provider
+
+
+@asynccontextmanager
+async def hold_legacy_preparation_providers(config, host, directory: Path):
+    """Own native legacy readers in an independently admitted private directory.
+
+    The caller supplies the authenticated boot/host selection and supervises the
+    operation under its resource budget. This creates no installation or writer
+    capability. Original chain bytes and executable locations stay unchanged;
+    only writable provider state is relocated. Retain this directory for retry.
+    """
+    if type(config) is not StandingRewardBootConfig:
+        raise TypeError("native standing boot configuration required")
+    directory = Path(directory)
+    # Validate the entire route before any mutable store is created. Native
+    # directory checks reject symlinks, noncanonical paths and foreign owners.
+    _verify_private_directory(directory, "legacy preparation provider root")
+    protected = (
+        *config.mutable_stores(),
+        Path(config.approval_path),
+        *(
+            Path(getattr(host, name))
+            for name in ("state_root", "worker_state_root", "release_root", "operator_input_root")
+        ),
+        Path(host.wallet.path),
+        *(
+            Path(value)
+            for selected in config.legacy_chains
+            for name in CompetitionChainResources.model_fields
+            if name != "state_directory"
+            and (value := getattr(selected.resources, name)) is not None
+        ),
+    )
+    for path in protected:
+        if directory.is_relative_to(path) or path.is_relative_to(directory):
+            raise ValueError("legacy preparation providers overlap protected installed inputs")
+    async with AsyncExitStack() as constructing:
+        providers = {}
+        with (
+            work_heartbeats(),
+            WorkProgress(
+                "legacy_preparation_providers", len(config.legacy_chains), unit="providers"
+            ) as progress,
+        ):
+            for selected in config.legacy_chains:
+                sha = digest(selected.chain)
+                root = _prepare_private_directory(directory / sha, "legacy preparation chain")
+                state = _prepare_private_directory(root / "chain", "legacy preparation finality")
+                locations = selected.resources.model_copy(update={"state_directory": str(state)})
+                provider = await run_owned_thread(
+                    partial(
+                        _construct_standing_provider,
+                        constructing,
+                        config,
+                        selected.chain,
+                        config.legacy_policy,
+                        locations,
+                        root / "headers",
+                        runtime_proof_reads=False,
+                    )
+                )
+                providers[sha] = provider
+                progress.advance()
+        for provider in providers.values():
+            await provider.start()
+        yield providers
+
+
+async def run_legacy_preparation_with_providers(providers, operation):
+    """Stop preparation promptly if an owned native observer exits; drain reads."""
+    task = asyncio.create_task(operation)
+    try:
+        while True:
+            done, _ = await asyncio.wait((task,), timeout=1)
+            if done:
+                return task.result()
+            for provider in providers.values():
+                provider.ensure_observer_running()
+    finally:
+
+        async def drain():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        await await_owned_task(asyncio.create_task(drain()))
 
 
 async def run_installed_standing_rewards(
@@ -574,20 +688,19 @@ async def _run_owned_standing_inputs(host, config, stop, *, runtime=None, credit
             ),
         ):
             sha = digest(chain)
-            provider = HistoricalRewardControlProvider(
+            provider = _construct_standing_provider(
+                constructing,
+                config,
                 chain,
                 policy,
-                resources=locations,
+                locations,
+                root / "headers" / sha,
                 # Legacy recovery retains the original helper and read protocol.
                 runtime_proof_reads=config.runtime_proof_reads and sha == digest(config.chain),
-                historical_header_directory=root / "headers" / sha,
-                historical_header_maximum_bytes=config.maximum_header_bytes,
-                historical_header_database_maximum_bytes=config.maximum_header_database_bytes,
             )
             # Constructors own cache locks. Close earlier owners if any later
             # constructor fails before the native service takes responsibility.
             providers[sha] = provider
-            constructing.push_async_callback(_close_provider, provider)
         current = providers[digest(config.chain)]
         coverage_package_guard = asyncio.Lock()
         collection = StandingRewardCoverageService(

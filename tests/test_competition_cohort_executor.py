@@ -1432,3 +1432,37 @@ def test_case_wait_preserves_preparation_and_full_signed_inference_budgets(polic
         )
         assert job_policy_timeout(journal) >= read_budget + policy.maximum_inference_ms / 1000
     assert canonical_json_bytes(policy) == signed
+
+
+async def test_model_only_worker_preserves_unselected_endpoint_for_restart(execution, monkeypatch):
+    e = execution
+    worker = e.worker(eligible_tracks=("model",))
+    if e.job.mode != "endpoint_incumbent":
+        report = await worker.poll_once()
+        assert report["jobs_unselected"] == 0
+        assert len(e.calls) == 1
+        return
+    original = canonical_json_bytes(e.assignment)
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("unselected endpoint must not request history or execute")
+
+    monkeypatch.setattr(worker.executor, "current", forbidden)
+    for _ in range(2):
+        report = await worker.poll_once()
+        assert report["jobs_unselected"] == 1
+        assert report["jobs_complete"] == report["retry_count"] == report["jobs_deferred"] == 0
+    active = {}
+    try:
+        await worker._rolling_poll(active)
+        await asyncio.gather(*active.values())
+        report = await worker._rolling_poll(active)
+        assert report["jobs_unselected"] == 1
+    finally:
+        await worker._drain(active.values())
+    assert not e.calls
+    assert canonical_json_bytes(e.assignment) == original
+    assert e.journal().journal.get("assignment", e.r.slot) is None
+    # Restart through the legacy default resumes exactly the same inbox entry.
+    report = await e.worker().poll_once()
+    assert report["jobs_unselected"] == 0 and len(e.calls) == 1

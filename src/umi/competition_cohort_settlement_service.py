@@ -972,6 +972,7 @@ class SettlementSeriesScheduler:
         self._locks = {node: asyncio.Lock() for node in self.nodes}
         self._completed = set()
         self.recovery_requested = set()
+        self._maintenance_task = None
 
     @staticmethod
     def _report(node, report):
@@ -1057,6 +1058,17 @@ class SettlementSeriesScheduler:
         for node in self.nodes:
             if node.cohort in self.held_cohorts:
                 continue
+            if (
+                node in self._completed
+                and node.cohort not in self.recovery_requested
+                and self._maintenance_task is not None
+                and not self._maintenance_task.done()
+            ):
+                # The supervised maintenance owner already repairs completed
+                # inputs, history and outputs. Do not repeat its package reads
+                # and capacity grants on every native scheduling pass. A repair
+                # request returns this cohort to the ordinary ordered path.
+                continue
             async with self._locks[node]:
                 okay, status = await self._attempt(node, node.maintain, stage="maintenance")
             if not okay or status is None:
@@ -1123,6 +1135,7 @@ class SettlementSeriesScheduler:
             asyncio.create_task(self._loop(stop, self.tick)),
             asyncio.create_task(self._loop(stop, self.maintain_completed)),
         ]
+        self._maintenance_task = tasks[1]
         failure = None
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -1149,5 +1162,6 @@ class SettlementSeriesScheduler:
                 node._release_active_inputs()
                 node._release_memory()
             self.active = None
+            self._maintenance_task = None
         if failure is not None:
             raise failure from None

@@ -26,8 +26,12 @@ from .competition_cohort_execution_journal import (
     step_count,
 )
 from .competition_cohort_execution_retry import (
+    ResidentTimingPressure,
+    release_resident_timing,
     resident_execution_retries,
+    resident_timing_turn,
     retry_resident_operation,
+    retry_resident_timing,
 )
 from .competition_cohort_order_inbox import CohortOrderInbox
 from .competition_cohort_order_signer import (
@@ -38,10 +42,12 @@ from .competition_cohort_order_signer import (
     remember_order_history,
     review_order,
 )
+from .competition_cpu_timing import CpuTimingInfrastructureError
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_progress import report_execution_retry
 from .competition_round_journal import FinalizedHeadRegression
 from .competition_runner import OfflineCaseExecution
+from .competition_timing_admission import TimingAttemptAdmission
 from .competition_transport_verification import TransferProgress
 from .competition_verification_reuse import VerificationReuse
 from .competition_work_progress import await_progress, review_scope
@@ -208,6 +214,7 @@ class CohortExecutor(CohortExecutionAuthority):
     ):
         super().__init__(journal, provider, history)
         self.sandbox = sandbox
+        self.timing_admission = TimingAttemptAdmission()
 
     async def _journal_progress(self, assignment, operation, *args):
         cohort = (
@@ -345,7 +352,11 @@ class CohortExecutor(CohortExecutionAuthority):
                 # iteration covers an already-complete retained job; this is a
                 # finite scheduling batch, not a new deadline or protocol gate.
                 for _ in range(total - restored + 1):
-                    result = await self.advance(assignment)
+                    result = await retry_resident_timing(
+                        lambda: self.advance(assignment),
+                        admission=self.timing_admission,
+                        defer_admission=True,
+                    )
                     completed = await self._journal_progress(
                         job, self.journal.checkpoint_count, job
                     )
@@ -439,33 +450,56 @@ class CohortExecutor(CohortExecutionAuthority):
                     )
                     await self._journal_progress(job, self.journal.stopped, attempt)
                     source, started = await self.current(assignment)
-                attempt = await self._journal_progress(
-                    job, self.journal.begin, job, index, source, started
-                )
-
-                async def invoke_and_retain():
-                    result = await await_progress(
-                        self.sandbox.invoke(job, attempt),
-                        stage="execution_sandbox",
-                        cohort=job.round.cohort_sha256,
-                    )
-                    # Drain the owned persistence attempt before cancellation
-                    # releases the job lock; recovery reuses the exact result,
-                    # exhaustion preserves the existing failure path.
-                    await await_owned_task(
-                        asyncio.create_task(
-                            retry_resident_operation(
-                                lambda: self._journal_progress(
-                                    job, self.journal.observe, job, attempt, result
-                                )
-                            )
+                async with resident_timing_turn() as waited:
+                    if waited:
+                        # Queueing can change authority after preparation. The
+                        # native attempt still uses a fresh authenticated view.
+                        source, started = await self.current(assignment)
+                    # A contended transaction rolls back before publishing its
+                    # attempt. Retry the exact native reservation while resident;
+                    # begin rechecks heads/holds and reuses any retained reservation.
+                    # No sandbox invocation exists yet, and exhaustion still returns
+                    # the failure to ordinary scheduling.
+                    attempt = await retry_resident_operation(
+                        lambda: self._journal_progress(
+                            job, self.journal.begin, job, index, source, started
                         )
                     )
 
-                # Restoration and shared cache queues precede inference. Give
-                # them the configured read budget without consuming the signed
-                # inference limit, which the sandbox enforces independently.
-                await wait_for_owned(invoke_and_retain(), timeout=job_policy_timeout(self.journal))
+                    async def invoke_and_retain():
+                        try:
+                            result = await await_progress(
+                                self.sandbox.invoke(job, attempt),
+                                stage="execution_sandbox",
+                                cohort=job.round.cohort_sha256,
+                            )
+                        except CpuTimingInfrastructureError as error:
+                            if error.reason_code == "cpu_condition_external_pressure":
+                                raise ResidentTimingPressure() from error
+                            raise
+
+                        async def retain_result():
+                            try:
+                                # invoke has drained native cleanup and timing checks.
+                                await release_resident_timing()
+                            finally:
+                                await retry_resident_operation(
+                                    lambda: self._journal_progress(
+                                        job, self.journal.observe, job, attempt, result
+                                    )
+                                )
+
+                        # Drain the owned persistence attempt before cancellation
+                        # releases the job lock; recovery reuses the exact result,
+                        # exhaustion preserves the existing failure path.
+                        await await_owned_task(asyncio.create_task(retain_result()))
+
+                    # Restoration and shared cache queues precede inference. Give
+                    # them the configured read budget without consuming the signed
+                    # inference limit, which the sandbox enforces independently.
+                    await wait_for_owned(
+                        invoke_and_retain(), timeout=job_policy_timeout(self.journal)
+                    )
             _, finished = await self.current(assignment)
             await self._journal_progress(job, self.journal.finish, job, attempt, finished)
             return await self._journal_progress(job, self.journal.evidence, slot)
@@ -484,6 +518,7 @@ class CohortExecutionWorker:
         batch_size=16,
         concurrency=4,
         defer_endpoint_until_terminal=False,
+        eligible_tracks=("endpoint", "model"),
         maintenance=None,
     ):
         if (
@@ -498,6 +533,9 @@ class CohortExecutionWorker:
             or type(concurrency) is not int
             or not 1 <= concurrency <= 32
             or type(defer_endpoint_until_terminal) is not bool
+            or not eligible_tracks
+            or tuple(eligible_tracks) != tuple(sorted(set(eligible_tracks)))
+            or not set(eligible_tracks) <= {"endpoint", "model"}
         ):
             raise ValueError("execution worker capacity is outside bounds")
         if (
@@ -509,6 +547,7 @@ class CohortExecutionWorker:
         self.inbox, self.executor, self.batch_size = inbox, executor, batch_size
         self.concurrency = concurrency
         self.defer_endpoint_until_terminal = defer_endpoint_until_terminal
+        self.eligible_tracks = tuple(eligible_tracks)
         self.maintenance = maintenance
         self.capacity = asyncio.Semaphore(concurrency)
         # All assignments share one private inbox lock. Parallel sandbox jobs
@@ -670,6 +709,7 @@ class CohortExecutionWorker:
                 "jobs_complete": sum(r[1] == "complete" for r in results),
                 "steps_advanced": sum(r[1] == "progress" for r in results),
                 "jobs_deferred": len(deferred),
+                "jobs_unselected": sum(r[1] == "unselected" for r in results),
                 "retry_count": len(pending),
                 "last_retry_slot": pending[-1][0] if pending else "",
                 "last_retry_type": pending[-1][2] if pending else "",
@@ -683,6 +723,11 @@ class CohortExecutionWorker:
             try:
                 async with self.inbox_reads:
                     assignment = await run_owned_thread(self.inbox.assignment, slot)
+                # Local scheduling selection does not cancel or rewrite the
+                # retained signed assignment. Re-enabling its track resumes it.
+                track = assignment.certificate.order.submission.submission.track
+                if track not in self.eligible_tracks:
+                    return slot, "unselected", "track_not_selected"
                 if self.defer_endpoint_until_terminal:
                     job = await run_owned_thread(
                         self.executor.journal.validate_assignment, assignment
@@ -776,6 +821,7 @@ class CohortExecutionWorker:
             "jobs_complete": sum(r[1] == "complete" for r in results),
             "steps_advanced": sum(r[1] == "progress" for r in results),
             "jobs_deferred": len(deferred),
+            "jobs_unselected": sum(r[1] == "unselected" for r in results),
             "in_flight_operations": len(active),
             "retry_count": len(pending),
             "last_retry_slot": pending[-1][0] if pending else "",

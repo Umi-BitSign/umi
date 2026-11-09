@@ -47,18 +47,22 @@ class ModelDeliveryAdoptionCandidateConfig(StrictProtocolModel):
     verification_directory: Directory
     r2_timeout_seconds: Annotated[int, Field(ge=1, le=300)] = 60
     model_only: bool = False
+    storage_only: bool = False
 
     @model_serializer(mode="wrap")
     def preserve_transport_only_config(self, handler):
         value = handler(self)
         if not self.model_only:
             value.pop("model_only", None)
+        if not self.storage_only:
+            value.pop("storage_only", None)
         return value
 
     @model_validator(mode="after")
-    def direct_only(self):
-        if self.delivery.mechanism != "direct_r2_multipart_v1":
-            raise ValueError("model delivery candidate requires direct R2 transport")
+    def selected_transport(self):
+        expected = "coordinator_chunked_v1" if self.storage_only else "direct_r2_multipart_v1"
+        if self.delivery.mechanism != expected or (self.storage_only and self.model_only):
+            raise ValueError("model delivery candidate transport differs from its adoption scope")
         paths = self.stores(include_shared=False)
         validate_shared_byte_stores((self.source,), paths)
         if any(
@@ -177,6 +181,7 @@ class ModelDeliveryAdoptionCandidate:
             legacy_inventory_sha256=digest(legacy),
             preservation_inventory_sha256=digest(preservation),
             model_only=self.config.model_only,
+            storage_only=self.config.storage_only,
         )
 
     def authenticate(self, history, transition):
@@ -185,6 +190,8 @@ class ModelDeliveryAdoptionCandidate:
             raise ValueError("model delivery candidate selects another cohort")
         if transition.model_delivery_adoption.delivery != self.config.delivery:
             raise ValueError("model delivery candidate selects another transport")
+        if transition.model_delivery_adoption.storage_only != self.config.storage_only:
+            raise ValueError("model delivery candidate selects another archival scope")
         if (
             transition.model_delivery_adoption.eligible_tracks == ("model",)
         ) != self.config.model_only:

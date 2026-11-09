@@ -17,6 +17,9 @@ def test_selected_dependency_manifest_is_complete_and_qualified():
         == hashlib.sha256(rules.VERIFICATION_SEMANTICS.encode()).hexdigest()
     )
     for module in (
+        "grandpa_finality_frontier.py",
+        "grandpa_finality_wal_open.py",
+        "competition_chunked_model_retirement.py",
         "competition_verification_reuse.py",
         "competition_reward_allocation_export.py",
         "competition_reward_cutover.py",
@@ -40,6 +43,7 @@ def test_selected_dependency_manifest_is_complete_and_qualified():
         "competition_reward_writer_resources.py",
         "competition_chain_resource_preflight.py",
         "historical_header_hint_import.py",
+        "historical_header_capacity.py",
         "competition_cohort_request_closure.py",
         "competition_cohort_request_publication.py",
         "competition_cohort_publication_objects.py",
@@ -147,5 +151,20 @@ def test_additive_shared_incumbent_semantics_are_guarded_without_invalidating_le
         == hashlib.sha256(b"umi-native-request-verification/1").hexdigest()
     )
     manifest["extensions"] = {}
+    with pytest.raises(RuntimeError, match="qualified dependency manifest"):
+        rules.verify_dependency_manifest(source, manifest)
+
+
+def test_archival_wire_extension_keeps_unchanged_native_receipts():
+    source = Path(rules.__file__).parent
+    manifest = json.loads((source / "competition_verification_rules.json").read_bytes())
+    assert manifest["extensions"]["cohort_model_delivery_adoption_v3"] == (
+        "umi-native-archival-model-storage/1"
+    )
+    assert (
+        rules.verify_dependency_manifest(source, manifest)
+        == hashlib.sha256(b"umi-native-request-verification/1").hexdigest()
+    )
+    del manifest["extensions"]["cohort_model_delivery_adoption_v3"]
     with pytest.raises(RuntimeError, match="qualified dependency manifest"):
         rules.verify_dependency_manifest(source, manifest)

@@ -12,8 +12,13 @@ from pydantic import Field
 
 from .competition_artifacts import _artifact, _directory, _file_identity
 from .competition_remote_model_verification import _RemoteModelRanges
-from .competition_transport_verification import ByteCheckpoints, verifier_semantics
+from .competition_transport_verification import (
+    ByteCheckpoints,
+    TransferProgress,
+    verifier_semantics,
+)
 from .concurrency import run_owned_thread
+from .host_model_execution import yield_model_preparation_capacity
 from .open_competition import digest
 from .private_files import ensure_private_directory, publish_private_model, read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -49,6 +54,99 @@ def _identity(path, root):
     ):
         raise ValueError("model cache file is not an owned private regular file")
     return {"archive": [str(root.st_dev), str(root.st_ino)], "file": _file_identity(info)}
+
+
+def _restore_metadata(
+    saved,
+    bundle,
+    payload,
+    model,
+    root,
+    target,
+    document_paths,
+    progress,
+    available_bytes,
+    reserve_bytes,
+):
+    """One owned scan; no model-byte reads or repeated successful verification."""
+    reusable = {}
+    local = {}
+    with TransferProgress(
+        "model_materialization_receipt_inventory",
+        len(bundle.files),
+        unit="files",
+        planning_unit_seconds=(0.001, 1),
+    ) as inventory:
+        for record in bundle.files:
+            destination = model / record.path
+            try:
+                stamp = _identity(destination, root)
+            except FileNotFoundError:
+                stamp = None
+            prior = saved.load(record.path, stamp)
+            if prior is not None and prior != record.sha256:
+                progress.emit(
+                    "repair_required", reason="materialization_file_digest_binding_changed"
+                )
+            if stamp is not None:
+                local[record.path] = stamp
+            if prior == record.sha256 and stamp is not None:
+                reusable[record.path] = stamp
+            inventory.advance(1, restored=record.path in reusable)
+    identities = [[record.path, local.get(record.path)] for record in bundle.files]
+    completed = saved.load("payload", identities)
+    if completed is not None:
+        try:
+            result_path = saved.root / "payload-result.json"
+            if result_path.lstat().st_size > 64 * 1024**2:
+                raise ValueError("materialization result exceeds its metadata bound")
+            raw = saved._read(result_path)
+        except FileNotFoundError:
+            raw = None
+        try:
+            result = CompletedModelMaterialization.model_validate_json(raw or b"")
+            if (
+                canonical_json_bytes(result) != raw
+                or digest(result) != completed
+                or result.payload_sha256 != payload.payload_sha256
+                or set(result.documents) != set(document_paths)
+                or any(stamp is None for _, stamp in identities)
+            ):
+                raise ValueError("materialization result differs")
+            documents = {name: bytes.fromhex(value) for name, value in result.documents.items()}
+            if any(documents[name].hex() != value for name, value in result.documents.items()):
+                raise ValueError("materialization document encoding differs")
+        except ValueError:
+            progress.emit("repair_required", reason="materialization_result_missing_or_damaged")
+        else:
+            for record in bundle.files:
+                if record.path not in reusable:
+                    saved.remember(record.path, local[record.path], record.sha256)
+            progress.advance(payload.total_bytes, restored=True)
+            progress.advance_operations(len(bundle.files), restored=True)
+            publish_private_model(target / "manifest.json", bundle)
+            return (
+                reusable,
+                local,
+                (target, documents, [[name, stamp["file"]] for name, stamp in identities]),
+            )
+    # Owned partial files cannot contribute completed bytes. Reclaim them
+    # before measuring capacity, so an interrupted large file cannot prevent
+    # its own repair. Complete-size files need no new allocation even when
+    # their missing receipt requires a local native check.
+    for record in bundle.files:
+        info = local.get(record.path)
+        if info is not None and int(info["file"][2]) != record.size_bytes:
+            destination = model / record.path
+            if _identity(destination, root) != info:
+                raise ValueError("partial model cache changed before repair")
+            destination.unlink()
+            del local[record.path]
+            reusable.pop(record.path, None)
+    retained_bytes = sum(record.size_bytes for record in bundle.files if record.path in local)
+    if available_bytes() < payload.total_bytes - retained_bytes + reserve_bytes:
+        raise OSError("direct model scratch capacity is unavailable")
+    return reusable, local, None
 
 
 async def materialize_model_files(
@@ -112,72 +210,21 @@ async def materialize_model_files(
         "source": source,
     }
     with ByteCheckpoints(state_root, binding, progress) as saved:
-        reusable = {}
-        local = {}
-        for record in bundle.files:
-            destination = model / record.path
-            try:
-                stamp = _identity(destination, root)
-            except FileNotFoundError:
-                stamp = None
-            prior = saved.load(record.path, stamp)
-            if prior is not None and prior != record.sha256:
-                progress.emit(
-                    "repair_required", reason="materialization_file_digest_binding_changed"
-                )
-            if stamp is not None:
-                local[record.path] = stamp
-            if prior == record.sha256 and stamp is not None:
-                reusable[record.path] = stamp
-        identities = [[record.path, local.get(record.path)] for record in bundle.files]
-        completed = saved.load("payload", identities)
+        reusable, local, completed = await run_owned_thread(
+            _restore_metadata,
+            saved,
+            bundle,
+            payload,
+            model,
+            root,
+            target,
+            document_paths,
+            progress,
+            available_bytes,
+            reserve_bytes,
+        )
         if completed is not None:
-            try:
-                result_path = saved.root / "payload-result.json"
-                if result_path.lstat().st_size > 64 * 1024**2:
-                    raise ValueError("materialization result exceeds its metadata bound")
-                raw = saved._read(result_path)
-            except FileNotFoundError:
-                raw = None
-            try:
-                result = CompletedModelMaterialization.model_validate_json(raw or b"")
-                if (
-                    canonical_json_bytes(result) != raw
-                    or digest(result) != completed
-                    or result.payload_sha256 != payload.payload_sha256
-                    or set(result.documents) != set(document_paths)
-                    or any(stamp is None for _, stamp in identities)
-                ):
-                    raise ValueError("materialization result differs")
-                documents = {name: bytes.fromhex(value) for name, value in result.documents.items()}
-                if any(documents[name].hex() != value for name, value in result.documents.items()):
-                    raise ValueError("materialization document encoding differs")
-            except ValueError:
-                progress.emit("repair_required", reason="materialization_result_missing_or_damaged")
-            else:
-                for record in bundle.files:
-                    if record.path not in reusable:
-                        saved.remember(record.path, local[record.path], record.sha256)
-                progress.advance(payload.total_bytes, restored=True)
-                progress.advance_operations(len(bundle.files), restored=True)
-                await run_owned_thread(publish_private_model, target / "manifest.json", bundle)
-                return target, documents, [[name, stamp["file"]] for name, stamp in identities]
-        # Owned partial files cannot contribute completed bytes. Reclaim them
-        # before measuring capacity, so an interrupted large file cannot prevent
-        # its own repair. Complete-size files need no new allocation even when
-        # their missing receipt requires a local native check.
-        for record in bundle.files:
-            info = local.get(record.path)
-            if info is not None and int(info["file"][2]) != record.size_bytes:
-                destination = model / record.path
-                if _identity(destination, root) != info:
-                    raise ValueError("partial model cache changed before repair")
-                destination.unlink()
-                del local[record.path]
-                reusable.pop(record.path, None)
-        retained_bytes = sum(record.size_bytes for record in bundle.files if record.path in local)
-        if available_bytes() < payload.total_bytes - retained_bytes + reserve_bytes:
-            raise OSError("direct model scratch capacity is unavailable")
+            return completed
         offset = 0
         # Coalesce only adjacent missing files. A retained file splits the
         # remote range so restart never downloads its completed bytes again.
@@ -259,6 +306,13 @@ async def materialize_model_files(
                         remaining -= size
                         progress.advance(size, restored=restored)
                         del data
+                        if not local_file and ranges.position == len(ranges.buffer):
+                            # All reads/writes above are drained. Drop the full
+                            # range before lending this shared slot to exports;
+                            # resume authenticating the same payload afterward.
+                            ranges.buffer = b""
+                            ranges.position = 0
+                            await yield_model_preparation_capacity()
                     if output is not None:
                         await run_owned_thread(output.flush)
                         os.fchmod(output.fileno(), 0o400)
@@ -283,7 +337,7 @@ async def materialize_model_files(
                     if _identity(destination, root) != stamp:
                         raise ValueError("model cache changed after transfer")
                     if not restored:
-                        saved.remember(record.path, stamp, record.sha256)
+                        await run_owned_thread(saved.remember, record.path, stamp, record.sha256)
                     written_files.append([record.path, stamp["file"]])
                     if document is not None:
                         documents[record.path] = bytes(document)
@@ -300,8 +354,11 @@ async def materialize_model_files(
             payload_sha256=payload.payload_sha256,
             documents={name: raw.hex() for name, raw in documents.items()},
         )
-        saved._write(saved.root / "payload-result.json", canonical_json_bytes(result))
-        saved.remember(
+        await run_owned_thread(
+            saved._write, saved.root / "payload-result.json", canonical_json_bytes(result)
+        )
+        await run_owned_thread(
+            saved.remember,
             "payload",
             [
                 [name, {"archive": [str(root.st_dev), str(root.st_ino)], "file": stamp}]

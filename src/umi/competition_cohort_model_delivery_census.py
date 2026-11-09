@@ -183,7 +183,11 @@ def census_model_delivery(intake, uploads, transition, candidate, *, reserve=Fal
             raise ValueError("model delivery census lost its selected predecessor")
         if pending is not None and pending != transition:
             raise ValueError("model delivery census conflicts with pending owner decision")
-        if state.phase != "intake" or intake._seal(db, history, state.tip_sha256) is not None:
+        adoption = transition.model_delivery_adoption
+        if adoption.storage_only:
+            if not adoption.permits_phase(state.phase):
+                raise ValueError("model archive adoption requires closed native requests")
+        elif state.phase != "intake" or intake._seal(db, history, state.tip_sha256) is not None:
             raise ValueError("model delivery adoption requires unsealed native intake")
         authenticated = candidate.authenticate(history, transition)
         _compare(db, intake, uploads, history, authenticated, candidate.originals)

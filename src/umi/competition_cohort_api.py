@@ -7,6 +7,7 @@ import re
 import sqlite3
 from collections.abc import Awaitable, Callable
 from functools import partial
+from threading import Event
 from typing import Protocol
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -67,15 +68,21 @@ def cohort_routes(
         if cohort not in intake.bindings:
             raise HTTPException(404, "recoverable cohort not found")
 
-    @router.get("/v1/competition/cohorts")
-    async def cohorts():
+    def read_catalog(stop):
+        # Own one bounded metadata operation. Re-entering the busy executor
+        # for every history and delivery route multiplies queue delay by the
+        # cohort count while keeping the same HTTP request slot occupied.
         entries = []
         for binding in intake.config.cohorts:
+            if stop.is_set():
+                break
             cohort = binding.cohort_sha256
             try:
-                history = await run_owned_thread(intake.history, cohort)
+                history = intake.history(cohort)
             except (ValueError, OSError, sqlite3.Error) as error:
                 raise HTTPException(503, "cohort history unavailable; retry later") from error
+            if stop.is_set():
+                break
             adoption = next(
                 (
                     item.transition.model_delivery_adoption
@@ -103,7 +110,7 @@ def cohort_routes(
                 owners = getattr(models, "owners", None)
                 if callable(route):
                     try:
-                        model_route = await run_owned_thread(route, cohort)
+                        model_route = route(cohort)
                     except (ValueError, OSError, sqlite3.Error) as error:
                         raise HTTPException(
                             503, "cohort model delivery unavailable; retry later"
@@ -132,14 +139,21 @@ def cohort_routes(
                     "participation_url": f"/v1/competition/cohorts/{cohort}/participation",
                     "admissions_url": f"/v1/competition/cohorts/{cohort}/admissions",
                     **model_route,
-                    **(
-                        {"admission": intake.admission_status(cohort)}
-                        if intake.admission_status(cohort) is not None
-                        else {}
-                    ),
                 }
             )
         return {"schema": "umi-public-cohorts/1", "cohorts": entries}
+
+    @router.get("/v1/competition/cohorts")
+    async def cohorts():
+        stop = Event()
+        result = await run_owned_thread(read_catalog, stop, on_cancel=stop.set)
+        # Read the changing deadline/window projection on its event-loop owner
+        # after the metadata worker drains, including across an intake cutoff.
+        for entry in result["cohorts"]:
+            admission = intake.admission_status(entry["cohort_sha256"])
+            if admission is not None:
+                entry["admission"] = admission
+        return result
 
     @router.get("/v1/competition/cohorts/{cohort}/history")
     async def history(cohort: str):

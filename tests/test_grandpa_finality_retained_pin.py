@@ -8,9 +8,11 @@ No native process or RPC is started by these store/parser tests.
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -93,12 +95,14 @@ def _parse(observer, encoded=_RECORD):
 
 
 def _metadata(path):
-    with sqlite3.connect(path) as connection:
+    # Inspection must not leave a writer whose eventual GC checkpoints the WAL
+    # outside the finality owner. SQLite's transaction context does not close it.
+    with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as connection:
         return dict(connection.execute("SELECT key,value FROM store_meta"))
 
 
 def _break_build(path, **changes):
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         value = json.loads(_metadata(path)["config"])
         value["observer"].update(
             # Fixed historical misbinding, independent of future current builds
@@ -118,6 +122,23 @@ def _break_build(path, **changes):
             (hashlib.sha256(raw).digest(),),
         )
     return raw
+
+
+def test_retained_metadata_inspection_has_no_deferred_wal_cleanup(tmp_path, retained_observer):
+    port = _port(tmp_path / "metadata.sqlite3", retained_observer)
+    port.accept_attestation(_BINDING, _parse(retained_observer))
+    enabled = gc.isenabled()
+    gc.collect()
+    gc.disable()
+    try:
+        _metadata(port._path)
+        with port._frontier.owner():
+            before = port._frontier.snapshot()
+            gc.collect()
+            assert port._frontier.snapshot() == before
+    finally:
+        if enabled:
+            gc.enable()
 
 
 @pytest.mark.asyncio
@@ -218,7 +239,7 @@ def test_exact_empty_constructor_only_layout_repairs_in_place_once(
     if predecessor:
         expected["scoring_policy_hash"] = "b1" * 32
     assert after["config"] == canonical_json_bytes(expected)
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
     assert "state=completed" in caplog.text
     caplog.clear()
@@ -275,7 +296,7 @@ def test_empty_repair_refuses_damaged_or_unrelated_store_without_partial_changes
     if fault == "unrelated_limit":
         changes["startup_timeout_seconds"] = 901
     _break_build(path, **changes)
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         if fault == "digest":
             connection.execute(
                 "UPDATE store_meta SET value=? WHERE key='config_sha256'", (b"x" * 32,)

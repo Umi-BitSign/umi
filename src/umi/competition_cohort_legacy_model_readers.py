@@ -197,7 +197,7 @@ class LegacyModelStorageReaders:
         )
         return resolution
 
-    def reader(self, resolution):
+    def reader(self, resolution, *, read_only=False):
         selection = ChunkedBackupSelection.model_validate_json(
             canonical_json_bytes(resolution.selection)
         )
@@ -238,7 +238,7 @@ class LegacyModelStorageReaders:
             raise ValueError("authenticated model sources select conflicting byte stores")
         store = stores[0] if stores else None
         if store is not None:
-            ensure_private_directory(Path(store.directory))
+            ensure_private_directory(Path(store.directory), create=not read_only)
         return ChunkedModelBackupReader(
             selection,
             policy=self.policy,

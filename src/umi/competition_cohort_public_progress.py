@@ -492,9 +492,23 @@ class CohortProgressSnapshots:
                     )
                 )
             )
+            sampling_during_execution = (
+                phase == "requests"
+                and quorum_stage is None
+                and "execution" in parts
+                and not parts["execution"]["stale"]
+                and work.get("stage")
+                in {"progress_preparation", "progress_sampling", "progress_sampling_lock"}
+                and not work.get("stalled")
+                and not work.get("stalled_or_retrying")
+                and not work.get("repair_required")
+            )
             # Do not call the previous phase's last 100% substage current work.
+            # Healthy sampling is bookkeeping around the fresh execution meter;
+            # retain its details in components without replacing model counts.
             if (
                 not earlier_phase
+                and not sampling_during_execution
                 and not parts["work"]["stale"]
                 and observed >= entry.get("phase_started", 0)
                 and work.get("state")

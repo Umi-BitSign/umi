@@ -383,6 +383,41 @@ def test_reference_observer_reports_stable_finality_reason_without_error_text(
     }
 
 
+@pytest.mark.parametrize(
+    "name", ["umi.grandpa_finality_supervisor", "umi.grandpa_finality_frontier"]
+)
+def test_reference_cli_exposes_finality_audit_and_restores_logging(
+    installed, tmp_path, monkeypatch, capsys, name
+):
+    import logging
+
+    from umi import translation_reference_cli as cli
+    from umi.grandpa_finality_supervisor import GrandpaFinalityStoreCorruption
+
+    logger = logging.getLogger(name)
+    before = (logger.level, logger.propagate, tuple(logger.handlers))
+
+    async def audit(_config):
+        logger.info("finality_startup_audit completed=4 total=8")
+        raise RuntimeError("owned_finality_observer_stopped") from GrandpaFinalityStoreCorruption(
+            "database_changed_outside_native_owner"
+        )
+
+    p = tmp_path / "private" / "config.json"
+    p.write_bytes(canonical_json_bytes(installed.config))
+    p.chmod(0o600)
+    monkeypatch.setattr(cli, "run", audit)
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--config", str(p)])
+    output = capsys.readouterr()
+    assert output.err.count("finality_startup_audit completed=4 total=8") == 1
+    assert json.loads(output.out)["error_chain"][-1] == {
+        "error_type": "GrandpaFinalityStoreCorruption",
+        "reason_code": "database_changed_outside_native_owner",
+    }
+    assert (logger.level, logger.propagate, tuple(logger.handlers)) == before
+
+
 def test_original_input_reader_rejects_links_and_untrusted_writers(tmp_path):
     source = tmp_path / "signed.json"
     source.write_bytes(b"signed original")
@@ -427,6 +462,7 @@ async def test_gateway_configuration_adopts_transport_without_rebinding_signed_i
         wiring.ReferencePublisherConfig.model_validate(updated)
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="Root-owned producer inputs are explicitly trusted")
 async def test_coordinator_account_inputs_use_the_configured_protected_producer(
     installed, monkeypatch
 ):

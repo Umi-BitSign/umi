@@ -11,6 +11,7 @@ from umi import competition_cohort_settlement_boot as settlement
 from umi import competition_reward_boot as writer
 from umi import competition_reward_coordinator_boot as coordinator
 from umi.competition_cohort_direct_model_review import DirectModelSettlementVerifier
+from umi.competition_cohort_intake import history_tip
 from umi.competition_cohort_legacy_model_selection import (
     AuthenticatedLegacyModelSources,
     LegacyModelStorageSourceConfig,
@@ -25,6 +26,7 @@ from umi.competition_cohort_legacy_model_storage import (
 )
 from umi.competition_cohort_model_transport import prepare_model_delivery_adoption
 from umi.competition_cohort_model_transport_selection import committed_model_delivery_selection
+from umi.competition_cohort_recovery import cohort_model_delivery
 from umi.competition_cohort_recovery_store import CohortRecoveryStore
 from umi.competition_model_cache_space import BootDiskModelCacheConfig
 from umi.competition_supervisor_adapters import ProductionSuccessorRuntimeAdapter
@@ -33,6 +35,7 @@ from umi.private_files import ensure_private_directory, publish_private_model
 from umi.protocol import canonical_json_bytes, sha256_hex
 
 from .test_competition_chunked_model_backup import Remote
+from .test_competition_cohort_archival_adoption import advance_history
 from .test_competition_cohort_legacy_model_storage import backup, bundle_at, retain
 from .test_competition_cohort_recovery import signed_transition
 from .test_competition_effective_model_reward_boot import adopted_case as adopted_case
@@ -48,20 +51,25 @@ from .test_open_competition import wallet
 
 
 @pytest.fixture
-def legacy_boot(adopted_case, tmp_path):
+def legacy_boot(adopted_case, tmp_path, request):
     h = adopted_case
+    storage_only = getattr(request, "param", None) == "archival"
+    block = 220
+    if storage_only:
+        h.history, state = advance_history(h.history, h.candidate.policy)
+        block = state.observed_at_block + 1
     bundle = bundle_at(tmp_path / "baseline", "legacy-boot-baseline")
     objects = {}
     common = dict(
         cohort_sha256=digest(h.history.plan),
         policy_sha256=digest(h.candidate.policy),
         authority_sha256=digest(h.history.authority.authority),
-        predecessor_sha256=digest(h.history.genesis),
+        predecessor_sha256=history_tip(h.history),
     )
     legacy = LegacyModelStorageInventory(
         schema="umi-cohort-legacy-model-storage-inventory/1",
         **common,
-        captured_at_block=220,
+        captured_at_block=block,
         baseline_model_sha256=digest(bundle),
         baseline_manifest_raw_sha256=retain(objects, bundle),
         entries=(),
@@ -75,16 +83,19 @@ def legacy_boot(adopted_case, tmp_path):
     proposal = prepare_model_delivery_adoption(
         h.history,
         h.candidate.policy,
-        expected_tip_sha256=digest(h.history.genesis),
-        current_block=220,
-        delivery=h.selection.history.transitions[0].transition.model_delivery_adoption.delivery,
+        expected_tip_sha256=history_tip(h.history),
+        current_block=block,
+        delivery=cohort_model_delivery(h.history.plan)
+        if storage_only
+        else h.selection.history.transitions[0].transition.model_delivery_adoption.delivery,
+        storage_only=storage_only,
         legacy_inventory_sha256=digest(legacy),
         preservation_inventory_sha256=digest(preservation),
     )
     db = sqlite3.connect(":memory:")
     try:
         store = CohortRecoveryStore(db)
-        store.publish_history(h.history, h.candidate.policy, current_block=220)
+        store.publish_history(h.history, h.candidate.policy, current_block=block)
         store.reserve_exact(proposal)
         store.commit(signed_transition(proposal))
         selection = committed_model_delivery_selection(
@@ -253,6 +264,7 @@ def operation(c, monkeypatch, *, forbid=False):
     )
 
 
+@pytest.mark.parametrize("legacy_boot", [None, "archival"], indirect=True)
 async def test_actual_boot_passes_series_sources_and_preserves_c5_fallback(
     legacy_boot, monkeypatch
 ):

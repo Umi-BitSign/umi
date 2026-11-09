@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import sqlite3
@@ -1113,6 +1114,92 @@ def test_shared_registry_history_is_lossless_lazy_and_keeps_legacy_runs(adapter_
     assert snapshot[records[-1].directive_sha256][1].current_directive_page_bytes == bodies[-1]
     assert calls == [True]
     assert snapshot[anchor.directive_sha256][1] == case.files
+    before = adapters._recovery_journal_snapshot(case.adapter.path)
+    prepared = adapters.read_retained_adapter_inventory(case.installation, case.adapter.limits)
+    assert prepared.snapshot == before == adapters._recovery_journal_snapshot(case.adapter.path)
+    assert prepared.runs[anchor.directive_sha256][1] == case.files
+    assert prepared.runs[records[-1].directive_sha256][1].current_directive_page_bytes == bodies[-1]
+
+
+def test_read_only_registry_preparation_does_not_construct_owner_or_open_packages(
+    adapter_case, monkeypatch
+):
+    case = adapter_case
+    raw = adapters._record(case.selection, case.files)
+    with sqlite3.connect(case.adapter.path) as db:
+        db.execute(
+            "INSERT INTO runs VALUES (?,?,?)",
+            (case.selection.directive_sha256, raw, hashlib.sha256(raw).hexdigest()),
+        )
+    before = adapters._recovery_journal_snapshot(case.adapter.path)
+    monkeypatch.setattr(
+        adapters.ProductionSuccessorRuntimeAdapter,
+        "__init__",
+        lambda *a, **k: pytest.fail("constructed the writable owner"),
+    )
+    monkeypatch.setattr(
+        adapters, "verify_retained_package", lambda *a, **k: pytest.fail("replayed a package")
+    )
+    connect = sqlite3.connect
+    statements = []
+
+    def readonly(path, **kwargs):
+        assert path.endswith("?mode=ro") and kwargs["uri"]
+        db = connect(path, **kwargs)
+        db.set_trace_callback(statements.append)
+        return db
+
+    monkeypatch.setattr(adapters.sqlite3, "connect", readonly)
+    result = adapters.read_retained_adapter_inventory(case.installation, case.adapter.limits)
+    assert result.snapshot == before == adapters._recovery_journal_snapshot(case.adapter.path)
+    assert list(result.runs) == [case.selection.directive_sha256]
+    assert result.runs[case.selection.directive_sha256][1] == case.files
+    assert all(sql.startswith(("SELECT", "BEGIN", "PRAGMA query_only")) for sql in statements)
+    assert not hasattr(result, "chain_submission_authorized")
+
+
+@pytest.mark.parametrize("change", ["binding", "checksum", "missing", "wal", "journal"])
+def test_read_only_registry_refuses_changed_or_unsupported_inputs(
+    adapter_case, change, monkeypatch
+):
+    case = adapter_case
+    path = case.adapter.path
+    if change == "missing":
+        path.unlink()
+    elif change == "journal":
+        path.with_name(path.name + "-journal").write_bytes(b"unfinished")
+        path.with_name(path.name + "-journal").chmod(0o600)
+    elif change == "wal":
+        with sqlite3.connect(path) as db:
+            db.execute("PRAGMA journal_mode=WAL")
+    else:
+        with sqlite3.connect(path) as db:
+            if change == "binding":
+                db.execute("UPDATE binding SET body=?", (b"changed",))
+            else:
+                db.execute("INSERT INTO runs VALUES (?,?,?)", ("00" * 32, b"{}", "bad"))
+    if change in {"missing", "wal", "journal"}:
+        monkeypatch.setattr(
+            adapters.sqlite3, "connect", lambda *a, **k: pytest.fail("opened unsupported source")
+        )
+    with pytest.raises((ValueError, FileNotFoundError)):
+        adapters.read_retained_adapter_inventory(case.installation, case.adapter.limits)
+    if change == "missing":
+        assert not path.exists()
+
+
+def test_read_only_registry_detects_source_identity_change_during_read(adapter_case, monkeypatch):
+    case = adapter_case
+    read = adapters._read_registry_records
+
+    def changed(*args):
+        result = read(*args)
+        (case.adapter.path.parent / "concurrent-change").write_bytes(b"changed")
+        return result
+
+    monkeypatch.setattr(adapters, "_read_registry_records", changed)
+    with pytest.raises(ValueError, match="changed during preparation"):
+        adapters.read_retained_adapter_inventory(case.installation, case.adapter.limits)
 
 
 def test_shared_registry_counts_nodes_in_budget_and_rolls_back_failed_retention(

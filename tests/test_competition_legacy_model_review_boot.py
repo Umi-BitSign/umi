@@ -311,7 +311,7 @@ async def test_real_phase_review_boot_signs_original_and_runs_retained_sandbox_a
         "changed_inventory",
     ],
 )
-async def test_invalid_preservation_fails_before_service_lease_keys_or_provider(
+async def test_invalid_preservation_fails_before_keys_or_provider_and_releases_lease(
     selected, monkeypatch, fault
 ):
     s, c, i = selected, selected.config, selected.installed
@@ -333,21 +333,22 @@ async def test_invalid_preservation_fails_before_service_lease_keys_or_provider(
         )
 
     def forbidden(*_args, **_kwargs):
-        pytest.fail("invalid preservation reached service lease, signing keys or provider")
+        pytest.fail("invalid preservation reached signing keys or provider")
 
-    monkeypatch.setattr(boot, "lock_private_file", forbidden)
     monkeypatch.setattr(boot, "load_named_hotkey", forbidden)
     monkeypatch.setattr(boot, "HistoricalRegistrationProvider", forbidden)
     assert not Path(c.signing.directory).exists()
     with pytest.raises(ValueError):
         async with boot.phase_review_app(c):
             pytest.fail("invalid preservation started reviewer")
-    # Preflight may retain original-verification checkpoints before finding a
-    # missing original. It must not acquire the service lease or create votes.
+    # Bounded construction owns its service lease before authenticating legacy
+    # input. Failure releases that lease and cannot reach keys or create votes.
     signing = Path(c.signing.directory)
     assert not signing.exists() or {path.name for path in signing.iterdir()} <= {
-        "legacy-original-verification"
+        "legacy-original-verification",
+        "service.lock",
     }
+    os.close(boot.lock_private_file(signing / "service.lock"))
     assert not i.remote.reads
 
 

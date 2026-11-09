@@ -12,7 +12,7 @@ import json
 import os
 import sqlite3
 import tempfile
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -82,9 +82,28 @@ def _triggers():
 
 
 class _GenerationIndex(RoundJournal):
+    @contextmanager
+    def transaction(self, **options):
+        try:
+            with super().transaction(**options) as db:
+                yield db
+        except sqlite3.OperationalError as error:
+            if not is_sqlite_contention(error):
+                raise
+            # The native transaction has rolled back and closed. A concurrent
+            # reader can delay DELETE-mode commit as well as a writer delaying
+            # BEGIN; neither case is damaged verification evidence.
+            raise ModelGenerationOwnerBusy(
+                "model generation transaction awaits a live reader or writer"
+            ) from error
+
     def _validate_existing(self, binding):
         rollback = Path(str(self.path) + "-journal")
         if rollback.exists():
+            if self.read_only:
+                raise ModelGenerationOwnerBusy(
+                    "read-only generation consumer awaits the writer or explicit recovery"
+                )
             # mode=rw cannot create a missing database. SQLite itself obtains
             # the recovery lock: a live writer remains its owner, while an
             # abandoned hot journal is rolled back to committed original bytes.
@@ -328,7 +347,7 @@ def initialize_generation_owner(root, config, *, semantics, report=None):
 class ModelGenerationStore:
     """A fresh metadata view per operation; immutable byte results never expire."""
 
-    def __init__(self, root, config, *, semantics, capacity_recovery=False):
+    def __init__(self, root, config, *, semantics, capacity_recovery=False, read_only=False):
         self.config, self.semantics = config, semantics
         _, path, marker = _paths(root, config)
         try:
@@ -347,6 +366,7 @@ class ModelGenerationStore:
                 maximum_bytes=enrolled.maximum_bytes,
                 maximum_record_bytes=64 * 1024**2,
                 existing_only=True,
+                read_only=read_only,
             )
             self.journal.owner_binding = digest(binding)
             self.journal.enrolled_capacity = enrolled.maximum_bytes
@@ -433,38 +453,52 @@ class ModelGenerationStore:
 
     def scope(self, context, declarations, *, allow_damage=False):
         """Return retained original generations; a lost completed scope is held."""
-        key = digest(context)
         with self.journal.read_transaction() as db:
-            enrollment = self.journal.get("scope-start", key, db=db)
-            completed = self.journal.get("scope", key, db=db)
-            if completed is None:
-                # A started scope resumes only its still-unfinished records. A
-                # separate immutable final marker exposes loss of completed state.
-                if self.journal.get("scope-finished", key, db=db) is not None:
-                    raise ModelGenerationRepairRequired("completed model scope metadata is missing")
-                return None
-            if enrollment != {"context": context, "objects": declarations}:
-                raise ModelGenerationRepairRequired("model generation enrollment changed")
-            if set(completed) != {"objects"} or len(completed["objects"]) != len(declarations):
-                raise ModelGenerationRepairRequired("model generation scope is damaged")
-            if self.journal.get("scope-finished", key, db=db) != {"scope": digest(completed)}:
-                raise ModelGenerationRepairRequired("model generation scope marker is missing")
-            result = {}
-            with TransferProgress(
-                "model_generation_reuse",
-                len(declarations),
-                unit="objects",
-                planning_unit_seconds=(0.00001, 0.001),
-            ) as progress:
-                for declared, value in zip(declarations, completed["objects"], strict=True):
-                    if {k: value.get(k) for k in declared} != declared:
-                        raise ModelGenerationRepairRequired(
-                            "model generation scope coverage changed"
-                        )
-                    self._require(db, value, allow_damage=allow_damage)
-                    result[value["sha256"]] = value
-                    progress.advance(1, restored=True)
-            return result
+            return self._scope(db, context, declarations, allow_damage=allow_damage)
+
+    @contextmanager
+    def scope_lease(self, context, declarations):
+        """Hold a verified damage-fence snapshot through a local cache release.
+
+        DELETE-mode readers serialize this operation before subsequent damage
+        commits. WAL snapshots do not provide that exclusion and are refused.
+        This lease changes neither remote retention nor cohort authority.
+        """
+        with self.journal.read_transaction() as db:
+            if db.execute("PRAGMA journal_mode").fetchone()[0].lower() != "delete":
+                raise ModelGenerationRepairRequired("cache retirement requires DELETE-mode owner")
+            yield self._scope(db, context, declarations)
+
+    def _scope(self, db, context, declarations, *, allow_damage=False):
+        key = digest(context)
+        enrollment = self.journal.get("scope-start", key, db=db)
+        completed = self.journal.get("scope", key, db=db)
+        if completed is None:
+            # A started scope resumes only its still-unfinished records. A
+            # separate immutable final marker exposes loss of completed state.
+            if self.journal.get("scope-finished", key, db=db) is not None:
+                raise ModelGenerationRepairRequired("completed model scope metadata is missing")
+            return None
+        if enrollment != {"context": context, "objects": declarations}:
+            raise ModelGenerationRepairRequired("model generation enrollment changed")
+        if set(completed) != {"objects"} or len(completed["objects"]) != len(declarations):
+            raise ModelGenerationRepairRequired("model generation scope is damaged")
+        if self.journal.get("scope-finished", key, db=db) != {"scope": digest(completed)}:
+            raise ModelGenerationRepairRequired("model generation scope marker is missing")
+        result = {}
+        with TransferProgress(
+            "model_generation_reuse",
+            len(declarations),
+            unit="objects",
+            planning_unit_seconds=(0.00001, 0.001),
+        ) as progress:
+            for declared, value in zip(declarations, completed["objects"], strict=True):
+                if {k: value.get(k) for k in declared} != declared:
+                    raise ModelGenerationRepairRequired("model generation scope coverage changed")
+                self._require(db, value, allow_damage=allow_damage)
+                result[value["sha256"]] = value
+                progress.advance(1, restored=True)
+        return result
 
     def begin(self, context, declarations):
         self.journal.put(

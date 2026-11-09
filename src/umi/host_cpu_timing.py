@@ -165,6 +165,53 @@ def measurement_profile_sha256(
     ).hexdigest()
 
 
+def expanded_cpu_timing_profile(previous, added_slots, *, qualification_sha256, runtime):
+    """Prepare an additive profile without changing existing measurement meaning.
+
+    The caller must qualify actual concurrent execution and coordinate every
+    shared-pool consumer before selecting this profile. This pure constructor
+    neither changes the kernel partition nor establishes physical exclusivity.
+    Existing slots, account bindings and completed baseline evidence stay intact.
+    """
+    previous = CpuTimingHostProfile.model_validate_json(canonical_json_bytes(previous))
+    additions = tuple(
+        CpuTimingHostSlot.model_validate_json(canonical_json_bytes(slot)) for slot in added_slots
+    )
+    if not additions:
+        raise ValueError("CPU timing expansion requires additional slots")
+    accounts = {parent.uid for parent in previous.slots[0].parents}
+    if any(
+        len(slot.cpu_ids) != runtime.cpus or {parent.uid for parent in slot.parents} != accounts
+        for slot in (*previous.slots, *additions)
+    ):
+        raise ValueError("CPU timing expansion must preserve runtime size and service accounts")
+    added_cpus = {cpu for slot in additions for cpu in slot.cpu_ids}
+    if not added_cpus <= set(previous.background_cpu_ids):
+        raise ValueError("new timing CPUs must come from the existing background partition")
+    slots = (*previous.slots, *additions)
+    identities = [(slot.lock_device, slot.lock_inode) for slot in slots]
+    parents = [parent.path for slot in slots for parent in slot.parents]
+    if len(set(identities)) != len(identities) or any(
+        Path(parent).is_relative_to(other) or Path(other).is_relative_to(parent)
+        for index, parent in enumerate(parents)
+        for other in parents[:index]
+    ):
+        raise ValueError("CPU timing expansion cannot alias native locks or account parents")
+    body = previous.model_dump(mode="json", by_alias=True)
+    body.update(
+        slots=[slot.model_dump(mode="json") for slot in slots],
+        reserved_cpu_ids=sorted((*previous.reserved_cpu_ids, *added_cpus)),
+        background_cpu_ids=sorted(set(previous.background_cpu_ids) - added_cpus),
+        qualification_sha256=qualification_sha256,
+    )
+    expanded = CpuTimingHostProfile.model_validate_json(canonical_json_bytes(body))
+    if measurement_profile_sha256(expanded, runtime) != measurement_profile_sha256(
+        previous, runtime
+    ):
+        raise ValueError("CPU timing expansion changed completed measurement meaning")
+    return expanded
+
+
 def load_cpu_timing_profile(selection, controller):
     """Read the selected small root-owned profile once at service construction."""
     if selection is None:

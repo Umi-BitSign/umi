@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .host_memory_request_bounds import count_json_shape
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -108,6 +108,14 @@ class WorkloadProfile(StrictProtocolModel):
     maximum_preparation_workers: Annotated[int, Field(gt=0, le=64, strict=True)]
     maximum_receipt_entries: Annotated[int, Field(gt=0, le=10000000, strict=True)]
     receipt_directories: Annotated[dict[str, str], Field(min_length=1, max_length=64)]
+    count_reuse_profile: WorkloadProfileSelection | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.count_reuse_profile is None:
+            value.pop("count_reuse_profile", None)
+        return value
 
     @model_validator(mode="after")
     def scope_and_storage(self):
@@ -329,6 +337,7 @@ class LoadedWorkloadProfile:
     sha256: str
     role: str
     counts: _CountStore
+    count_profile_sha256: str
 
     @property
     def bounds(self):
@@ -359,8 +368,31 @@ def load_workload_profile(selection, controller_binding):
     directory = profile.receipt_directories.get(str(os.getuid()))
     if directory is None:
         raise WorkloadQualificationPending("profile_receipt_owner_unselected")
+    count_identity = selection.sha256
+    reuse = profile.count_reuse_profile
+    if reuse is not None:
+        previous_raw = _read_policy(_absolute(reuse.path))
+        if hashlib.sha256(previous_raw).hexdigest() != reuse.sha256:
+            raise WorkloadQualificationPending("count_reuse_profile_changed")
+        previous = WorkloadProfile.model_validate_json(previous_raw)
+        # Keep one immutable original count binding, not a chain of historical
+        # startup profiles. Only HTTP scheduling and its qualification may
+        # change; bounds, authority, receipt ownership and capacity must match.
+        excluded = {
+            "maximum_http_inflight",
+            "maximum_queued_input_bytes",
+            "qualification_sha256",
+            "count_reuse_profile",
+        }
+        if previous.count_reuse_profile is not None or profile.model_dump(
+            exclude=excluded
+        ) != previous.model_dump(exclude=excluded):
+            raise WorkloadQualificationPending("count_reuse_dependencies_changed")
+        count_identity = reuse.sha256
     counts = _CountStore(Path(directory), profile.maximum_receipt_entries)
-    return LoadedWorkloadProfile(profile, selection.sha256, controller_binding["role"], counts)
+    return LoadedWorkloadProfile(
+        profile, selection.sha256, controller_binding["role"], counts, count_identity
+    )
 
 
 @dataclass(frozen=True)
@@ -447,7 +479,7 @@ def check_workload_input(raw, kind="input", *, identity=None):
         ):
             raise WorkloadQualificationPending("untrusted_or_changed_input_identity", kind=kind)
         expected = dict(
-            profile_sha256=profile.sha256,
+            profile_sha256=profile.count_profile_sha256,
             semantics=_SEMANTICS,
             kind=kind,
             namespace=identity.namespace,

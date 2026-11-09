@@ -647,6 +647,107 @@ def test_execution_counts_are_separate_from_certification_and_current_native_wor
     assert state.snapshot(C)["stage"] != "model_evaluation"
 
 
+@pytest.mark.parametrize(
+    "stage", ["progress_preparation", "progress_sampling", "progress_sampling_lock"]
+)
+@pytest.mark.parametrize("work_state", ["started", "running", "waiting"])
+def test_request_sampling_preserves_fresh_execution_counts_and_eta(monkeypatch, stage, work_state):
+    now = [10.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    state = CohortProgressSnapshots()
+    state.record("lifecycle", dict(cohort_sha256=C, phase="requests", stage=stage))
+    state.record(
+        "execution",
+        dict(
+            cohort_sha256=C,
+            stage="model_evaluation",
+            completed=56,
+            total=149,
+            eta_seconds=1000,
+            eta_basis="measured",
+            eta_scope="model_evaluation_exports_only",
+        ),
+    )
+    now[0] = 20.0
+    state.record(
+        "work",
+        dict(cohort_sha256=C, stage=stage, state=work_state, completed=0, total=1),
+    )
+    result = state.snapshot(C)
+    assert (result["stage"], result["completed"], result["total"]) == ("model_evaluation", 56, 149)
+    assert result["eta_seconds"] == 990
+    assert result["eta_scope"] == "model_evaluation_exports_only"
+    assert result["overall_eta_seconds"] is None
+    assert result["components"]["work"]["stage"] == stage
+
+    # Once execution expires, fresh sampling must remain visible.
+    now[0] = 131.0
+    state.record("work", dict(cohort_sha256=C, stage=stage, state=work_state, completed=0, total=1))
+    assert state.snapshot(C)["stage"] == stage
+
+
+@pytest.mark.parametrize("flag", ["stalled", "stalled_or_retrying", "repair_required"])
+def test_request_sampling_blocker_remains_visible(flag):
+    state = CohortProgressSnapshots()
+    state.record("lifecycle", dict(cohort_sha256=C, phase="requests", stage="progress_sampling"))
+    state.record(
+        "execution", dict(cohort_sha256=C, stage="model_evaluation", completed=56, total=149)
+    )
+    state.record(
+        "work",
+        dict(cohort_sha256=C, stage="progress_sampling", state="waiting", **{flag: True}),
+    )
+    result = state.snapshot(C)
+    assert result["stage"] == "progress_sampling"
+    assert result[flag]
+    assert result["components"]["execution"]["completed"] == 56
+
+
+@pytest.mark.parametrize("phase", ["intake", "requests"])
+def test_sampling_without_execution_keeps_its_own_progress(phase):
+    state = CohortProgressSnapshots()
+    state.record("lifecycle", dict(cohort_sha256=C, phase=phase, stage="progress_sampling"))
+    state.record(
+        "work",
+        dict(cohort_sha256=C, stage="progress_sampling", state="running", completed=0, total=1),
+    )
+    result = state.snapshot(C)
+    assert (result["stage"], result["completed"], result["total"]) == ("progress_sampling", 0, 1)
+
+
+@pytest.mark.parametrize(
+    "stage,quorum",
+    [
+        ("progress_review", "requests_progress_quorum"),
+        ("decision_certification", "requests_decision_quorum"),
+    ],
+)
+def test_request_quorum_remains_visible_with_fresh_execution_and_sampling(stage, quorum):
+    state = CohortProgressSnapshots()
+    state.record("lifecycle", dict(cohort_sha256=C, phase="requests", stage=stage))
+    state.record(
+        "execution", dict(cohort_sha256=C, stage="model_evaluation", completed=149, total=149)
+    )
+    state.record(
+        "work",
+        dict(cohort_sha256=C, work_id=1, stage=quorum, state="waiting", completed=1, total=2),
+    )
+    state.record(
+        "work",
+        dict(
+            cohort_sha256=C,
+            work_id=2,
+            stage="progress_sampling",
+            state="running",
+            completed=0,
+            total=1,
+        ),
+    )
+    result = state.snapshot(C)
+    assert (result["stage"], result["completed"], result["total"]) == (quorum, 1, 2)
+    assert result["components"]["execution"]["completed"] == 149
+
+
 def test_active_transfer_stays_visible_between_short_completed_work(monkeypatch):
     from umi.competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS, PUBLIC_COHORT_SCOPE
     from umi.competition_transport_verification import TransferProgress

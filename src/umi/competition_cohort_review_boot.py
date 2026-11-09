@@ -57,6 +57,12 @@ from .host_memory_runtime import (
     requests_stage_policy,
     selected_memory,
 )
+from .host_memory_startup import (
+    HostStartupStopped,
+    check_startup_stop,
+    complete_memory_startup,
+    memory_startup,
+)
 from .named_hotkey import load_named_hotkey
 from .open_competition import digest, identity, sign_object
 from .private_files import ensure_private_directory, lock_private_file
@@ -106,25 +112,15 @@ def _http_limits(config: PhaseReviewServiceConfig) -> httpx.Limits:
 
 
 @asynccontextmanager
-async def phase_review_app(config: PhaseReviewServiceConfig):
+async def phase_review_app(config: PhaseReviewServiceConfig, *, stop=None):
+    check_startup_stop(stop)
     config = PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(config))
-    legacy_metadata = await run_owned_thread(
-        partial(
-            authenticate_legacy_model_sources,
-            config.legacy_model_storage,
-            series=config.series,
-            policy=config.policy,
-            model_delivery_adoptions=config.model_delivery_adoptions,
-            original_verification_directory=Path(config.signing.directory)
-            / "legacy-original-verification",
-        )
-    )
     root = Path(config.signing.directory)
     ensure_private_directory(root)
     lease = lock_private_file(root / "service.lock")
     async with AsyncExitStack() as resources:
         resources.callback(os.close, lease)
-        resources.enter_context(
+        memory = resources.enter_context(
             memory_runtime(
                 config.host_memory_admission,
                 role="phase_reviewer",
@@ -137,6 +133,18 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 ),
             )
         )
+        startup = await resources.enter_async_context(memory_startup(memory, stop=stop))
+        legacy_metadata = await run_owned_thread(
+            partial(
+                authenticate_legacy_model_sources,
+                config.legacy_model_storage,
+                series=config.series,
+                policy=config.policy,
+                model_delivery_adoptions=config.model_delivery_adoptions,
+                original_verification_directory=root / "legacy-original-verification",
+            )
+        )
+        check_startup_stop(stop)
         owner_token, vote_token = _token(config.owner_token_file), _token(config.vote_token_file)
         if owner_token == vote_token:
             raise ValueError("owner exports and reviewer votes need separate credentials")
@@ -423,6 +431,7 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 else app.state.benchmark.settlement_progress,
             )
         )
+        complete_memory_startup(startup)
         await provider.start()
         logger.info("phase_review_ready config_sha256=%s", digest(config))
         yield app
@@ -436,7 +445,15 @@ class _Server(uvicorn.Server):
 
 
 async def run_phase_review_service(config: PhaseReviewServiceConfig, stop: asyncio.Event):
-    async with phase_review_app(config) as app:
+    try:
+        await _run_phase_review_service(config, stop)
+    except HostStartupStopped:
+        if not stop.is_set():
+            raise
+
+
+async def _run_phase_review_service(config: PhaseReviewServiceConfig, stop: asyncio.Event):
+    async with phase_review_app(config, stop=stop) as app:
         server = _Server(
             uvicorn.Config(
                 app,

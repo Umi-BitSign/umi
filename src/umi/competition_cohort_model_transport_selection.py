@@ -116,7 +116,8 @@ def effective_model_deliveries(series, policy, selections=()):
             expected_tip_sha256=value.committed_tip_sha256,
             current_block=value.observed_at_block,
         )
-        if delivery.mechanism != "direct_r2_multipart_v1":
+        adoption = retained_model_delivery_adoption(history)
+        if delivery.mechanism != "direct_r2_multipart_v1" and not adoption.storage_only:
             raise ValueError("model transport selection has no committed direct adoption")
         selected[cohort] = delivery
     if list(selected) != sorted(selected):
@@ -129,10 +130,15 @@ def effective_model_deliveries(series, policy, selections=()):
 
 
 def requires_direct_model_review(series, policy, selections=()):
+    """Select the existing R2 reader for direct uploads or archival originals.
+
+    Archival selection does not enable direct uploads. The same bounded reader
+    already resolves legacy R2 packages for every reward and review consumer.
+    """
+    profiles = effective_model_deliveries(series, policy, selections)
     return any(
-        profile.mechanism == "direct_r2_multipart_v1"
-        for profile in effective_model_deliveries(series, policy, selections).values()
-    )
+        profile.mechanism == "direct_r2_multipart_v1" for profile in profiles.values()
+    ) or any(retained_model_delivery_adoption(value.history).storage_only for value in selections)
 
 
 def selected_direct_model_review(config):

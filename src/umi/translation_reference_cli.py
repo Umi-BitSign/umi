@@ -3,9 +3,11 @@
 import argparse
 import asyncio
 import json
+import logging
 import re
 import signal
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,6 +30,25 @@ _SAFE_CAUSE_REASONS = frozenset(
 _SAFE_FINALITY_REASON = re.compile(r"[a-z][a-z0-9_]{0,79}\Z")
 
 
+@contextmanager
+def _logs():
+    handler, selected = logging.StreamHandler(), []
+    for name in ("umi.grandpa_finality_supervisor", "umi.grandpa_finality_frontier"):
+        logger = logging.getLogger(name)
+        selected.append((logger, logger.level, logger.propagate))
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        for logger, level, propagate in selected:
+            logger.removeHandler(handler)
+            logger.setLevel(level)
+            logger.propagate = propagate
+        handler.close()
+
+
 def _redacted_error_chain(error):
     """Retain typed observer failures without printing RPC URLs or exception text."""
     result = []
@@ -40,8 +61,12 @@ def _redacted_error_chain(error):
         if isinstance(reason, str) and (
             reason in _SAFE_CAUSE_REASONS
             or (
-                type(current).__module__ == "umi.grandpa_finality"
-                and type(current).__name__ == "GrandpaFinalityObserverError"
+                (type(current).__module__, type(current).__name__)
+                in {
+                    ("umi.grandpa_finality", "GrandpaFinalityObserverError"),
+                    ("umi.grandpa_finality_supervisor", "GrandpaFinalityStoreCorruption"),
+                    ("umi.grandpa_finality_supervisor", "GrandpaFinalityStoreConflict"),
+                }
                 and _SAFE_FINALITY_REASON.fullmatch(reason)
             )
         ):
@@ -125,7 +150,8 @@ def main(argv=None):
                 )
             )
         else:
-            asyncio.run(run(config))
+            with _logs():
+                asyncio.run(run(config))
     except Exception as error:
         # SDK/parser exceptions may include credentials or private paths.
         report(

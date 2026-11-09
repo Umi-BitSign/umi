@@ -237,7 +237,9 @@ class CohortModelDeliveryAdoption(StrictProtocolModel):
     """
 
     schema_: Literal[
-        "umi-cohort-model-delivery-adoption/1", "umi-cohort-model-delivery-adoption/2"
+        "umi-cohort-model-delivery-adoption/1",
+        "umi-cohort-model-delivery-adoption/2",
+        "umi-cohort-model-delivery-adoption/3",
     ] = Field(alias="schema")
     original_plan: RecoverableCohortPlan
     delivery: ModelDeliveryProfile
@@ -245,6 +247,15 @@ class CohortModelDeliveryAdoption(StrictProtocolModel):
     preservation_inventory_sha256: Hex32
     eligible_tracks: tuple[Literal["model"]] | None = None
     service_pool_bps: Literal[0] | None = None
+
+    @property
+    def storage_only(self) -> bool:
+        return self.schema_ == "umi-cohort-model-delivery-adoption/3"
+
+    def permits_phase(self, phase: str) -> bool:
+        if self.storage_only:
+            return phase in PHASES[3:]
+        return phase == "intake"
 
     @model_serializer(mode="wrap")
     def preserve_transport_only_bytes(self, handler):
@@ -257,9 +268,13 @@ class CohortModelDeliveryAdoption(StrictProtocolModel):
 
     @model_validator(mode="after")
     def original_legacy_cohort(self) -> Self:
-        if (
+        original = cohort_model_delivery(self.original_plan)
+        if self.storage_only:
+            if original.mechanism != "coordinator_chunked_v1" or self.delivery != original:
+                raise ValueError("archive adoption must preserve original model transport")
+        elif (
             self.original_plan.sequence <= 5
-            or cohort_model_delivery(self.original_plan).mechanism != "coordinator_chunked_v1"
+            or original.mechanism != "coordinator_chunked_v1"
             or self.delivery.mechanism != "direct_r2_multipart_v1"
         ):
             raise ValueError("model delivery adoption requires a legacy model cohort after C5")
@@ -548,11 +563,11 @@ class CohortRecoveryTransition(StrictProtocolModel):
         ):
             raise ValueError("model delivery adoption requires its explicit transition version")
         if delivery and (
-            self.phase != "intake"
+            not self.model_delivery_adoption.permits_phase(self.phase)
             or digest(self.model_delivery_adoption.original_plan) != self.cohort_sha256
             or digest(self.model_delivery_adoption) != self.evidence_sha256
         ):
-            raise ValueError("model delivery adoption differs from its original intake cohort")
+            raise ValueError("model delivery adoption differs from its original cohort phase")
         tail = self.request_tail_sha256 is not None
         if tail != (self.schema_ == "umi-cohort-recovery-transition/2"):
             raise ValueError("request tail transition requires its explicit evidence version")
@@ -812,8 +827,13 @@ def propose_recovery_transition(
             canonical_json_bytes(model_delivery_adoption)
         )
         if (
-            not isinstance(authority, ModelRewardCohortAuthority)
-            or state.phase != "intake"
+            not isinstance(
+                authority,
+                StandingCohortRecoveryAuthority
+                if model_delivery_adoption.storage_only
+                else ModelRewardCohortAuthority,
+            )
+            or not model_delivery_adoption.permits_phase(state.phase)
             or state.model_delivery_adoption is not None
             or digest(model_delivery_adoption.original_plan) != state.cohort_sha256
             or digest(model_delivery_adoption) != evidence_sha256

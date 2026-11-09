@@ -133,6 +133,9 @@ withdrawn if progress goes idle. It excludes waiting behind other cohorts and
 is not an end-to-end cohort forecast.
 
 During evaluation, `components.execution` counts confirmed exported results.
+Fresh model counts also remain at the top level during routine progress sampling.
+Sampling details stay in `components.work`; reported blockers and phase-review
+quorums retain their own stage and counts.
 `components.execution_workers.workers` separately shows cached evaluator stages,
 such as model downloads, with each stage's counts, percentage, elapsed time,
 ETA basis and freshness. A download percentage is not the cohort completion

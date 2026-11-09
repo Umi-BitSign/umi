@@ -365,6 +365,23 @@ def _idle() -> _WorkerState:
     return _WorkerState(phase="idle", sequence=None, directive_sha256=None, mode=None)
 
 
+def retained_runtime_binding(installation, limits):
+    """Exact original runtime identity, shared by owner and preparation reader."""
+    return canonical_json_bytes(
+        {
+            "schema": "umi-successor-runtime-binding/1",
+            "receipt_sha256": installation.receipt_sha256,
+            "source_config_sha256": successor_source_config_sha256(installation.config),
+            "consent_sha256": successor_operator_consent_sha256(installation.operator_consent),
+            "v3_state_sha256": hashlib.sha256(
+                canonical_json_bytes(installation.v3_state)
+            ).hexdigest(),
+            "v3_signed_sha256": hashlib.sha256(installation.v3_signed_bytes).hexdigest(),
+            "limits": limits.model_dump(mode="json"),
+        }
+    )
+
+
 class SuccessorSupervisorRuntime:
     """Run inside ``async with`` to keep the original singleton lock held.
 
@@ -422,19 +439,7 @@ class SuccessorSupervisorRuntime:
         self._artifact_retry_pending = False
         self._observation: OwnedCompetitionChainObservation | None = None
         self._state: SuccessorSupervisorDirectiveState | None = None
-        self._binding = canonical_json_bytes(
-            {
-                "schema": "umi-successor-runtime-binding/1",
-                "receipt_sha256": installation.receipt_sha256,
-                "source_config_sha256": successor_source_config_sha256(self.config),
-                "consent_sha256": successor_operator_consent_sha256(installation.operator_consent),
-                "v3_state_sha256": hashlib.sha256(
-                    canonical_json_bytes(installation.v3_state)
-                ).hexdigest(),
-                "v3_signed_sha256": hashlib.sha256(installation.v3_signed_bytes).hexdigest(),
-                "limits": self.limits.model_dump(mode="json"),
-            }
-        )
+        self._binding = retained_runtime_binding(installation, self.limits)
         self._initialization_marker = canonical_json_bytes(
             {
                 "schema": "umi-successor-runtime-initialization/1",

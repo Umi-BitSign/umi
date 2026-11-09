@@ -72,6 +72,7 @@ from .host_memory_runtime import (
     requests_stage_policy,
     selected_memory,
 )
+from .host_memory_startup import complete_memory_startup, memory_startup
 from .named_hotkey import load_named_hotkey
 from .open_competition import Hotkey, digest, identity, sign_competition_digest, sign_object
 from .policy import scoring_policy_hash
@@ -182,7 +183,7 @@ async def admission_owner_app(
     lease = lock_private_file(root / "service.lock")
     async with AsyncExitStack() as resources:
         resources.callback(os.close, lease)
-        resources.enter_context(
+        memory = resources.enter_context(
             memory_runtime(
                 c.host_memory_admission,
                 role="intake",
@@ -197,6 +198,7 @@ async def admission_owner_app(
                 ),
             )
         )
+        startup = await resources.enter_async_context(memory_startup(memory))
         token = _token(c.export_token_file)
         credentials = tuple(_token(p.token_file) for p in c.reviewers)
         if token in credentials:
@@ -426,6 +428,7 @@ async def admission_owner_app(
                         credentials,
                         lambda: False,
                     )
+        complete_memory_startup(startup)
         yield app
 
 

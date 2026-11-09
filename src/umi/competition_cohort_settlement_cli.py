@@ -46,6 +46,8 @@ def main(argv=None):
             )
             return
         for name in (
+            "umi.grandpa_finality_supervisor",
+            "umi.grandpa_finality_frontier",
             *(
                 "umi.competition_cohort_settlement_" + suffix
                 for suffix in ("service", "controller", "exchange", "preparation")

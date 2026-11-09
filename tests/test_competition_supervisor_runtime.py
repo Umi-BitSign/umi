@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from umi import competition_reward_handoff as handoff
 from umi import competition_supervisor_runtime as runtime
 from umi.competition_reward_handoff_models import LegacyRewardHandoffIntent, LegacyRewardHandoffPlan
 from umi.competition_supervisor import (
@@ -1036,6 +1037,93 @@ def handoff_intent(case):
         installation_receipt_sha256=case.installation.receipt_sha256,
         validator_hotkey=case.config.validator_hotkey,
     )
+
+
+async def test_readonly_handoff_intent_preserves_live_process_and_avoids_history(
+    case, monkeypatch, caplog
+):
+    intent = handoff_intent(case)
+    monkeypatch.setattr(
+        handoff, "validate_authenticated_successor_installation", runtime._validate_installation
+    )
+    async with case.make() as engine:
+        async with engine._mutex:
+            engine._retain_standing_handoff(intent)
+        before = engine.path.stat()
+        events = list(case.adapter.events)
+        statements = []
+        connect = sqlite3.connect
+
+        def read_only(*args, **kwargs):
+            assert args[0].endswith("?mode=ro") and kwargs["uri"] is True
+            db = connect(*args, **kwargs)
+            db.set_trace_callback(statements.append)
+            return db
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("preparation constructed an owner or replayed retained history")
+
+        with monkeypatch.context() as patch, caplog.at_level("INFO"):
+            patch.setattr(sqlite3, "connect", read_only)
+            patch.setattr(runtime.SuccessorSupervisorRuntime, "__init__", forbidden)
+            patch.setattr(runtime.SuccessorSupervisorRuntime, "_load_history", forbidden)
+            result = handoff.read_retained_handoff_intent(case.installation, case.limits)
+        assert result.intent == intent and result.runtime_binding == engine._binding
+        assert result.path == engine.path
+        assert engine.path.stat() == before
+        engine._require_lease()
+        assert case.adapter.events == events
+        assert statements and all(
+            s.startswith(("SELECT", "PRAGMA query_only=ON", "BEGIN")) for s in statements
+        )
+        assert not any("FROM history" in s or "FROM attempts" in s for s in statements)
+        assert "legacy_handoff_intent_preparation" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "damage", ["binding", "intent", "noncanonical", "missing", "wal", "changed", "installation"]
+)
+async def test_readonly_handoff_intent_rejects_changed_or_missing_source(case, monkeypatch, damage):
+    intent = handoff_intent(case)
+    monkeypatch.setattr(
+        handoff, "validate_authenticated_successor_installation", runtime._validate_installation
+    )
+    async with case.make() as engine:
+        if damage != "missing":
+            async with engine._mutex:
+                engine._retain_standing_handoff(intent)
+    if damage == "binding":
+        with sqlite3.connect(engine.path) as db:
+            db.execute("UPDATE binding SET body=?", (b"changed",))
+    elif damage in {"intent", "noncanonical"}:
+        raw = (
+            canonical_json_bytes(
+                intent.model_copy(update={"installation_receipt_sha256": "99" * 32})
+            )
+            if damage == "intent"
+            else canonical_json_bytes(intent) + b"\n"
+        )
+        with sqlite3.connect(engine.path) as db:
+            db.execute("UPDATE standing_handoff SET body=?", (raw,))
+    elif damage == "wal":
+        with sqlite3.connect(engine.path) as db:
+            db.execute("PRAGMA journal_mode=WAL")
+    elif damage == "changed":
+        original = handoff._recovery_journal_snapshot
+        calls = 0
+
+        def changed(path):
+            nonlocal calls
+            calls += 1
+            return original(path) if calls == 1 else ("changed",)
+
+        monkeypatch.setattr(handoff, "_recovery_journal_snapshot", changed)
+    elif damage == "installation":
+        case.installation.valid = False
+    before = engine.path.stat()
+    with pytest.raises(ValueError):
+        handoff.read_retained_handoff_intent(case.installation, case.limits)
+    assert engine.path.stat() == before
 
 
 async def test_standing_handoff_intent_survives_restart_and_needs_no_feed_or_rpc(case):

@@ -33,6 +33,7 @@ from .competition_cohort_model_transport_selection import (
     requires_direct_model_review,
     selected_direct_model_review,
 )
+from .competition_forecast_compaction import ForecastCompactionConfig
 from .competition_forecast_storage import (
     ForecastArchiveConfig,
     forecast_credential_paths,
@@ -138,6 +139,7 @@ class RewardCoordinatorConfig(StrictProtocolModel):
         DEFAULT_HISTORY_FORECAST_BYTES
     )
     forecast_archive: ForecastArchiveConfig | None = None
+    forecast_compaction: ForecastCompactionConfig | None = None
     forecast_retention_index_bytes: Annotated[int, Field(ge=64 * 1024, le=1024**3)] = 512 * 1024**2
 
     runtime_proof_reads: bool = False
@@ -161,6 +163,8 @@ class RewardCoordinatorConfig(StrictProtocolModel):
         value = handler(self)
         if self.forecast_accounting_bytes == DEFAULT_HISTORY_FORECAST_BYTES:
             value.pop("forecast_accounting_bytes", None)
+        if self.forecast_compaction is None:
+            value.pop("forecast_compaction", None)
         if self.forecast_archive is None:
             value.pop("forecast_archive", None)
         if self.forecast_retention_index_bytes == 512 * 1024**2:
@@ -318,6 +322,11 @@ class RewardCoordinatorConfig(StrictProtocolModel):
                 self.proof_import_directory,
                 *(self.proof_stores.credential_paths() if self.proof_stores else ()),
                 *forecast_credential_paths(self.forecast_archive, self.proof_stores),
+                *(
+                    (self.forecast_compaction.lock_file,)
+                    if include_shared and self.forecast_compaction is not None
+                    else ()
+                ),
                 self.proof_export_directory,
                 self.exchange_inbox,
                 self.exchange_outbox,
