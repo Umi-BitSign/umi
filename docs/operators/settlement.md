@@ -4865,6 +4865,13 @@ including authority `/2`. It binds archival inventories without changing upload
 transport, tracks, rewards, signed history or clocks. The phase must be
 `reference_reveal` through `first_admission`; completed or revoked authority
 cannot issue this amendment. This option cannot be combined with `model_only`.
+Reviewer configuration accepts original cohorts only with this storage-only
+candidate; ordinary transport adoption remains restricted to later cohorts.
+Reuse each service account's own completed byte checks. Portable exports retain
+their original UID binding and cannot transfer verification between independent
+reviewers. Repair only missing facts under the receiving reviewer's account.
+Generation-store SQLite contention at transaction start or commit is a retryable
+busy condition after rollback; retain completed facts and use bounded retries.
 
 Use the same preflight, fenced census, reservation, quorum and commit routes
 described below. Preserve the retained intake seal and phase decision evidence

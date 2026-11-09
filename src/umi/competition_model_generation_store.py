@@ -82,6 +82,21 @@ def _triggers():
 
 
 class _GenerationIndex(RoundJournal):
+    @contextmanager
+    def transaction(self, **options):
+        try:
+            with super().transaction(**options) as db:
+                yield db
+        except sqlite3.OperationalError as error:
+            if not is_sqlite_contention(error):
+                raise
+            # The native transaction has rolled back and closed. A concurrent
+            # reader can delay DELETE-mode commit as well as a writer delaying
+            # BEGIN; neither case is damaged verification evidence.
+            raise ModelGenerationOwnerBusy(
+                "model generation transaction awaits a live reader or writer"
+            ) from error
+
     def _validate_existing(self, binding):
         rollback = Path(str(self.path) + "-journal")
         if rollback.exists():

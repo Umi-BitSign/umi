@@ -80,6 +80,57 @@ def config_for(value, root):
     )
 
 
+@pytest.mark.parametrize("storage_only", [False, True])
+def test_original_cohort_candidate_requires_archival_scope(selected, tmp_path, storage_only):
+    from umi.competition_cohort_model_delivery_candidate import ModelDeliveryAdoptionCandidateConfig
+
+    from .test_competition_cohort_review_budget import profile, select
+
+    config = selected.config
+    plan = next(plan for plan in config.series.cohorts if plan.sequence == 5)
+    root = tmp_path / "archival-candidate"
+    candidate = ModelDeliveryAdoptionCandidateConfig.model_validate_json(
+        canonical_json_bytes(
+            dict(
+                schema="umi-model-delivery-adoption-candidate/1",
+                source=dict(
+                    schema="umi-legacy-model-storage-source/1",
+                    cohort_sha256=digest(plan),
+                    directory=str(root / "originals"),
+                    baseline_model_sha256="ab" * 32,
+                ),
+                delivery=dict(
+                    schema="umi-model-delivery-profile/1",
+                    mechanism="coordinator_chunked_v1"
+                    if storage_only
+                    else "direct_r2_multipart_v1",
+                    **(
+                        {}
+                        if storage_only
+                        else dict(
+                            part_size_bytes=64 * 1024**2,
+                            maximum_concurrent_parts=4,
+                            capability_ttl_seconds=3600,
+                        )
+                    ),
+                ),
+                r2_credentials_file=str(root / "credentials"),
+                r2_bucket="model-archive",
+                verification_directory=str(root / "verification"),
+                storage_only=storage_only,
+            )
+        )
+    )
+    configured = config.model_copy(update={"model_delivery_adoption_candidates": (candidate,)})
+    if storage_only:
+        loaded = select(configured, profile(config.policy))
+        assert loaded.model_delivery_adoption_candidates == (candidate,)
+        assert loaded.series == config.series
+    else:
+        with pytest.raises(ValueError, match="must be storage-only"):
+            select(configured, profile(config.policy))
+
+
 async def test_reserved_startup_covers_provider_and_benchmark_then_releases(
     selected, providers, provisioned, monkeypatch, tmp_path
 ):
