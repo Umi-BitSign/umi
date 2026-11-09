@@ -5405,8 +5405,18 @@ held entirely by active consumer leases still reports its existing capacity
 error. Each retained fetch checks its original generation and rechecks recorded
 damage before installing bytes. This changes transport scheduling, not proof
 acceptance, signed inputs, receipt formats or the native verification ABI.
-The caller still owns read concurrency and its frame budget; this transport
-change does not add history prefetch workers or enlarge an installed profile.
+The history owner overlaps retained-frame downloads within its selected count
+and byte window. Each unfinished read reserves a maximum-size frame; completed
+frames retain their actual byte charge until the batch is applied. A two-frame
+byte budget permits two initial downloads together, but retained bytes can limit
+later lookahead to one read. Native verification starts as soon as the next
+ordered frame and its ancestry are ready; it does not wait for the whole batch.
+Gaps, completed checkpoints and failed inputs stop further read admission.
+Shutdown drains started reads and native work, retains successful checkpoints,
+and releases discarded prefetched encodings. Only the ordered owner updates the
+visible preparation stage and applies history effects. This uses the installed
+profile's existing limits; a source qualification alone does not establish a
+deployed throughput improvement.
 
 Model-cache restoration reads file identities and verification receipts in one
 owned worker scan. The event loop remains available to schedule other challenge

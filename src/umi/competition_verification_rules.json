@@ -518,7 +518,7 @@
     "competition_reward_history_origin.py": "a6e099be00f8de26be073427a97db7295ba9eff3f941485b7b168f181318a00e",
     "competition_reward_history_origin_cli.py": "9bae1fda847604565da7d71c6e260c5094faedeaf25c69e86942152a8f694416",
     "competition_reward_history_origin_migration.py": "feeca16b337e2fb651c1741fd8501e3d463d85d1dec4b8425ff758c999804294",
-    "competition_reward_history_parallel.py": "83da9709b14fc912d0074a3191889611530c9ceda8dee5017039387dd078dee4",
+    "competition_reward_history_parallel.py": "0289a26566781389d753aad0efc7c61ffb68725d84859b6201ac0b14e47e8245",
     "competition_reward_history_preparation.py": "07335d0a6f9aa6dcadf39ef6d750fc43c7221f5627010ffde9c04f80e8e6e33f",
     "competition_reward_history_preparation_capacity.py": "ae3abed34623c90b76778d56b9c56fe91a94958ed2450fdcc66876dceabbbfba",
     "competition_reward_history_preparation_capacity_cli.py": "49db8627e7a74e5d24f07b0fe1293d1d33a3a6729e46b12fb914a4d1dce3f3f9",

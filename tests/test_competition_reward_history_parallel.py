@@ -510,6 +510,29 @@ async def test_retained_prefetch_reserves_a_maximum_frame_before_loading(
     assert max(count for count, _ in pending) < 4
 
 
+async def test_retained_frame_downloads_overlap_within_selected_byte_budget(
+    parallel_case, monkeypatch
+):
+    h = parallel_case
+    h.reader.verification_profile = profile(workers=2, maximum_in_flight=4)
+    first = h.reader.first_block
+    load = h.reader._load
+    both_started = threading.Barrier(2, timeout=3)
+    loaded = []
+
+    def overlapping_load(height):
+        if height in (first, first + 1):
+            both_started.wait()
+        fields = load(height)
+        loaded.append(height)
+        return fields
+
+    monkeypatch.setattr(h.reader, "_load", overlapping_load)
+    assert await h.reader.advance(h.item.provider, through_block=h.end) == h.expected
+    assert sorted(loaded) == sorted(h.frames)
+    assert not h.reader._prepared_encodings and not h.reader._source_tokens
+
+
 async def test_one_frame_byte_window_does_not_prefetch_fresh_capture(history_case, monkeypatch):
     h = history_case
     first = h.reader.first_block
@@ -683,16 +706,19 @@ async def test_loading_next_frame_overlaps_started_native_work(parallel_case, mo
     h = parallel_case
     first = h.reader.first_block
     submitted = []
+    first_started = threading.Event()
     submit, load = HistoryWorkers.submit, h.reader._load
 
     def started(pool, **kw):
         result = submit(pool, **kw)
         submitted.append(kw["snapshot"].block_number)
+        if kw["snapshot"].block_number == first:
+            first_started.set()
         return result
 
     def checked(height):
         if height == first + 1:
-            assert first in submitted, "the first native worker waited for the whole input batch"
+            assert first_started.wait(3), "native verification waited for the whole input batch"
         return load(height)
 
     monkeypatch.setattr(HistoryWorkers, "submit", started)
@@ -733,7 +759,15 @@ async def test_cancel_during_next_frame_load_drains_loader_and_native_worker(
     first = h.reader.first_block
     loop = asyncio.get_running_loop()
     loading, release = asyncio.Event(), threading.Event()
+    started = asyncio.Event()
     load = h.reader._load
+    submit = HistoryWorkers.submit
+
+    def submitted(pool, **kw):
+        result = submit(pool, **kw)
+        if kw["snapshot"].block_number == first:
+            started.set()
+        return result
 
     def blocked(height):
         if height == first + 1:
@@ -743,10 +777,12 @@ async def test_cancel_during_next_frame_load_drains_loader_and_native_worker(
         return load(height)
 
     monkeypatch.setattr(h.reader, "_load", blocked)
+    monkeypatch.setattr(HistoryWorkers, "submit", submitted)
     task = asyncio.create_task(h.reader.advance(h.item.provider, through_block=h.end))
     close = None
     try:
         await asyncio.wait_for(loading.wait(), timeout=15)
+        await asyncio.wait_for(started.wait(), timeout=15)
         close = asyncio.create_task(h.item.provider.aclose())
         task.cancel()
         await asyncio.sleep(0)
@@ -795,11 +831,14 @@ async def test_streamed_import_persists_exports_and_restarts_without_payload_rea
 
     h.reader = open_reader()
     submitted = set()
+    first_started = threading.Event()
     submit, read = HistoryWorkers.submit, imported.read
 
     def started(pool, **kw):
         result = submit(pool, **kw)
         submitted.add(kw["snapshot"].block_number)
+        if kw["snapshot"].block_number == original.first_block:
+            first_started.set()
         return result
 
     second_key = history_archive_key(
@@ -808,7 +847,7 @@ async def test_streamed_import_persists_exports_and_restarts_without_payload_rea
 
     def checked(kind, key, **kw):
         if key == second_key:
-            assert original.first_block in submitted
+            assert first_started.wait(3), "native verification waited for the whole archive batch"
         return read(kind, key, **kw)
 
     monkeypatch.setattr(HistoryWorkers, "submit", started)
