@@ -88,6 +88,12 @@ Projected execution totals assume the undelivered orders match delivered profile
 An execution ETA covers evaluations only; certification and reward activation are
 separate. `overall_eta_seconds: null` means no end-to-end forecast is established.
 
+During requests, a fresh execution count remains the current stage while routine
+progress preparation, sampling or lock waits run. Their details remain available
+in `components.work`. Sampling stalls and repairs, phase-review quorums and later
+settlement retain their own progress. Missing or stale execution observations do
+not hide fresh sampling work. This selection uses the existing progress schema.
+
 Execution rates use completed models within the currently observed evaluator
 processes, identified by `rate_epoch_sha256`. `rate_completed_models` and
 `rate_sample_seconds` describe that sample only. An evaluator restart, rollout,
