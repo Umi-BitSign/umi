@@ -55,6 +55,7 @@ async def native(execution, tmp_path, monkeypatch):
         owner_origin="https://owner.example",
         review_timeout_seconds=30,
         request_replay_bytes=1024**3,
+        eligible_tracks=("endpoint", "model"),
     )
 
     def history(request):
